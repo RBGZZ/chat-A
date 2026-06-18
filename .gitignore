@@ -1,0 +1,23 @@
+﻿# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build output
+_build/
+__pycache__/
+*.pyc
+
+# Temp files
+*.tmp
+*.log
+
+# Reference materials (not for upload)
+reference/
