@@ -29,5 +29,10 @@ __pycache__/
 .env.local
 .env.*.local
 
+# Local SQLite memory store (runtime data, not for upload)
+*.db
+*.db-wal
+*.db-shm
+
 # Reference materials (not for upload)
 reference/

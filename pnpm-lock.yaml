@@ -23,6 +23,9 @@ importers:
 
   packages/client:
     dependencies:
+      '@chat-a/memory':
+        specifier: workspace:*
+        version: link:../memory
       '@chat-a/observability':
         specifier: workspace:*
         version: link:../observability
@@ -34,6 +37,12 @@ importers:
         version: link:../runtime
 
   packages/cognition:
+    dependencies:
+      '@chat-a/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
+  packages/memory:
     dependencies:
       '@chat-a/protocol':
         specifier: workspace:*
@@ -73,6 +82,9 @@ importers:
       '@chat-a/cognition':
         specifier: workspace:*
         version: link:../cognition
+      '@chat-a/memory':
+        specifier: workspace:*
+        version: link:../memory
       '@chat-a/observability':
         specifier: workspace:*
         version: link:../observability

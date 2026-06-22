@@ -3,6 +3,7 @@ import { stdin, stdout, env } from 'node:process';
 import { Conversation, LightVoiceBus } from '@chat-a/runtime';
 import { createLlm, loadLlmConfig } from '@chat-a/providers';
 import { initTelemetry } from '@chat-a/observability';
+import { createMemoryStoreFromEnv } from '@chat-a/memory';
 
 /**
  * chat-A 文字版 MVP REPL(瘦客户端的文字形态,承 §9)。
@@ -12,13 +13,16 @@ async function main(): Promise<void> {
   const cfg = loadLlmConfig();
   const llm = createLlm(cfg);
   const bus = new LightVoiceBus();
-  const convo = new Conversation({ bus, llm });
+  // 记忆按配置装配(默认 SQLite 真相源,跨重启记得;CHAT_A_MEMORY_BACKEND=memory 可退回内存)。
+  const mem = createMemoryStoreFromEnv();
+  const convo = new Conversation({ bus, llm, memory: mem.store });
 
   // OTel 追踪骨架(§8.1):默认不开以免刷屏;设 CHAT_A_TRACE=1 打开控制台 span 树。
   const traceOn = (env['CHAT_A_TRACE'] ?? '').length > 0;
   const telemetry = traceOn ? initTelemetry({ console: true }) : undefined;
 
   stdout.write(`chat-A · 文字版 MVP  [provider=${cfg.provider} model=${cfg.model}]\n`);
+  stdout.write(`记忆: ${mem.backend}${mem.dbPath ? ` (${mem.dbPath})` : ''}\n`);
   if (traceOn) stdout.write('(OTel trace 已开:每回合在控制台输出 turn→llm span。)\n');
   if (cfg.provider === 'fake') {
     stdout.write('(未检测到 ANTHROPIC_API_KEY → FakeLLM 占位。设 ANTHROPIC_API_KEY 用真 Claude;\n');
@@ -49,6 +53,7 @@ async function main(): Promise<void> {
     if (!closed) rl.prompt();
   }
 
+  mem.store.close();
   await telemetry?.shutdown();
 }
 
