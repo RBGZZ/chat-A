@@ -3,7 +3,13 @@ import { SpanStatusCode } from '@opentelemetry/api';
 import { makeBusEvent, type ChatMessage } from '@chat-a/protocol';
 import type { LlmProvider } from '@chat-a/providers';
 import { buildSystemPrompt } from '@chat-a/cognition';
-import { InMemoryMemoryStore, type MemoryRecord, type MemoryStore } from '@chat-a/memory';
+import {
+  InMemoryMemoryStore,
+  NoopMemoryExtractor,
+  type MemoryExtractor,
+  type MemoryRecord,
+  type MemoryStore,
+} from '@chat-a/memory';
 import {
   PersonaEngine,
   XIAOXUE_SEED,
@@ -29,6 +35,8 @@ export interface ConversationDeps {
   readonly appraiser?: Appraiser;
   /** 人格状态持久化(§6.1);默认进程内,配置可换 SQLite KV。 */
   readonly personaStore?: PersonaStore;
+  /** 记忆抽取接缝;提供则回合后用它抽取要点(替换 naive 存原话),默认不抽取。 */
+  readonly memoryExtractor?: MemoryExtractor;
   readonly sessionId?: string;
 }
 
@@ -43,6 +51,8 @@ export class Conversation {
   readonly #llm: LlmProvider;
   readonly #memory: MemoryStore;
   readonly #persona: PersonaEngine;
+  readonly #extractor: MemoryExtractor;
+  readonly #extractEnabled: boolean;
   readonly #skeleton: string;
   readonly #sessionId: string;
   #turnSeq = 0;
@@ -58,6 +68,9 @@ export class Conversation {
       ...(deps.appraiser ? { appraiser: deps.appraiser } : {}),
       ...(deps.personaStore ? { store: deps.personaStore } : {}),
     });
+    // 注入了抽取器 → 用抽取的要点;否则保持 naive "存用户原话"(默认行为不变)。
+    this.#extractEnabled = deps.memoryExtractor !== undefined;
+    this.#extractor = deps.memoryExtractor ?? new NoopMemoryExtractor();
     this.#sessionId = deps.sessionId ?? randomUUID().slice(0, 8);
   }
 
@@ -77,6 +90,20 @@ export class Conversation {
     return parts.join('\n\n');
   }
 
+  /** 回合后写记忆:启用抽取器则写抽取要点(失败跳过);否则 naive 存用户原话(§3.2 降级)。 */
+  async #writeMemories(userText: string, reply: string, atMs: number): Promise<void> {
+    if (this.#extractEnabled) {
+      try {
+        const items = await this.#extractor.extract(userText, reply);
+        for (const it of items) this.#memory.addMemory(it);
+      } catch {
+        /* 抽取失败:跳过本轮抽取,回合不受影响 */
+      }
+      return;
+    }
+    this.#memory.addMemory({ text: userText, kind: 'user_utterance', sourceSession: this.#sessionId, createdAtMs: atMs });
+  }
+
   async send(userText: string, onToken: (token: string) => void): Promise<string> {
     const turnId = `t${++this.#turnSeq}`;
     const correlationId = `${this.#sessionId}/${turnId}/0`;
@@ -88,8 +115,8 @@ export class Conversation {
         turnSpan.setAttribute(CHAT_A.SESSION_ID, this.#sessionId);
         turnSpan.setAttribute(CHAT_A.TURN_ID, turnId);
         this.#bus.emit(makeBusEvent('turn:start', { startedAtMs: Date.now() }, correlationId));
-        // 情绪步进(appraise → spring → 持久化),拿到本轮 tone fragment。
-        const mood = this.#persona.observe(userText);
+        // 回合前:读当前心情渲染本轮 tone(不改状态;情绪推进留到回合后,保首字零额外延迟)。
+        const mood = this.#persona.tone();
         turnSpan.setAttribute('chat_a.emotion', mood.emotion);
         const userMsg: ChatMessage = { role: 'user', content: userText };
         const system = this.#composeSystem(userText, mood.toneFragment);
@@ -118,7 +145,7 @@ export class Conversation {
               llmSpan.end();
             }
           });
-          // 回合收尾落库(不阻塞流式首字)。用户输入暂作最朴素记忆来源(P1,待抽取器替换)。
+          // 回合收尾落库(不阻塞流式首字)。
           const at = Date.now();
           this.#memory.appendMessage({
             sessionId: this.#sessionId,
@@ -136,7 +163,14 @@ export class Conversation {
             createdAtMs: at,
             correlationId,
           });
-          this.#memory.addMemory({ text: userText, kind: 'user_utterance', sourceSession: this.#sessionId, createdAtMs: at });
+          // 情绪推进(影响下一轮);appraiser 内部已自带降级,这里再兜一层不打断回合(§3.2)。
+          try {
+            await this.#persona.advance(userText);
+          } catch {
+            /* 心情本轮不更新,回合继续 */
+          }
+          // 记忆来源:有抽取器 → 抽要点入库(失败跳过);否则 naive 存用户原话(默认)。
+          await this.#writeMemories(userText, reply, at);
           this.#bus.emit(makeBusEvent('turn:end', { reason: 'completed', atMs: Date.now() }, correlationId));
           turnSpan.setStatus({ code: SpanStatusCode.OK });
           return reply;

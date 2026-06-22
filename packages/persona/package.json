@@ -11,5 +11,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@chat-a/providers": "workspace:*"
+  }
 }

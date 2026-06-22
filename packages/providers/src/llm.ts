@@ -17,4 +17,9 @@ export interface LlmProvider {
   readonly model: string;
   /** 流式输出文本增量。 */
   stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<string>;
+  /**
+   * 非流式补全:返回完整文本(用于情绪评估/记忆抽取等"要 JSON"的短调用)。
+   * 仍厂商无感;调用方据提示约定 JSON,再用 tolerantJsonParse 容错解析。
+   */
+  complete(req: LlmRequest, signal?: AbortSignal): Promise<string>;
 }

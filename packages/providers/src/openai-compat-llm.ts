@@ -30,11 +30,35 @@ export class OpenAiCompatLlm implements LlmProvider {
     this.#maxTokens = opts.maxTokens ?? 1024;
   }
 
-  async *stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<string> {
-    const messages = [
+  #buildMessages(req: LlmRequest): Array<{ role: string; content: string }> {
+    return [
       ...(req.system ? [{ role: 'system', content: req.system }] : []),
       ...req.messages.map((m) => ({ role: m.role, content: m.content })),
     ];
+  }
+
+  async complete(req: LlmRequest, signal?: AbortSignal): Promise<string> {
+    const res = await fetch(`${this.#baseURL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${this.#apiKey}` },
+      body: JSON.stringify({
+        model: this.model,
+        messages: this.#buildMessages(req),
+        stream: false,
+        max_tokens: req.maxTokens ?? this.#maxTokens,
+      }),
+      ...(signal ? { signal } : {}),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`${this.id} HTTP ${res.status} ${res.statusText}${detail ? `: ${detail.slice(0, 500)}` : ''}`);
+    }
+    const data = (await res.json()) as { choices?: ReadonlyArray<{ message?: { content?: string | null } }> };
+    return data.choices?.[0]?.message?.content ?? '';
+  }
+
+  async *stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<string> {
+    const messages = this.#buildMessages(req);
 
     const res = await fetch(`${this.#baseURL}/chat/completions`, {
       method: 'POST',

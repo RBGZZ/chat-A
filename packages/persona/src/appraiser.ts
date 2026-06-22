@@ -26,7 +26,7 @@ export class DefaultAppraiser implements Appraiser {
     this.#unit = opts.unit ?? 0.4;
   }
 
-  appraise(ctx: AppraiseContext): PadPull {
+  async appraise(ctx: AppraiseContext): Promise<PadPull> {
     const text = ctx.userText.toLowerCase();
     let pos = 0;
     let neg = 0;

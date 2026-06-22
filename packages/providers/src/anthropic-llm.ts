@@ -23,6 +23,23 @@ export class AnthropicLlm implements LlmProvider {
     this.#client = opts.apiKey ? new Anthropic({ apiKey: opts.apiKey }) : new Anthropic();
   }
 
+  async complete(req: LlmRequest, signal?: AbortSignal): Promise<string> {
+    // 非流式补全(claude-api 技能:messages.create + 按 type 收 text 块)。短输出场景。
+    const msg = await this.#client.messages.create(
+      {
+        model: this.model,
+        max_tokens: req.maxTokens ?? this.#maxTokens,
+        system: req.system,
+        messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
+      },
+      signal ? { signal } : undefined,
+    );
+    return msg.content
+      .filter((b): b is Extract<typeof b, { type: 'text' }> => b.type === 'text')
+      .map((b) => b.text)
+      .join('');
+  }
+
   async *stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<string> {
     const stream = this.#client.messages.stream(
       {

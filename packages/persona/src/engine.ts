@@ -1,14 +1,13 @@
-import type { Appraiser, Emotion, Pad, PersonaConfig, PersonaSeed, PersonaSnapshot, PersonaStore } from './types';
+import type { Appraiser, Emotion, PersonaConfig, PersonaSeed, PersonaSnapshot, PersonaStore } from './types';
 import { DEFAULT_PERSONA_CONFIG } from './defaults';
 import { oceanToPadBaseline, padToEmotion, stepPad } from './numeric';
 import { renderToneFragment } from './tone';
 import { DefaultAppraiser } from './appraiser';
 import { InMemoryPersonaStore } from './store';
 
-export interface PersonaTurn {
+export interface ToneView {
   readonly emotion: Emotion;
   readonly toneFragment: string;
-  readonly pad: Pad;
 }
 
 export interface PersonaEngineOptions {
@@ -47,15 +46,23 @@ export class PersonaEngine {
     return this.#snapshot;
   }
 
-  /** 观察一条用户输入:appraise → spring 步进 → 持久化 → 返回本轮情绪与 tone。 */
-  observe(userText: string): PersonaTurn {
+  /** 读当前心情渲染的情绪 + tone(纯,不改状态;回合前用)。 */
+  tone(): ToneView {
+    const dials = this.#seed.dials;
+    return {
+      emotion: padToEmotion(this.#snapshot.pad),
+      toneFragment: renderToneFragment(this.#snapshot.pad, dials),
+    };
+  }
+
+  /** 推进情绪:appraise(异步)→ spring 步进 → 持久化(回合后用)。 */
+  async advance(userText: string): Promise<void> {
     const dials = this.#seed.dials;
     const turn = this.#snapshot.turn + 1;
     const baseline = oceanToPadBaseline(this.#snapshot.ocean, dials);
-    const pull = this.#appraiser.appraise({ userText, pad: this.#snapshot.pad, turn });
+    const pull = await this.#appraiser.appraise({ userText, pad: this.#snapshot.pad, turn });
     const pad = stepPad({ pad: this.#snapshot.pad, pull, baseline, dials, turn, config: this.#config });
     this.#snapshot = { ocean: this.#snapshot.ocean, pad, turn };
     this.#store.save(this.#snapshot);
-    return { emotion: padToEmotion(pad), toneFragment: renderToneFragment(pad, dials), pad };
   }
 }

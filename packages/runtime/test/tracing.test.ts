@@ -53,6 +53,9 @@ describe('runtime/tracing(OTel 骨架 §8.1)', () => {
       async *stream(): AsyncIterable<string> {
         throw new Error('llm 挂了');
       },
+      async complete(): Promise<string> {
+        return '';
+      },
     };
 
     const bus = new LightVoiceBus();

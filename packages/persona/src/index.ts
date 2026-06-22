@@ -3,6 +3,7 @@ export * from './defaults';
 export * from './numeric';
 export * from './tone';
 export * from './appraiser';
+export * from './llm-appraiser';
 export * from './store';
 export * from './seed';
 export * from './engine';

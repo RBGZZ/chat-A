@@ -48,6 +48,9 @@ describe('providers/registry(开放扩展:加厂商不改核心)', () => {
       async *stream() {
         yield 'echo';
       },
+      async complete() {
+        return 'echo';
+      },
     };
     registerLlm('echo', () => echo);
     const llm = createLlm({ provider: 'echo', model: 'echo-1' });

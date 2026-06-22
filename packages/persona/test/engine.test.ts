@@ -23,22 +23,23 @@ describe('persona/tone: 心情影响语气文本', () => {
 });
 
 describe('persona/appraiser: 默认确定性评估', () => {
-  it('正向文本上拉愉悦,负向下拉并升唤醒,中性零拉力', () => {
+  it('正向文本上拉愉悦,负向下拉并升唤醒,中性零拉力', async () => {
     const a = new DefaultAppraiser();
-    expect(a.appraise({ userText: '谢谢你，好喜欢', pad: { pleasure: 0, arousal: 0, dominance: 0 }, turn: 1 }).pleasure).toBeGreaterThan(0);
-    const neg = a.appraise({ userText: '你好烦，讨厌', pad: { pleasure: 0, arousal: 0, dominance: 0 }, turn: 1 });
+    const ctx = { pad: { pleasure: 0, arousal: 0, dominance: 0 }, turn: 1 };
+    expect((await a.appraise({ userText: '谢谢你，好喜欢', ...ctx })).pleasure).toBeGreaterThan(0);
+    const neg = await a.appraise({ userText: '你好烦，讨厌', ...ctx });
     expect(neg.pleasure).toBeLessThan(0);
     expect(neg.arousal).toBeGreaterThan(0);
-    expect(a.appraise({ userText: '今天几号', pad: { pleasure: 0, arousal: 0, dominance: 0 }, turn: 1 })).toEqual({ pleasure: 0, arousal: 0, dominance: 0 });
+    expect(await a.appraise({ userText: '今天几号', ...ctx })).toEqual({ pleasure: 0, arousal: 0, dominance: 0 });
   });
 
-  it('可注入自定义 Appraiser 替换', () => {
-    const fixed: Appraiser = { appraise: () => ({ pleasure: -0.9, arousal: 0, dominance: 0 }) };
+  it('可注入自定义 Appraiser 替换', async () => {
+    const fixed: Appraiser = { appraise: () => Promise.resolve({ pleasure: -0.9, arousal: 0, dominance: 0 }) };
     const engine = new PersonaEngine({ seed: XIAOXUE_SEED, appraiser: fixed });
-    const t1 = engine.observe('随便说点');
-    // 连续负拉力应把心情压低
-    engine.observe('再来一句');
-    expect(engine.current().pad.pleasure).toBeLessThan(t1.pad.pleasure);
+    await engine.advance('随便说点');
+    const p1 = engine.current().pad.pleasure;
+    await engine.advance('再来一句');
+    expect(engine.current().pad.pleasure).toBeLessThan(p1); // 连续负拉力压低心情
   });
 });
 
@@ -62,17 +63,17 @@ describe('persona/engine: 持久化与跨重启', () => {
     expect(Number.isFinite(engine.current().pad.pleasure)).toBe(true);
   });
 
-  it('跨重启续接 PAD(经 KvLike 持久化)', () => {
+  it('跨重启续接 PAD(经 KvLike 持久化)', async () => {
     const kv: KvLike = (() => {
       const m = new Map<string, string>();
       return { getState: (k) => m.get(k), setState: (k, v) => void m.set(k, v) };
     })();
     const store = createKvPersonaStore(kv);
-    const neg: Appraiser = { appraise: () => ({ pleasure: -0.8, arousal: 0.3, dominance: 0 }) };
+    const neg: Appraiser = { appraise: () => Promise.resolve({ pleasure: -0.8, arousal: 0.3, dominance: 0 }) };
 
     const e1 = new PersonaEngine({ seed: XIAOXUE_SEED, store, appraiser: neg });
-    e1.observe('烦');
-    e1.observe('真烦');
+    await e1.advance('烦');
+    await e1.advance('真烦');
     const saved = e1.current();
 
     // 重建引擎(模拟重启),应从持久化续接而非回到基线

@@ -74,9 +74,9 @@ export interface AppraiseContext {
   readonly turn: number;
 }
 
-/** 情绪评估接缝(§3.1):每轮产出 PAD 拉力。可替换(默认确定性 / 未来 LLM)。 */
+/** 情绪评估接缝(§3.1):每轮产出 PAD 拉力。异步以容纳 LLM 实现;确定性实现返回已决议 Promise。 */
 export interface Appraiser {
-  appraise(ctx: AppraiseContext): PadPull;
+  appraise(ctx: AppraiseContext): Promise<PadPull>;
 }
 
 /** 人格状态持久化接缝。 */

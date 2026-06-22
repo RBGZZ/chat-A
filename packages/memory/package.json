@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@chat-a/protocol": "workspace:*"
+    "@chat-a/protocol": "workspace:*",
+    "@chat-a/providers": "workspace:*"
   }
 }
