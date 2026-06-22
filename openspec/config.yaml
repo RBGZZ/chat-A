@@ -1,20 +1,54 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# Project context — shown to AI when creating artifacts.
+context: |
+  chat-A(代号"小雪")——实时语音对话陪伴 Agent。北极星:模拟真实人类交流,做
+  「长期伴侣(partner)」而非「谈话助手(assistant)」;有性格/情绪/记忆/自我,会主动、
+  会反对、会有边界。人格由用户自定义(用户自治,设计者不强加道德监护)。
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  权威设计:docs/chat-a-canonical-design.md(Canonical,唯一权威,冲突以它为准)。
+  深读附录:docs/{neuro-ecosystem,voice-infra,memory-frameworks}-findings-2026-06-22.md
+  + reference-code-findings-2026-06-18.md(公式/file:line)。
+
+  技术栈:Node.js + TypeScript 严格模式 + ESM;pnpm workspaces monorepo(packages/*:
+  protocol/gateway/runtime/providers/cognition/client);测试 Vitest。SQLite 为唯一真相源
+  (system-of-record);向量库/Redis 为可重建派生层。部署:客户端-服务端分离(瘦终端 +
+  服务端"大脑"),最终上树莓派等嵌入式 + PC。
+
+  关键架构(canonical):
+  - runtime 分层(§4.2):B 层 Pipecat 式帧管线(四态帧+双队列,runtime 内流式)/
+    A 层事件总线 LightVoiceBus(跨模块粗粒度,deepFreeze+订阅者隔离+traceId)/
+    C 层优先级回合调度。A 层走 BusEvent,B 层走 Frame,类型层分开,勿串层。
+  - 工具/能力协议(§3.3/§12):模型侧 Anthropic 原生 tool-use;能力侧锚定 MCP;
+    Neuro SDK 专有 force/priority 等暂挂(🅽 不实现)。
+  - 记忆(§5):三层认知记忆 + 统一衰减 0.5^(days/H) + 混合召回(语义+FTS+情感共振);
+    写路径热路径 ADD+去重,update/delete 移离线巩固;避开 Letta agentic 工具调用记忆。
+  - 人格(§6):OCEAN+PAD 数值内核 + 冷启动 + delta 演化 + 用户可调旋钮(含 interaction_dials)。
+  - 可追溯(§8.1):OTel 做骨架(AsyncLocalStorage=context),两层——OTel 实时观测 /
+    SQLite 决策 trace 持久可重放,同 trace_id/span_id 缝合。
+
+  核心开发原则(§3.1/§3.2,务必遵循):
+  1. 模块化/接缝:模块只依赖类型化接口 + protocol 共享类型,绝不 import 别模块内部;
+     每个边界写契约测试,重写后用同套契约验收(爆炸半径可控)。
+  2. 可测试性:确定性内核(记忆打分/PAD/路由/过滤/分句)写 golden test;LLM 走 schema
+     约束 + record-replay;能用代码算的绝不交给 LLM。
+  3. 延迟预算:实时语音命门,流式贯穿全链,新功能加延迟必须论证。
+  4. 优雅降级:任一外部依赖失败都降级,绝不硬崩/无解释沉默;每个 await 配超时+兜底。
+  5. 行为即配置:阈值/权重/模型/人格 prompt 全外置,prompt 版本化可热调;杜绝 magic number;
+     单一权威公式(勿引入多套漂移)。
+  6. 数据迁移纪律:schema 带版本 + 迁移脚本;长期记忆/关系/人格绝不因 schema 变更丢失。
+
+  约定:文档与代码注释用中文;reference/ 为研究素材(已 .gitignore,不提交);
+  当前阶段 §9 P0(地基:protocol 已落地;next 是 runtime LightVoiceBus → 帧管线)。
+
+# Per-artifact rules
+rules:
+  proposal:
+    - 用中文撰写。
+    - 标注影响的 canonical 章节/接缝(如 §3.3/§4.2/§5),与权威设计冲突时先说明。
+    - 含 Non-goals;若涉及实时语音,说明对延迟预算(§3.2)的影响。
+    - 尊重已锁决策:Anthropic tool-use+MCP、Pipecat 帧管线、SQLite 真相源、Neuro 专有机制暂挂(🅽)。
+  tasks:
+    - 每个功能/修复带契约测试或 golden test(§3.2);确定性内核不交给 LLM。
+    - 跨模块只经 protocol 类型 + 事件总线,不 import 别模块内部(§3.1)。
+    - 外部依赖配超时+降级路径(§3.2 优雅降级);关联 ID 贯穿、可追溯(§8.1)。
