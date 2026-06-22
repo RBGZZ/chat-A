@@ -1,0 +1,14 @@
+{
+  "name": "@chat-a/client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@chat-a/runtime": "workspace:*",
+    "@chat-a/providers": "workspace:*"
+  }
+}
