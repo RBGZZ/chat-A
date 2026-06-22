@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@chat-a/memory": "workspace:*",
     "@chat-a/persona": "workspace:*",
     "@chat-a/protocol": "workspace:*"
   }

@@ -1,8 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { makeBusEvent, type ChatMessage } from '@chat-a/protocol';
+import { makeBusEvent } from '@chat-a/protocol';
 import type { LlmProvider } from '@chat-a/providers';
-import { buildSystemPrompt } from '@chat-a/cognition';
+import {
+  buildSystemPrompt,
+  PromptAssembler,
+  PersonaSkeletonContributor,
+  MemoryRecallContributor,
+  ToneContributor,
+  type AssembledPrompt,
+} from '@chat-a/cognition';
 import {
   InMemoryMemoryStore,
   NoopMemoryExtractor,
@@ -54,6 +61,7 @@ export class Conversation {
   readonly #extractor: MemoryExtractor;
   readonly #extractEnabled: boolean;
   readonly #skeleton: string;
+  readonly #assembler: PromptAssembler;
   readonly #sessionId: string;
   #turnSeq = 0;
 
@@ -63,6 +71,12 @@ export class Conversation {
     this.#memory = deps.memory ?? new InMemoryMemoryStore();
     const seed = deps.personaSeed ?? XIAOXUE_SEED;
     this.#skeleton = buildSystemPrompt(seed);
+    // 构造期建好 assembler(注册三个内置 contributor),实例稳定供 KV 复用(§5.4)。
+    this.#assembler = new PromptAssembler([
+      new PersonaSkeletonContributor(),
+      new MemoryRecallContributor(),
+      new ToneContributor(),
+    ]);
     this.#persona = new PersonaEngine({
       seed,
       ...(deps.appraiser ? { appraiser: deps.appraiser } : {}),
@@ -74,20 +88,25 @@ export class Conversation {
     this.#sessionId = deps.sessionId ?? randomUUID().slice(0, 8);
   }
 
-  /** 组装本轮 system:静态骨架 → 召回记忆块 → 当轮 tone fragment(§6.1)。召回失败走空(§3.2)。 */
-  #composeSystem(userText: string, toneFragment: string): string {
+  /**
+   * 组装本轮 prompt(§5.4):构造 PromptContext(骨架/召回/tone/userText/history=snapshot())
+   * 委托 assembler 产出 { system, messages }。召回失败走空(§3.2,保留现有降级);
+   * 取数在编排层、assembler 不直接碰 MemoryStore(接缝边界,§3.1)。
+   */
+  #composeSystem(userText: string, toneFragment: string): AssembledPrompt {
     let recalled: readonly MemoryRecord[] = [];
     try {
       recalled = this.#memory.recall(userText);
     } catch {
       recalled = [];
     }
-    const parts = [this.#skeleton];
-    if (recalled.length > 0) {
-      parts.push(`[与当前输入相关的记忆]\n${recalled.map((r) => `- ${r.text}`).join('\n')}`);
-    }
-    parts.push(toneFragment);
-    return parts.join('\n\n');
+    return this.#assembler.assemble({
+      skeleton: this.#skeleton,
+      recalled,
+      toneFragment,
+      userText,
+      history: this.#memory.snapshot(),
+    });
   }
 
   /** 回合后写记忆:启用抽取器则写抽取要点(失败跳过);否则 naive 存用户原话(§3.2 降级)。 */
@@ -118,9 +137,8 @@ export class Conversation {
         // 回合前:读当前心情渲染本轮 tone(不改状态;情绪推进留到回合后,保首字零额外延迟)。
         const mood = this.#persona.tone();
         turnSpan.setAttribute('chat_a.emotion', mood.emotion);
-        const userMsg: ChatMessage = { role: 'user', content: userText };
-        const system = this.#composeSystem(userText, mood.toneFragment);
-        const messages: ChatMessage[] = [...this.#memory.snapshot(), userMsg];
+        // 委托 assembler:system(骨架→记忆→tone)+ messages([...history, userMsg],含 volatile 追加)。
+        const { system, messages } = this.#composeSystem(userText, mood.toneFragment);
         try {
           const reply = await tracer.startActiveSpan('llm', async (llmSpan) => {
             // GenAI 语义约定:id/model 仅供 trace,业务不据此分支(承 Provider 接缝)。

@@ -41,6 +41,9 @@ importers:
 
   packages/cognition:
     dependencies:
+      '@chat-a/memory':
+        specifier: workspace:*
+        version: link:../memory
       '@chat-a/persona':
         specifier: workspace:*
         version: link:../persona
