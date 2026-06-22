@@ -11,9 +11,9 @@ export interface LlmRequest {
 }
 
 export interface LlmProvider {
-  /** provider 标识(如 'anthropic' / 'fake')。 */
+  /** provider 标识(如 'anthropic')——**仅供 trace/日志**(§8.1),业务逻辑不得据此分支。 */
   readonly id: string;
-  /** 当前模型串。 */
+  /** 当前模型串——**仅供 trace/日志**,系统对具体模型无感。 */
   readonly model: string;
   /** 流式输出文本增量。 */
   stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<string>;
