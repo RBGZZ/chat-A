@@ -2,7 +2,8 @@
 
 > 状态:**canonical**(权威设计)。整合自 `real-time-agent-design.md`(架构骨架)+ `superpowers/specs/2026-06-18-embedded-adaptation-design.md`(适配/接缝)+ `chat-a-final-design.md` v2.1(人格/记忆/语音细节)+ 两份调研(`reference-projects-research-*`、`reference-code-findings-*`)。
 > 上述文档自此降级为**细节附录/历史**;本文为唯一权威。冲突以本文为准。
-> 日期:2026-06-19。实现细节(公式/file:line)见 `reference-code-findings-2026-06-18.md`。
+> 日期:2026-06-19 初版;**2026-06-22 大幅增订**——逐个深读 Neuro 生态 / 实时语音 infra(LiveKit·Pipecat)/ OpenTelemetry / 记忆框架(mem0·Letta·OpenMemory·Memoripy),固化:工具协议(§3.3 Anthropic tool-use)、能力侧 MCP 锚定(§3.3/§12 外界交互模块)、Neuro SDK 专有机制暂挂(🅽)、runtime 分层(§4.2 Pipecat 帧管线 + 事件总线 + A/B 事件划分 + 派发语义)、§4 语音算法增量、§5.5/§5.8 记忆打分/写路径、§8.1 OTel 两层追踪。已进入 §9 P0 实现(`packages/protocol` 已落地)。
+> 实现细节(公式/file:line)见 `reference-code-findings-2026-06-18.md` 及三份 `*-findings-2026-06-22.md`(见文末文档索引)。
 
 ---
 
