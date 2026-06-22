@@ -62,5 +62,15 @@ export function runMemoryStoreContract(name: string, make: MakeStore): void {
       expect(s.recall('')).toEqual([]);
       s.close();
     });
+
+    it('KV 读写:写入可读、同 key 覆盖、缺失为 undefined', () => {
+      const s = make();
+      expect(s.getState('k')).toBeUndefined();
+      s.setState('k', 'v1');
+      expect(s.getState('k')).toBe('v1');
+      s.setState('k', 'v2');
+      expect(s.getState('k')).toBe('v2');
+      s.close();
+    });
   });
 }

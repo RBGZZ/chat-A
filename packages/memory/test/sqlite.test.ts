@@ -61,6 +61,41 @@ describe('SqliteMemoryStore 持久化 / 迁移 / 降级', () => {
     check.close();
   });
 
+  it('v1→v2 迁移:旧 v1 库升级后保留记忆且 KV 可用', () => {
+    const path = newPath();
+    // 造一个 v1 库:memories 表 + 一行 + schema_version=1(无 kv_state)。
+    const v1 = new DatabaseSync(path);
+    v1.exec(`CREATE TABLE memory_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+    v1.exec(`CREATE TABLE memories(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, normalized_text TEXT NOT NULL UNIQUE,
+      kind TEXT, created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+      hits INTEGER NOT NULL DEFAULT 1, source_session TEXT);`);
+    v1.prepare(`INSERT INTO memories(text, normalized_text, created_at, last_seen_at) VALUES(?, ?, ?, ?)`).run('v1记忆', 'v1记忆', 1, 1);
+    v1.prepare(`INSERT INTO memory_meta(key, value) VALUES('schema_version', '1')`).run();
+    v1.close();
+
+    const store = new SqliteMemoryStore({ path });
+    expect(store.recall('v1记忆').map((r) => r.text)).toEqual(['v1记忆']); // 记忆保留
+    store.setState('persona:snapshot', '{"ok":true}'); // v2 的 kv_state 可用
+    expect(store.getState('persona:snapshot')).toBe('{"ok":true}');
+    store.close();
+
+    const check = new DatabaseSync(path);
+    const v = check.prepare(`SELECT value FROM memory_meta WHERE key='schema_version'`).get();
+    expect(Number(v?.['value'])).toBe(CURRENT_SCHEMA_VERSION);
+    check.close();
+  });
+
+  it('KV 跨重启恢复', () => {
+    const path = newPath();
+    const a = new SqliteMemoryStore({ path });
+    a.setState('persona:snapshot', '{"turn":3}');
+    a.close();
+    const b = new SqliteMemoryStore({ path });
+    expect(b.getState('persona:snapshot')).toBe('{"turn":3}');
+    b.close();
+  });
+
   it('拒绝更高的未知 schema 版本(不损坏库)', () => {
     const path = newPath();
     const db = new DatabaseSync(path);

@@ -15,6 +15,7 @@
     "@chat-a/cognition": "workspace:*",
     "@chat-a/memory": "workspace:*",
     "@chat-a/observability": "workspace:*",
+    "@chat-a/persona": "workspace:*",
     "@chat-a/protocol": "workspace:*",
     "@chat-a/providers": "workspace:*",
     "@opentelemetry/api": "^1.9.1"

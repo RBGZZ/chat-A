@@ -29,6 +29,9 @@ importers:
       '@chat-a/observability':
         specifier: workspace:*
         version: link:../observability
+      '@chat-a/persona':
+        specifier: workspace:*
+        version: link:../persona
       '@chat-a/providers':
         specifier: workspace:*
         version: link:../providers
@@ -38,6 +41,9 @@ importers:
 
   packages/cognition:
     dependencies:
+      '@chat-a/persona':
+        specifier: workspace:*
+        version: link:../persona
       '@chat-a/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -66,6 +72,8 @@ importers:
         specifier: ^1.41.1
         version: 1.41.1
 
+  packages/persona: {}
+
   packages/protocol: {}
 
   packages/providers:
@@ -88,6 +96,9 @@ importers:
       '@chat-a/observability':
         specifier: workspace:*
         version: link:../observability
+      '@chat-a/persona':
+        specifier: workspace:*
+        version: link:../persona
       '@chat-a/protocol':
         specifier: workspace:*
         version: link:../protocol

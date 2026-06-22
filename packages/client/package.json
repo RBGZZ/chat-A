@@ -11,6 +11,7 @@
     "@chat-a/runtime": "workspace:*",
     "@chat-a/providers": "workspace:*",
     "@chat-a/observability": "workspace:*",
-    "@chat-a/memory": "workspace:*"
+    "@chat-a/memory": "workspace:*",
+    "@chat-a/persona": "workspace:*"
   }
 }

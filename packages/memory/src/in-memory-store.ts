@@ -24,6 +24,7 @@ export interface InMemoryMemoryStoreOptions {
 export class InMemoryMemoryStore implements MemoryStore {
   readonly #messages: StoredMessage[] = [];
   readonly #memories = new Map<string, MutableRecord>();
+  readonly #state = new Map<string, string>();
   readonly #cfg: MemoryConfig;
   readonly #now: () => number;
   #seq = 0;
@@ -78,6 +79,14 @@ export class InMemoryMemoryStore implements MemoryStore {
       lastSeenAtMs: r.lastSeenAtMs,
       hits: r.hits,
     }));
+  }
+
+  getState(key: string): string | undefined {
+    return this.#state.get(key);
+  }
+
+  setState(key: string, value: string): void {
+    this.#state.set(key, value);
   }
 
   close(): void {

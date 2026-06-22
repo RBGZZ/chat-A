@@ -3,7 +3,7 @@ import type { ChatMessage, MemoryInput, MemoryRecord, MemoryStore, StoredMessage
 import { resolveMemoryConfig, tokenize, type MemoryConfig } from './config';
 
 /** 当前代码支持的记忆库 schema 版本。每次破坏性/累加性变更 +1 并新增一条迁移。 */
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 /**
  * 顺序迁移:版本号 → 升级到该版本的步骤。用 IF NOT EXISTS 保持幂等,
@@ -33,6 +33,10 @@ const MIGRATIONS: Record<number, (db: DatabaseSync) => void> = {
       );
       CREATE INDEX IF NOT EXISTS idx_memories_last_seen ON memories(last_seen_at DESC);
     `);
+  },
+  2(db) {
+    // 通用状态 KV(persona OCEAN/PAD 等复用真相源持久化)。
+    db.exec(`CREATE TABLE IF NOT EXISTS kv_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
   },
 };
 
@@ -179,6 +183,29 @@ export class SqliteMemoryStore implements MemoryStore {
     } catch (err) {
       this.#onError(err, 'recall');
       return [];
+    }
+  }
+
+  getState(key: string): string | undefined {
+    try {
+      const row = this.#db.prepare(`SELECT value FROM kv_state WHERE key = ?`).get(key);
+      return row === undefined ? undefined : asString(row['value']);
+    } catch (err) {
+      this.#onError(err, 'getState');
+      return undefined;
+    }
+  }
+
+  setState(key: string, value: string): void {
+    try {
+      this.#db
+        .prepare(
+          `INSERT INTO kv_state(key, value) VALUES(?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        )
+        .run(key, value);
+    } catch (err) {
+      this.#onError(err, 'setState');
     }
   }
 

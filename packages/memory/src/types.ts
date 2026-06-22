@@ -46,6 +46,10 @@ export interface MemoryStore {
   addMemory(rec: MemoryInput): void;
   /** 关键词召回(P1 关键词级;语义/向量属 P2)。 */
   recall(query: string, limit?: number): readonly MemoryRecord[];
+  /** 通用状态 KV 读(真相源持久化原语;persona 状态等复用)。无则 undefined。 */
+  getState(key: string): string | undefined;
+  /** 通用状态 KV 写(同 key 覆盖)。 */
+  setState(key: string, value: string): void;
   /** 释放底层资源(SQLite 句柄等)。 */
   close(): void;
 }
