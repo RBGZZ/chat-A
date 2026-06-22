@@ -1,5 +1,19 @@
-import type { ChatMessage, MemoryInput, MemoryRecord, MemoryStore, StoredMessage } from './types';
-import { resolveMemoryConfig, tokenize, type MemoryConfig } from './config';
+import type {
+  ChatMessage,
+  MemoryInput,
+  MemoryRecord,
+  MemoryStore,
+  MemorySubject,
+  Person,
+  StoredMessage,
+} from './types';
+import {
+  makePrimaryPerson,
+  resolveAttribution,
+  resolveMemoryConfig,
+  tokenize,
+  type MemoryConfig,
+} from './config';
 
 interface MutableRecord {
   id: number;
@@ -9,6 +23,10 @@ interface MutableRecord {
   createdAtMs: number;
   lastSeenAtMs: number;
   hits: number;
+  /** 主语(承 §5.3)。 */
+  subject: MemorySubject;
+  /** 人物归属(承 §5.3b);agent 主语为 undefined。 */
+  personId: string | undefined;
 }
 
 export interface InMemoryMemoryStoreOptions {
@@ -25,6 +43,8 @@ export class InMemoryMemoryStore implements MemoryStore {
   readonly #messages: StoredMessage[] = [];
   readonly #memories = new Map<string, MutableRecord>();
   readonly #state = new Map<string, string>();
+  /** 人物花名册(镜像 SQLite people 表语义,承 §5.3b)。 */
+  readonly #people = new Map<string, Person>();
   readonly #cfg: MemoryConfig;
   readonly #now: () => number;
   #seq = 0;
@@ -32,6 +52,9 @@ export class InMemoryMemoryStore implements MemoryStore {
   constructor(opts: InMemoryMemoryStoreOptions = {}) {
     this.#cfg = resolveMemoryConfig(opts.config);
     this.#now = opts.now ?? Date.now;
+    // 构造即 seed 主用户(镜像 SQLite v3 迁移 seed,P1 恰好一个;承 §5.3b)。
+    const primary = makePrimaryPerson(this.#cfg);
+    this.#people.set(primary.personId, primary);
   }
 
   appendMessage(msg: StoredMessage): void {
@@ -53,6 +76,8 @@ export class InMemoryMemoryStore implements MemoryStore {
       existing.lastSeenAtMs = at;
       return;
     }
+    // 归属规则与 SQLite 共用单一权威 helper(承 §5.3 / §5.3b),避免两后端漂移。
+    const { subject, personId } = resolveAttribution(rec, this.#cfg);
     this.#memories.set(normalized, {
       id: ++this.#seq,
       text: rec.text,
@@ -61,12 +86,15 @@ export class InMemoryMemoryStore implements MemoryStore {
       createdAtMs: at,
       lastSeenAtMs: at,
       hits: 1,
+      subject,
+      personId,
     });
   }
 
   recall(query: string, limit: number = this.#cfg.recallLimit): readonly MemoryRecord[] {
     const tokens = tokenize(query, this.#cfg.normalize);
     if (tokens.length === 0) return [];
+    // 不按主语过滤:一次跨 person+agent+shared 召回(§5.3 末条),与 SQLite 行为一致。
     const hits = [...this.#memories.values()].filter((r) =>
       tokens.some((t) => r.normalized.includes(t)),
     );
@@ -78,6 +106,8 @@ export class InMemoryMemoryStore implements MemoryStore {
       createdAtMs: r.createdAtMs,
       lastSeenAtMs: r.lastSeenAtMs,
       hits: r.hits,
+      subject: r.subject,
+      personId: r.personId,
     }));
   }
 

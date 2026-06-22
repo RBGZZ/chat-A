@@ -1,15 +1,37 @@
 import { DatabaseSync } from 'node:sqlite';
-import type { ChatMessage, MemoryInput, MemoryRecord, MemoryStore, StoredMessage } from './types';
-import { resolveMemoryConfig, tokenize, type MemoryConfig } from './config';
+import type {
+  ChatMessage,
+  MemoryInput,
+  MemoryRecord,
+  MemoryStore,
+  MemorySubject,
+  Person,
+  StoredMessage,
+} from './types';
+import {
+  makePrimaryPerson,
+  resolveAttribution,
+  resolveMemoryConfig,
+  tokenize,
+  type MemoryConfig,
+} from './config';
 
 /** 当前代码支持的记忆库 schema 版本。每次破坏性/累加性变更 +1 并新增一条迁移。 */
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
+
+/**
+ * 迁移步骤上下文:主用户花名册条目经此注入(承 §3.2 行为即配置),
+ * 杜绝把主用户身份/不变式硬编码进迁移 SQL(决策 5);Person 由 makePrimaryPerson 单一构造。
+ */
+interface MigrationContext {
+  readonly primaryPerson: Person;
+}
 
 /**
  * 顺序迁移:版本号 → 升级到该版本的步骤。用 IF NOT EXISTS 保持幂等,
  * 让"已有数据的旧库"被安全纳管而不重建(承 §3.2 数据迁移纪律)。
  */
-const MIGRATIONS: Record<number, (db: DatabaseSync) => void> = {
+const MIGRATIONS: Record<number, (db: DatabaseSync, ctx: MigrationContext) => void> = {
   1(db) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS messages(
@@ -37,6 +59,35 @@ const MIGRATIONS: Record<number, (db: DatabaseSync) => void> = {
   2(db) {
     // 通用状态 KV(persona OCEAN/PAD 等复用真相源持久化)。
     db.exec(`CREATE TABLE IF NOT EXISTS kv_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+  },
+  3(db, ctx) {
+    // 多主语 + 人物花名册(承 §5.3 / §5.3b)。单事务内完成"建表+加列+seed+backfill"。
+    // 1) 人物花名册表(列对齐 §5.3b,后四列可空,为多人/用户组/Agent 自主纳入预留)。
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS people(
+        person_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        is_primary INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL,
+        added_by TEXT NOT NULL,
+        relationship_state TEXT,
+        voiceprint_ref TEXT
+      );
+    `);
+    // 2) 记忆增主语与人物归属两列(SQLite 加列默认 NULL;幂等性靠 v3 只跑一次保证)。
+    db.exec(`ALTER TABLE memories ADD COLUMN subject TEXT;`);
+    db.exec(`ALTER TABLE memories ADD COLUMN person_id TEXT;`);
+    // 3) seed 主用户(P1 恰好一个;Person 经 ctx 注入,is_primary/status/added_by 不变式来自工厂)。
+    const p = ctx.primaryPerson;
+    db.prepare(
+      `INSERT INTO people(person_id, name, is_primary, status, added_by)
+       VALUES(?, ?, ?, ?, ?)
+       ON CONFLICT(person_id) DO NOTHING`,
+    ).run(p.personId, p.name, p.isPrimary ? 1 : 0, p.status, p.addedBy);
+    // 4) backfill 存量记忆:旧库无主语,全部归为主用户的 person 记忆(零丢失,§3.2)。
+    db.prepare(`UPDATE memories SET subject = 'person', person_id = ? WHERE subject IS NULL`).run(
+      p.personId,
+    );
   },
 };
 
@@ -94,12 +145,14 @@ export class SqliteMemoryStore implements MemoryStore {
     }
     if (current === CURRENT_SCHEMA_VERSION) return;
 
+    // 主用户花名册条目经配置解析后传入 MIGRATIONS(§3.2 行为即配置;决策 5)。
+    const ctx: MigrationContext = { primaryPerson: makePrimaryPerson(this.#cfg) };
     this.#db.exec('BEGIN');
     try {
       for (let v = current + 1; v <= CURRENT_SCHEMA_VERSION; v++) {
         const step = MIGRATIONS[v];
         if (step === undefined) throw new Error(`缺少 schema v${v} 的迁移步骤`);
-        step(this.#db);
+        step(this.#db, ctx);
       }
       this.#db
         .prepare(
@@ -145,14 +198,16 @@ export class SqliteMemoryStore implements MemoryStore {
     const normalized = this.#cfg.normalize(rec.text);
     if (normalized.length === 0) return;
     const at = rec.createdAtMs ?? this.#now();
+    // 归属规则与 InMemory 共用单一权威 helper(承 §5.3 / §5.3b);SQLite 列接受 NULL,故 `?? null`。
+    const { subject, personId } = resolveAttribution(rec, this.#cfg);
     try {
       this.#db
         .prepare(
-          `INSERT INTO memories(text, normalized_text, kind, created_at, last_seen_at, hits, source_session)
-           VALUES(?, ?, ?, ?, ?, 1, ?)
+          `INSERT INTO memories(text, normalized_text, kind, created_at, last_seen_at, hits, source_session, subject, person_id)
+           VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?)
            ON CONFLICT(normalized_text) DO UPDATE SET hits = hits + 1, last_seen_at = excluded.last_seen_at`,
         )
-        .run(rec.text, normalized, rec.kind ?? null, at, at, rec.sourceSession ?? null);
+        .run(rec.text, normalized, rec.kind ?? null, at, at, rec.sourceSession ?? null, subject, personId ?? null);
     } catch (err) {
       this.#onError(err, 'addMemory');
     }
@@ -162,11 +217,12 @@ export class SqliteMemoryStore implements MemoryStore {
     const tokens = tokenize(query, this.#cfg.normalize);
     if (tokens.length === 0) return [];
     try {
+      // 不按主语过滤:一次覆盖 person+agent+shared,让上层同时拿到自述/事实/共同经历,防自相矛盾(§5.3 末条)。
       const where = tokens.map(() => `normalized_text LIKE ?`).join(' OR ');
       const params = tokens.map((t) => `%${t}%`);
       const rows = this.#db
         .prepare(
-          `SELECT id, text, kind, created_at, last_seen_at, hits FROM memories
+          `SELECT id, text, kind, created_at, last_seen_at, hits, subject, person_id FROM memories
            WHERE ${where}
            ORDER BY last_seen_at DESC, hits DESC, id DESC
            LIMIT ?`,
@@ -179,6 +235,12 @@ export class SqliteMemoryStore implements MemoryStore {
         createdAtMs: asNumber(r['created_at']),
         lastSeenAtMs: asNumber(r['last_seen_at']),
         hits: asNumber(r['hits']),
+        // subject 列在 v3 迁移后必有值;为稳健仍对 NULL 兜底为 'person'。
+        subject: (r['subject'] === null || r['subject'] === undefined
+          ? 'person'
+          : asString(r['subject'])) as MemorySubject,
+        personId:
+          r['person_id'] === null || r['person_id'] === undefined ? undefined : asString(r['person_id']),
       }));
     } catch (err) {
       this.#onError(err, 'recall');

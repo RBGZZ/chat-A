@@ -9,6 +9,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "test": "vitest run --root ../.. packages/memory",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
