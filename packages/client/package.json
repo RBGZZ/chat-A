@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@chat-a/runtime": "workspace:*",
-    "@chat-a/providers": "workspace:*"
+    "@chat-a/providers": "workspace:*",
+    "@chat-a/observability": "workspace:*"
   }
 }

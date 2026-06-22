@@ -12,8 +12,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@chat-a/cognition": "workspace:*",
+    "@chat-a/observability": "workspace:*",
     "@chat-a/protocol": "workspace:*",
     "@chat-a/providers": "workspace:*",
-    "@chat-a/cognition": "workspace:*"
+    "@opentelemetry/api": "^1.9.1"
+  },
+  "devDependencies": {
+    "@opentelemetry/sdk-trace-base": "^2.8.0"
   }
 }
