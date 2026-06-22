@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
-  makeEvent,
-  isProtocolAction,
+  makeBusEvent,
+  isBusAction,
   PROTOCOL_NAME,
   PROTOCOL_VERSION,
   SAMPLES_PER_FRAME,
@@ -25,9 +25,9 @@ describe('protocol/pcm', () => {
   });
 });
 
-describe('protocol/events', () => {
-  it('makeEvent 盖上 protocol/version/action 并携带 correlationId', () => {
-    const ev = makeEvent('stt:final', { text: 'hi' }, 's1/t1/0');
+describe('protocol/bus-events (A 层)', () => {
+  it('makeBusEvent 盖上 protocol/version/action 并携带 correlationId', () => {
+    const ev = makeBusEvent('stt:final', { text: 'hi' }, 's1/t1/0');
     expect(ev.protocol).toBe(PROTOCOL_NAME);
     expect(ev.version).toBe(PROTOCOL_VERSION);
     expect(ev.action).toBe('stt:final');
@@ -36,9 +36,13 @@ describe('protocol/events', () => {
     expect(ev.code).toBe(0);
   });
 
-  it('isProtocolAction 守卫已注册事件名', () => {
-    expect(isProtocolAction('turn:interrupt')).toBe(true);
-    expect(isProtocolAction('nope')).toBe(false);
+  it('isBusAction 守卫 A 层事件名,拒绝 B 层帧名', () => {
+    expect(isBusAction('turn:interrupt')).toBe(true);
+    expect(isBusAction('stt:final')).toBe(true);
+    // B 层帧(audio:chunk / llm:token / tts:chunk / stt:partial)不在总线
+    expect(isBusAction('audio:chunk')).toBe(false);
+    expect(isBusAction('llm:token')).toBe(false);
+    expect(isBusAction('nope')).toBe(false);
   });
 });
 

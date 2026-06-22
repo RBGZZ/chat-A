@@ -205,9 +205,19 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 ```
 
 - **B 帧管线(runtime 内)**:`SystemFrame`(插队、不受打断)/ `DataFrame`/`ControlFrame`(排队、打断丢弃)/ `UninterruptibleFrame` mixin(打断也送达,如结束信令、函数结果);每 processor **双队列双任务**(System 立即处理,Data/Control 排队);`InterruptionFrame` 双向广播 + 队列 reset。3 层过滤 = 一个 `ClassifierProcessor`。音频出站 **10ms 切片 + wall-clock 配速**(中途干净打断的物理前提)。
-- **A 模块总线(跨模块)= 边界**:`gateway/cognition/providers` 等接缝之间只走**粗粒度模块事件**(带 correlationId,经 AIRI AsyncLocalStorage 自动传 traceId),**绝不暴露帧内部**——保 §3.1"模块可整体重写"。gateway 在边界把 WS 入站消息翻译成总线事件 / 帧。
+- **A 模块总线(跨模块)= 边界**:`gateway/cognition/providers` 等接缝之间只走**粗粒度模块事件**(带 correlationId,经 OTel AsyncLocalStorage 自动传 traceId),**绝不暴露帧内部**——保 §3.1"模块可整体重写"。gateway 在边界把 WS 入站消息翻译成总线事件 / 帧。
 - **C 回合调度**:用户语音永远 URGENT(§7 软反转)、coalesce 丢陈旧自言自语、no-action 预算、出声前授权闸门(用户静音才让 agent 开口)。
 - ⚠️ 避开 Neuro `Signals` 全局可变状态 + setter 副作用(与可追溯冲突)。
+
+#### 4.2.1 A 层 `BusEvent` vs B 层 `Frame`(类型层就挡住串层)
+- **A 层 `BusEvent`(`protocol/bus-events`,跨模块、粗粒度、低频)**:`turn:start/end`、`vad:speech_start/end`、`stt:final`、`tts:first_audio`、`turn:interrupt`、`provider:failover`。走 LightVoiceBus,`deepFreeze` + history + traceId。
+- **B 层 `Frame`(`runtime` 帧管线内,高频流式)**:音频帧、`stt:partial`、`llm:token`、`tts:chunk` 等——**不上总线**(高频 + deepFreeze 成本 + 破坏分层)。音频帧跨终端↔大脑走 `AudioTransport`(接缝 1),也非总线事件。
+- 二者在 `protocol` 里是**两套类型**,编译期防止把 `audio:chunk` 误 emit 到模块总线。
+
+#### 4.2.2 LightVoiceBus 派发语义(建造前定稿,2026-06-22,参考 AIRI/Nexus/Pipecat/LiveKit/Zerolan)
+1. **直接类型化 pub/sub + `deepFreeze` + 每订阅者 try/catch**(借 AIRI),**不采用 Nexus effects-reducer**:副作用可测性靠"handler 注入 port"(§3.1 依赖倒置);可重放靠 SQLite 决策 trace(§8.1),不靠总线 effect 重放。effects-as-data 仅"需确定性重放副作用"时后续可选。
+2. **emit 同步有序分发**;async handler **fire-and-forget**(不 await,避免串行加延迟)但包裹捕获 rejection + per-handler 超时只告警不杀 + 经 AsyncLocalStorage 传 traceId;**A 层总线不设队列**——粗粒度低频,背压/有界缓冲是 B 层帧管线的事。JS 单线程 + 同步 emit → 同 correlationId 天然有序。
+3. **总线不每 emit 建 OTel span**(太多);span 在 turn/service 边界由编排器建(借 LiveKit/Pipecat);`onAny` 全量经一个 **observer(借 Pipecat observer)落 SQLite event 日志**(带 correlationId + 当前 trace_id/span_id),即 §8.1 三层日志的 `event` 层。
 
 > §4 的打断/延迟工程增量(预测性生成、EOU 概率驱动动态 endpointing、先 pause 后定夺打断 + 半句写回上下文、TTS 关 context 而非断连等)见 `voice-infra-findings-2026-06-22.md`,落在 B/C 层。
 
