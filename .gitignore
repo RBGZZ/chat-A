@@ -10,7 +10,12 @@ desktop.ini
 *.swo
 *~
 
-# Build output
+# Node / build output
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+.turbo/
 _build/
 __pycache__/
 *.pyc
