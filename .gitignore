@@ -24,5 +24,10 @@ __pycache__/
 *.tmp
 *.log
 
+# Local secrets / env (not for upload)
+.env
+.env.local
+.env.*.local
+
 # Reference materials (not for upload)
 reference/

@@ -1,6 +1,7 @@
 import type { LlmProvider } from './llm';
 import type { LlmConfig } from './config';
 import { AnthropicLlm } from './anthropic-llm';
+import { OpenAiCompatLlm } from './openai-compat-llm';
 import { FakeLlm } from './fake-llm';
 
 /** 厂商工厂:配置 → 具体 Provider。 */
@@ -39,4 +40,16 @@ registerLlm('anthropic', (cfg) =>
     ...(cfg.maxTokens !== undefined ? { maxTokens: cfg.maxTokens } : {}),
   }),
 );
+registerLlm('deepseek', (cfg) => {
+  if (cfg.apiKey === undefined || cfg.apiKey.length === 0) {
+    throw new Error('deepseek 需要 API key(设 CHAT_A_LLM_API_KEY)');
+  }
+  return new OpenAiCompatLlm({
+    id: 'deepseek',
+    model: cfg.model,
+    apiKey: cfg.apiKey,
+    baseURL: 'https://api.deepseek.com',
+    ...(cfg.maxTokens !== undefined ? { maxTokens: cfg.maxTokens } : {}),
+  });
+});
 registerLlm('fake', (cfg) => new FakeLlm(cfg.model));

@@ -11,22 +11,34 @@ export interface LlmConfig {
 
 /**
  * 从环境变量加载——用户自己选 provider/model:
- *   CHAT_A_LLM_PROVIDER = anthropic | fake | <已注册的任意厂商>
+ *   CHAT_A_LLM_PROVIDER = anthropic | deepseek | fake | <已注册的任意厂商>
  *   CHAT_A_LLM_MODEL    = 模型串(默认 anthropic→claude-opus-4-8)
+ *   CHAT_A_LLM_API_KEY  = 通用 API key(任意厂商),回落到 ANTHROPIC_API_KEY
  *   CHAT_A_LLM_MAX_TOKENS
  *   ANTHROPIC_API_KEY   = 有则默认 anthropic,无则默认 fake
  */
 export function loadLlmConfig(env: NodeJS.ProcessEnv = process.env): LlmConfig {
-  const apiKey = env['ANTHROPIC_API_KEY'];
-  const hasKey = typeof apiKey === 'string' && apiKey.length > 0;
-  const provider = env['CHAT_A_LLM_PROVIDER'] ?? (hasKey ? 'anthropic' : 'fake');
-  const model = env['CHAT_A_LLM_MODEL'] ?? (provider === 'anthropic' ? 'claude-opus-4-8' : 'fake-1');
+  const anthropicKey = env['ANTHROPIC_API_KEY'];
+  const hasAnthropicKey = typeof anthropicKey === 'string' && anthropicKey.length > 0;
+  const provider = env['CHAT_A_LLM_PROVIDER'] ?? (hasAnthropicKey ? 'anthropic' : 'fake');
+
+  // API key:通用 CHAT_A_LLM_API_KEY 优先(任意厂商),否则回落到 ANTHROPIC_API_KEY。
+  const genericKey = env['CHAT_A_LLM_API_KEY'];
+  const apiKey =
+    typeof genericKey === 'string' && genericKey.length > 0
+      ? genericKey
+      : hasAnthropicKey
+        ? anthropicKey
+        : undefined;
+
+  const model =
+    env['CHAT_A_LLM_MODEL'] ?? (provider === 'anthropic' ? 'claude-opus-4-8' : provider === 'fake' ? 'fake-1' : '');
   const maxTokensRaw = env['CHAT_A_LLM_MAX_TOKENS'];
 
   return {
     provider,
     model,
-    ...(hasKey ? { apiKey } : {}),
+    ...(apiKey !== undefined ? { apiKey } : {}),
     ...(maxTokensRaw && Number.isFinite(Number(maxTokensRaw)) ? { maxTokens: Number(maxTokensRaw) } : {}),
   };
 }
