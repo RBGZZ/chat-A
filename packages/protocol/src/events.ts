@@ -34,18 +34,25 @@ export function makeEvent<A extends ProtocolAction>(
   return { protocol: PROTOCOL_NAME, version: PROTOCOL_VERSION, action, code, correlationId, data };
 }
 
-const ACTIONS: ReadonlySet<string> = new Set<ProtocolAction>([
-  'audio:chunk',
-  'vad:speech_start',
-  'vad:speech_end',
-  'stt:partial',
-  'stt:final',
-  'llm:token',
-  'tts:chunk',
-  'tts:first_audio',
-  'turn:interrupt',
-  'provider:failover',
-]);
+/**
+ * 单一真相源:`Record<ProtocolAction, true>` 让编译器强制"每个事件名都登记"——
+ * 给 ProtocolEventMap 加事件却漏登记 → 编译报错;登记不存在的事件名 → 也报错。
+ * 杜绝类型(ProtocolEventMap)与运行时(ACTIONS)漂移(枚举完整性,承 §3.1)。
+ */
+const ACTION_PRESENCE: Record<ProtocolAction, true> = {
+  'audio:chunk': true,
+  'vad:speech_start': true,
+  'vad:speech_end': true,
+  'stt:partial': true,
+  'stt:final': true,
+  'llm:token': true,
+  'tts:chunk': true,
+  'tts:first_audio': true,
+  'turn:interrupt': true,
+  'provider:failover': true,
+};
+
+const ACTIONS: ReadonlySet<string> = new Set<string>(Object.keys(ACTION_PRESENCE));
 
 export function isProtocolAction(x: string): x is ProtocolAction {
   return ACTIONS.has(x);
