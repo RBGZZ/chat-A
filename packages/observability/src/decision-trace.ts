@@ -35,6 +35,16 @@ export interface DecisionTrace {
   readonly stanceNotions: readonly string[];
   /** 当轮负面人际姿态(§7#6:'sulking'/'withdrawn');无姿态时省略。 */
   readonly posture?: string;
+  // —— 语义召回元数据(§5.5/§8.1):回合层启用语义召回时由编排层透传;
+  //    纯加法,关闭语义/缺省时全部省略(向后兼容,落库写 NULL)。
+  /** 本轮是否实际用上了语义向量召回(true=用了 queryVector;false=超时/失败退关键词快路径)。 */
+  readonly semanticUsed?: boolean;
+  /** query 嵌入耗时(ms;含缓存命中=0)。 */
+  readonly embedLatencyMs?: number;
+  /** query 嵌入是否超过有界预算被中断。 */
+  readonly embedTimedOut?: boolean;
+  /** query 嵌入是否命中 LRU 缓存。 */
+  readonly embedCacheHit?: boolean;
   /** 最终组装的 system 与 messages(完整,仅落本地,绝不导出远端)。 */
   readonly system: string;
   readonly messages: readonly { readonly role: string; readonly content: string }[];

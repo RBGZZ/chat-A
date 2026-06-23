@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   SqliteDecisionTraceSink,
   NoopDecisionTraceSink,
+  DecisionTraceReader,
   createDecisionTraceSinkFromEnv,
   CURRENT_TRACE_SCHEMA_VERSION,
   type DecisionTrace,
@@ -162,6 +163,55 @@ describe('SqliteDecisionTraceSink: posture(§7#6)+ v1→v2 迁移', () => {
     expect(Number(ver.value)).toBe(CURRENT_TRACE_SCHEMA_VERSION);
     expect(rows[0]).toMatchObject({ turn_id: 't0', posture: null }); // 历史行保留,新列 NULL
     expect(rows[1]).toMatchObject({ turn_id: 't1', posture: 'withdrawn' });
+  });
+});
+
+describe('SqliteDecisionTraceSink: 语义召回元数据(§5.5/§8.1)', () => {
+  it('记录可带语义召回元数据(向后兼容:省略不写)', () => {
+    const path = tmpDb('semantic');
+    const sink = new SqliteDecisionTraceSink({ path });
+    sink.record({
+      ...TRACE,
+      turnId: 't1',
+      semanticUsed: true,
+      embedLatencyMs: 42,
+      embedTimedOut: false,
+      embedCacheHit: true,
+    });
+    sink.record({ ...TRACE, turnId: 't2' }); // 不带语义字段:不应报错
+    sink.close();
+
+    const reader = new DecisionTraceReader({ path });
+    const withSemantic = reader.getByTurnId('t1');
+    const without = reader.getByTurnId('t2');
+    reader.close();
+
+    expect(withSemantic?.semanticUsed).toBe(true);
+    expect(withSemantic?.embedLatencyMs).toBe(42);
+    expect(withSemantic?.embedTimedOut).toBe(false);
+    expect(withSemantic?.embedCacheHit).toBe(true);
+    // 省略时:reader 不写这些字段(exactOptionalPropertyTypes 条件展开)。
+    expect(without).toBeDefined();
+    expect(without?.semanticUsed).toBeUndefined();
+    expect(without?.embedLatencyMs).toBeUndefined();
+    expect(without?.embedTimedOut).toBeUndefined();
+    expect(without?.embedCacheHit).toBeUndefined();
+  });
+
+  it('语义可空列落库:省略字段 → NULL', () => {
+    const path = tmpDb('semantic-null');
+    const sink = new SqliteDecisionTraceSink({ path });
+    sink.record({ ...TRACE, turnId: 't0' }); // 完全不带语义字段
+    sink.close();
+    const db = new DatabaseSync(path);
+    const row = db
+      .prepare('SELECT semantic_used, embed_latency_ms, embed_timed_out, embed_cache_hit FROM decision_traces')
+      .get() as Record<string, unknown>;
+    db.close();
+    expect(row['semantic_used']).toBeNull();
+    expect(row['embed_latency_ms']).toBeNull();
+    expect(row['embed_timed_out']).toBeNull();
+    expect(row['embed_cache_hit']).toBeNull();
   });
 });
 
