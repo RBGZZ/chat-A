@@ -109,6 +109,27 @@ export interface MemoryConfig {
    * 默认 60(信息检索界惯用值,轻且稳;行为即配置 §3.2,无 magic number)。
    */
   readonly rrfK: number;
+  /**
+   * 关系亲密度初值(承 §6/§5.3b 关系亲密度小节):`people.relationship_state` 无记录时
+   * `getCloseness` 返回它。`closeness∈[0,1]`,**陌生起步**;用户画像冷启动可给更高初值(承 §6.2)。
+   * 默认 0.1(行为即配置,§3.2,无 magic number)。
+   */
+  readonly initialCloseness: number;
+  /**
+   * 关系亲密度惰性衰减半衰期(天,承 §6/§5.5 衰减族):距上次互动越久越淡,
+   * `closeness·0.5^(days/H)` 惰性实时算、**读不写回污染**(同 §5.5 纪律)。默认 30 天(行为即配置,§3.2)。
+   */
+  readonly closenessHalfLifeDays: number;
+  /**
+   * 关系亲密度抬升系数 k_up(承 §6/§2.3):每回合收尾按正向程度小步抬升
+   * `c' = c + k·clamp(valence⁺,0,1)·(1−c)`,渐近饱和(单调趋近 1 不越界)。默认 0.1(行为即配置,§3.2)。
+   */
+  readonly closenessUpK: number;
+  /**
+   * 关系亲密度下限(承 §6/§2.3):衰减/抬升后夹到 `[closenessFloor, 1]`,
+   * 核心关系可设正下限避免长期缺席归零。默认 0(陌生可降至 0;行为即配置,§3.2)。
+   */
+  readonly closenessFloor: number;
 }
 
 /** 各分层的召回权重(承 §5.9 缺口④);值非负。 */
@@ -168,6 +189,12 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
   vectorKnnCandidateCap: 1000,
   fusionMode: 'weighted',
   rrfK: 60,
+  // §6/§5.3b 关系亲密度(中速慢变量,行为即配置 §3.2):陌生起步 0.1、半衰期 30 天、
+  // 抬升系数 0.1(满正向单步 +0.1·(1−c))、下限 0(可降至 0;核心关系可设正下限)。
+  initialCloseness: 0.1,
+  closenessHalfLifeDays: 30,
+  closenessUpK: 0.1,
+  closenessFloor: 0,
 };
 
 /** 合并用户覆盖与默认值。 */
@@ -289,6 +316,40 @@ export function reinforceImportance(
  */
 export function recallScore(importance: number, decay: number): number {
   return importance * decay;
+}
+
+// —— §6/§5.3b 关系亲密度 closeness:惰性衰减 + 渐近抬升(单一权威公式,承 §5.5 同纪律)——
+// SQLite 与 InMemory 两实现都调用这两个纯函数,杜绝两后端各写一遍导致漂移(§3.2 单一权威公式)。
+
+/**
+ * 关系亲密度惰性衰减(单一权威公式,承 §6/§2.3):`c·0.5^(days/H)`,惰性实时算、**读不写回**。
+ * days 取非负(时钟回拨/未来时间不致放大);衰减后夹到 `[closenessFloor, 1]`
+ * (下限保护核心关系不归零、上限封顶)。无 pinned 概念——closeness 是关系轴,衰减恒生效。
+ */
+export function decayCloseness(
+  closeness: number,
+  updatedAtMs: number,
+  atMs: number,
+  cfg: Pick<MemoryConfig, 'closenessHalfLifeDays' | 'closenessFloor'>,
+): number {
+  const days = Math.max(0, (atMs - updatedAtMs) / MS_PER_DAY);
+  const decayed = closeness * 0.5 ** (days / cfg.closenessHalfLifeDays);
+  return Math.min(Math.max(decayed, cfg.closenessFloor), 1);
+}
+
+/**
+ * 关系亲密度抬升(单一权威公式,承 §6/§2.3):`c' = c + k·clamp(valencePos,0,1)·(1−c)`,
+ * 渐近饱和(单调趋近 1)。`valencePos≤0` 时 `clamp` 为 0 ⟹ `c'=c`(只刷新基线、不升)。
+ * 抬升后夹到 `[closenessFloor, 1]`(与衰减同一夹取规则)。
+ */
+export function bumpClosenessValue(
+  closeness: number,
+  valencePos: number,
+  cfg: Pick<MemoryConfig, 'closenessUpK' | 'closenessFloor'>,
+): number {
+  const v = Math.min(Math.max(valencePos, 0), 1);
+  const next = closeness + cfg.closenessUpK * v * (1 - closeness);
+  return Math.min(Math.max(next, cfg.closenessFloor), 1);
 }
 
 // —— §5.5 混合召回:关键词归一 + 自适应分母混合 + 情感共振(单一权威,承 §3.2)——

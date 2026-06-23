@@ -17,7 +17,9 @@ import type {
 } from './types';
 import {
   anchorIndex,
+  bumpClosenessValue,
   cosineSimilarity,
+  decayCloseness,
   decayFactor,
   emotionResonance,
   entityKeys,
@@ -101,6 +103,11 @@ export class InMemoryMemoryStore implements MemoryStore {
   readonly #edgeWeight = new Map<string, number>();
   /** 记忆 id → 邻居 id 集合(扩散遍历用;镜像 SQLite 双向索引)。 */
   readonly #adjacency = new Map<number, Set<number>>();
+  /**
+   * 关系亲密度状态:personId → `{closeness, updatedAtMs}`(镜像 SQLite people.relationship_state JSON,承 §6/§5.3b)。
+   * 无条目 = 尚无互动记录(getCloseness 落到 initialCloseness);存数值快照,惰性衰减读时实时算、不写回。
+   */
+  readonly #closeness = new Map<string, { closeness: number; updatedAtMs: number }>();
   readonly #cfg: MemoryConfig;
   readonly #now: () => number;
   #seq = 0;
@@ -608,6 +615,28 @@ export class InMemoryMemoryStore implements MemoryStore {
       .sort((a, b) => a.id - b.id)
       .slice(0, limit);
     return pending.map((r) => ({ id: r.id, text: r.text }));
+  }
+
+  getCloseness(personId: string): number {
+    return this.getClosenessAt(personId, this.#now());
+  }
+
+  getClosenessAt(personId: string, atMs: number): number {
+    const rel = this.#closeness.get(personId);
+    // 无记录(含未知 person):返回配置初值(陌生起步,承 §6);与 SQLite #readRel===null 同语义。读不写回(§5.5)。
+    if (rel === undefined) return this.#cfg.initialCloseness;
+    return decayCloseness(rel.closeness, rel.updatedAtMs, atMs, this.#cfg);
+  }
+
+  bumpCloseness(personId: string, valencePos: number, atMs: number): number {
+    // 先取衰减后当前值,再按正向程度渐近抬升(与 SQLite 共用单一权威公式,零漂移)。
+    const cur = this.getClosenessAt(personId, atMs);
+    const next = bumpClosenessValue(cur, valencePos, this.#cfg);
+    // 未知 personId 幂等不抛:镜像 SQLite「UPDATE 命中 0 行」——只对已 seed 的花名册成员写回,不凭空建人。
+    if (this.#people.has(personId)) {
+      this.#closeness.set(personId, { closeness: next, updatedAtMs: atMs });
+    }
+    return next;
   }
 
   getState(key: string): string | undefined {
