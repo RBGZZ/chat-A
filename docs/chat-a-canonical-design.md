@@ -330,6 +330,25 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 - 端侧合体:**Qwen3-Embedding-0.6B**(ONNX int8)。云端 API 可选(质量最高、成本~$0.02/1M)。Hash 仅离线兜底。
 - 换模型 = 改 config + 重建向量索引(因向量库是派生,可重建),召回逻辑不动。
 
+#### 5.7b c2 接线方案:embedder → 召回(非阻塞,2026-06-23 定稿)
+> 承 §5.5「🔴 非阻塞召回硬约束」。核心:**memory 保持同步且不依赖 embedder;query embedding 的异步在编排层(runtime),算好向量再传进同步召回。** 已锁定工程取舍:向量存储 = **Float32 BLOB + JS 暴力 cosine**(不赌 sqlite-vec 在 ARM 的原生扩展,做成接缝日后平替 LanceDB/sqlite-vec);`queryEmbedBudgetMs` 默认 120(支持 0=只用缓存绝不等);候选封顶默认 1000;关键词+向量用 **RRF(k=60)** 融合后再接既有 归一/联想/kind。
+
+- **memory 侧(c2a,纯包内)**:① 向量列 `embedding BLOB`(不透明存储,schema v7→v8)② 同步 `recallByVector(vec)` JS 暴力 cosine ③ 同步 `recallHybrid(query, {queryVector?})`——有向量则 关键词+向量 RRF 融合再接既有打分,**无向量 == 现有 `recall()`(快路径)** ④ `setEmbedding(id,vec)` / `addMemory` 返回 id / `memoriesNeedingEmbedding()` 供后台补嵌。**全部同步,不 import embedder。**
+- **runtime 侧(c2b,焦点串行)**:注入 `embedder?`(缺省=关语义=与今天逐字一致)。turn 流程利用**已有的 `detectStance` await 做并行重叠**:
+  ```
+  mood = persona.tone()
+  embedP = embedder ? embedQueryBudgeted(userText) : null   // 异步起跑,带 LRU 缓存 + 超时预算
+  stance = await detectStance(...)                           // 已 async,免费重叠 embed
+  queryVector = embedP ? await embedP : null                 // 有界等待;超时/失败/关 → null
+  composeSystem(..., queryVector) → memory.recallHybrid(userText, {queryVector})  // null 即退回快路径
+  ```
+  - `embedQueryBudgeted`:查缓存→未命中 `embedder.embed([text], signal)` + `AbortController` + 超时;超时/报错→`null`(退快路径)且后台跑完写缓存;**绝不抛进回合**。首字前最坏额外延迟 = `max(0, budget − stance耗时)`。
+- **写侧 embedding**:`finalizeTurn` 回复后,新记忆向量化走**后台 fire-and-forget**(embed→`setEmbedding`),失败仅告警(承 §5.2"异步写向量索引")。
+- **预热钩子(P2 语音预留)**:`prewarmRecall(partialText)` 在 STT interim 提前算 query 向量入缓存 → turn 时缓存命中、往返全隐藏(§4 预测性生成);文字 MVP 先 no-op,接缝就位。
+- **降级链**:embedder 缺省/超时/报错/KNN 空 → 关键词快路径(与今天一致),逐层不抛(§3.2)。
+- **可观测(§8.1)**:决策 trace 增 `semanticUsed/embedLatencyMs/embedTimedOut/cacheHit/vectorHits`,上线后回放确认"语义没焊进首字"。
+- **切片顺序**:c2a(memory,可 worktree)→ c2b(runtime,焦点串行)。
+
 ### 5.8 写路径决策 + 记忆框架深读纪律(2026-06-22,mem0/Letta/OpenMemory/Memoripy)
 > 详见 `memory-frameworks-findings-2026-06-22.md`(含 round-1 调研的头条订正)。
 
