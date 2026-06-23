@@ -9,6 +9,8 @@
  *
  * 真 Silero 如何接进来:实现 `VadDetector`,在 `pushFrame` 内把 `PcmFrame.samples` 喂给 ONNX session
  * 得到该帧语音概率,复用本文件的同一套「概率 → 去抖 → start/end 事件」状态机即可(把桩的「注入概率」换成「模型推理概率」)。
+ * **已实现**:见 `silero-vad.ts` 的 `SileroVadDetector`(注入同步 `VadInferenceSession` 端口,帧→512 样本窗缓冲,
+ * 复用本文件 `VadGate`;真 Silero 经 sherpa-onnx 同步原生绑定注入,零改 VoiceLoop)。
  */
 import type { PcmFrame } from '@chat-a/protocol';
 import { DEFAULT_VAD_CONFIG, type VadConfig } from './config';

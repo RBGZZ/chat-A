@@ -13,3 +13,5 @@ export * from './config';
 export * from './vad';
 export * from './endpointing';
 export * from './turn-detector';
+export * from './silero-vad';
+export * from './smart-turn-eou';

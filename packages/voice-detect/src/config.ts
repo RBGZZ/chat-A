@@ -29,6 +29,43 @@ export const DEFAULT_VAD_CONFIG: VadConfig = {
   speechEndFrames: 2,
 };
 
+/**
+ * VAD 真模型推理配置(承 §5b 行 105 Silero 16k/512 framing 习惯)。
+ * 真 `SileroVadDetector` 把协议帧(160 样本/10ms)缓冲成 `windowSamples` 大小的窗逐窗推理。
+ */
+export interface VadInferenceConfig {
+  /** 推理窗大小(样本数);Silero v5 习惯 512 样本/32ms@16k(§5b 行 105)。 */
+  readonly windowSamples: number;
+  /** 目标采样率(Hz);Silero 硬约定 16000。 */
+  readonly sampleRate: number;
+}
+
+/** VAD 推理默认配置(512 样本窗 / 16kHz;可被构造参数整表覆盖)。 */
+export const DEFAULT_VAD_INFERENCE: VadInferenceConfig = {
+  windowSamples: 512,
+  sampleRate: 16_000,
+};
+
+/**
+ * EOU 真模型推理配置(承 §5b 行 100 Smart-Turn v3:吃音频窗判韵律,非转写)。
+ * 真 `SmartTurnEouModel` 把累积用户音频窗截到最近 `maxWindowMs` 喂模型(贴定长输入习惯 + 防窗无界增长)。
+ */
+export interface EouInferenceConfig {
+  /** 喂模型的音频窗最大时长(ms);只取累积音频的最近这一段(Smart-Turn 定长窗习惯)。 */
+  readonly maxWindowMs: number;
+  /** 目标采样率(Hz);与上行 16000 一致。 */
+  readonly sampleRate: number;
+  /** 是否对窗做峰值归一化(true=按窗内最大绝对值归一,弱化音量差异;真值待模型卡标定)。 */
+  readonly normalize: boolean;
+}
+
+/** EOU 推理默认配置(最近 8s 窗 / 16kHz / 开归一化;占位,真接入按模型卡标定,可覆盖)。 */
+export const DEFAULT_EOU_INFERENCE: EouInferenceConfig = {
+  maxWindowMs: 8_000,
+  sampleRate: 16_000,
+  normalize: true,
+};
+
 // ───────────────────────────── 动态 endpointing ─────────────────────────────
 
 /**

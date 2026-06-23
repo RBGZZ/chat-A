@@ -8,6 +8,8 @@
  *
  * 真 Smart-Turn v3 如何接进来:实现 `EouModel.predict`,内部把累积的用户音频窗喂给 ONNX session
  * 得到 finished 概率(模型对韵律打分),其余动态 endpointing 策略与 TEN 3 态映射完全复用本包逻辑不变。
+ * **已实现**:见 `smart-turn-eou.ts` 的 `SmartTurnEouModel`(注入同步 `EouInferenceSession` 端口,
+ * 截最近 `maxWindowMs` 音频窗;真 Smart-Turn v3 经 sherpa-onnx 同步原生绑定注入,零改 VoiceLoop)。
  *
  * 注:本包只做「检测 + 策略」,**不接 runtime / 回合调度**(接线后续做);TurnDetector 把
  * EouModel(概率源)与 DynamicEndpointing(策略)组合成一个「该不该接话」的可测单元。
