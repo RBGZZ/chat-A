@@ -66,11 +66,13 @@ describe('interaction/ActionRegistry 容错执行', () => {
     expect(res.isError).toBe(true);
   });
 
-  it('toolDefs 形态 + size', () => {
+  it('toolDefs 形态 + size(含全部内置动作)', () => {
     const reg = buildDefaultRegistry();
-    expect(reg.size).toBe(1);
-    const defs = reg.toolDefs();
-    expect(defs[0]?.name).toBe('current_time');
-    expect(defs[0]?.inputSchema).toBeDefined();
+    expect(reg.size).toBe(4);
+    const names = reg.toolDefs().map((d) => d.name);
+    expect(names).toEqual(
+      expect.arrayContaining(['current_time', 'calculate', 'set_reminder', 'unit_convert']),
+    );
+    expect(reg.toolDefs()[0]?.inputSchema).toBeDefined();
   });
 });
