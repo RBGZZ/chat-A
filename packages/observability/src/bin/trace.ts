@@ -5,12 +5,14 @@
  * 用法:
  *   chat-a-trace list [--session <id>] [--limit N] [--db <path>]
  *   chat-a-trace show <turnId|correlationId|trace_id> [--db <path>]
+ *   chat-a-trace stats [--db <path>]
  *
  * 库路径优先级:--db > CHAT_A_DECISION_TRACE_DB > 默认 chat-a-trace.db。
  * 纯只读、带外工具,不在回合热路径,不改写库、不动 client。
  */
 import { parseArgs } from 'node:util';
 import { DecisionTraceReader } from '../decision-trace-reader';
+import { DecisionTraceStats, type DecisionTraceStatsResult, type CountDistribution } from '../decision-trace-stats';
 import type { DecisionTrace } from '../decision-trace';
 
 const DEFAULT_DB = 'chat-a-trace.db';
@@ -33,6 +35,7 @@ function printUsage(): void {
       '用法:',
       '  chat-a-trace list [--session <id>] [--limit N] [--db <path>]',
       '  chat-a-trace show <turnId|correlationId|trace_id> [--db <path>]',
+      '  chat-a-trace stats [--db <path>]',
       '',
       '库路径优先级:--db > CHAT_A_DECISION_TRACE_DB > 默认 chat-a-trace.db',
     ].join('\n'),
@@ -144,6 +147,65 @@ function runShow(reader: DecisionTraceReader, id: string): void {
   printTrace(trace);
 }
 
+/** 把"取值 → 计数"分布按计数倒序打印;可选 top 截断。空分布打印"(无)"。 */
+function printDistribution(dist: CountDistribution, top?: number): void {
+  const entries = Object.entries(dist).sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) {
+    console.log('  (无)');
+    return;
+  }
+  const shown = top !== undefined ? entries.slice(0, top) : entries;
+  for (const [key, count] of shown) {
+    console.log(`  ${key}: ${count}`);
+  }
+  if (top !== undefined && entries.length > top) {
+    console.log(`  …(其余 ${entries.length - top} 项省略)`);
+  }
+}
+
+/** 数值漂亮化:保留 1 位小数但去掉无意义的 .0(便于人读 latency/占比)。 */
+function num(n: number): string {
+  if (!Number.isFinite(n)) return '?';
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+function printStats(s: DecisionTraceStatsResult): void {
+  if (s.totalTurns === 0) {
+    console.log('(无数据:库为空、不存在或损坏)');
+    return;
+  }
+  console.log(HR);
+  console.log(`决策 trace 统计(共 ${s.totalTurns} 回合)`);
+  console.log(HR);
+
+  section('emotion 分布');
+  printDistribution(s.emotionCounts);
+
+  section('posture 分布(仅有姿态的回合)');
+  printDistribution(s.postureCounts);
+
+  section('provider 分布');
+  printDistribution(s.providerCounts);
+
+  section('回合延迟(ms)');
+  console.log(`  样本: ${s.latency.count}`);
+  console.log(`  均值: ${num(s.latency.mean)}`);
+  console.log(`  p50:  ${num(s.latency.p50)}`);
+  console.log(`  p95:  ${num(s.latency.p95)}`);
+
+  section('召回命中');
+  console.log(`  平均召回条数: ${num(s.recall.meanRecalledLen)}`);
+  console.log(`  有召回占比:   ${num(s.recall.recalledRatio * 100)}%`);
+
+  section('各会话回合数(倒序 top 10)');
+  printDistribution(s.sessionTurnCounts, 10);
+  console.log('');
+}
+
+function runStats(stats: DecisionTraceStats): void {
+  printStats(stats.compute());
+}
+
 function main(argv: string[]): void {
   const [command, ...rest] = argv;
   if (command === undefined || command === '-h' || command === '--help' || command === 'help') {
@@ -170,6 +232,18 @@ function main(argv: string[]): void {
   }
 
   const dbPath = resolveDbPath(parsed.values.db);
+
+  // stats 用独立只读统计模块(自己的只读句柄),不开 reader。
+  if (command === 'stats') {
+    const stats = new DecisionTraceStats({ path: dbPath });
+    try {
+      runStats(stats);
+    } finally {
+      stats.close();
+    }
+    return;
+  }
+
   const reader = new DecisionTraceReader({ path: dbPath });
   try {
     if (command === 'list') {
