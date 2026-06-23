@@ -331,9 +331,9 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 - 换模型 = 改 config + 重建向量索引(因向量库是派生,可重建),召回逻辑不动。
 
 #### 5.7b c2 接线方案:embedder → 召回(非阻塞,2026-06-23 定稿)
-> 承 §5.5「🔴 非阻塞召回硬约束」。核心:**memory 保持同步且不依赖 embedder;query embedding 的异步在编排层(runtime),算好向量再传进同步召回。** 已锁定工程取舍:向量存储 = **Float32 BLOB + JS 暴力 cosine**(不赌 sqlite-vec 在 ARM 的原生扩展,做成接缝日后平替 LanceDB/sqlite-vec);`queryEmbedBudgetMs` 默认 120(支持 0=只用缓存绝不等);候选封顶默认 1000;关键词+向量用 **RRF(k=60)** 融合后再接既有 归一/联想/kind。
+> 承 §5.5「🔴 非阻塞召回硬约束」。核心:**memory 保持同步且不依赖 embedder;query embedding 的异步在编排层(runtime),算好向量再传进同步召回。** 已锁定工程取舍:向量存储 = **Float32 BLOB + JS 暴力 cosine**(不赌 sqlite-vec 在 ARM 的原生扩展,做成接缝日后平替 LanceDB/sqlite-vec);`queryEmbedBudgetMs` 默认 120(支持 0=只用缓存绝不等);候选封顶默认 1000;关键词+向量用**加权归一融合**(参考共识,见下「调研裁决」),`fusionMode` 默认 `weighted`、`rrf` 留作可选备选。
 
-- **memory 侧(c2a,纯包内)**:① 向量列 `embedding BLOB`(不透明存储,schema v7→v8)② 同步 `recallByVector(vec)` JS 暴力 cosine ③ 同步 `recallHybrid(query, {queryVector?})`——有向量则 关键词+向量 RRF 融合再接既有打分,**无向量 == 现有 `recall()`(快路径)** ④ `setEmbedding(id,vec)` / `addMemory` 返回 id / `memoriesNeedingEmbedding()` 供后台补嵌。**全部同步,不 import embedder。**
+- **memory 侧(c2a,纯包内)**:① 向量列 `embedding BLOB`(不透明存储,schema v7→v8)② 同步 `recallByVector(vec)` JS 暴力 cosine ③ 同步 `recallHybrid(query, {queryVector?})`——有向量则 **向量相似度作一路 min-max 归一信号、折进既有加性打分**(同关键词/情感/衰减/重要性一套加性归一,slice ③ 已落地;`fusionMode:'weighted'` 默认,`'rrf'` 备选),再接联想/kind;**无向量 == 现有 `recall()`(快路径)** ④ `setEmbedding(id,vec)` / `addMemory` 返回 id / `memoriesNeedingEmbedding()` 供后台补嵌。**全部同步,不 import embedder。**
 - **runtime 侧(c2b,焦点串行)**:注入 `embedder?`(缺省=关语义=与今天逐字一致)。turn 流程利用**已有的 `detectStance` await 做并行重叠**:
   ```
   mood = persona.tone()
@@ -348,6 +348,13 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 - **降级链**:embedder 缺省/超时/报错/KNN 空 → 关键词快路径(与今天一致),逐层不抛(§3.2)。
 - **可观测(§8.1)**:决策 trace 增 `semanticUsed/embedLatencyMs/embedTimedOut/cacheHit/vectorHits`,上线后回放确认"语义没焊进首字"。
 - **切片顺序**:c2a(memory,可 worktree)→ c2b(runtime,焦点串行)。
+
+> **🆕 调研裁决(2026-06-23,参考项目语义检索/向量库专题精读)**——锁定取舍获代码级印证,两点修正:
+> - **✅ 印证**:BLOB+JS 暴力 cosine(OpenMemory `vector_store.py:40,67-89` 几乎一比一、Nexus、memoripy 选 `IndexFlatL2`=精确全扫,三家独立)/ 不赌 sqlite-vec(端侧无人用 ANN,ANN 全是服务器级 Milvus/Qdrant/pgvector/Chroma)/ Hash 兜底(Nexus `local-hash-v1` 本就是默认)/ 端侧无 rerank(仅 mem0 云 platform 才上)。
+> - **🔧 修正 1:融合用加权归一,非 RRF**——所有参考项目用「各源 max/min-max 归一 + 加权和」(Nexus `vec×0.7+kw×0.3` 再加性叠 recency/emotion/decay),**无人用 RRF**;且 chat-A 既有 min-max 归一+加性框架,折入向量信号比 bolt 独立 RRF 阶段更一致。→ `fusionMode` 默认 `weighted`,RRF 留备选开关。
+> - **🔧 修正 2:维度成本**——BGE-M3/Qwen3-0.6B 是 1024维,比参考本地档(384维)重 ~2.7×,端侧暴力扫描需实测 Pi;**预留"降维(MRL 截断)/换 384维小模型"端侧开关**。
+> - **并入轻量技巧**:① **worker 线程跑 cosine**(Nexus)把 O(n×dim) 剥离主线程——直接服务非阻塞硬约束;② embedding LRU 缓存(`model::text`);③ **融合前 over-fetch、融合后才封顶**;④ 召回即强化**串行队列后台写回 + catch**(比 memoripy 同步毫秒写回健壮);⑤ BLOB 字节数反推维度(`len//4`)换模型免迁移;⑥ 中文若 FTS5 分词不足,Nexus 纯 JS CJK-aware BM25 是备选。
+> - **反模式**:eros_ai LLM-as-retriever(每次召回喂全部冷记忆给 LLM)——延迟/token 灾难,明确避开。
 
 ### 5.8 写路径决策 + 记忆框架深读纪律(2026-06-22,mem0/Letta/OpenMemory/Memoripy)
 > 详见 `memory-frameworks-findings-2026-06-22.md`(含 round-1 调研的头条订正)。
@@ -390,7 +397,7 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 **对 IR 精排的明确立场**:
 - **cross-encoder 精排 / 穷尽召回 / 严格 MMR = IR 轴增强,非人味增强**。端侧砍掉不只是省算力,**方向上也对**(人不会每次精准调出最相关那条)。
 - 因此**重新解读 §5.6 的"PC 更高性能"**:PC 多出的算力**优先投"更厚的认知层"**(更频繁/更深的夜间巩固、更大模型做惊奇评估与反思、更长的联想扩散跳数、更细的情景叙事生成),**而非投 cross-encoder 把检索做得更准**。cross-encoder 仅作 PC 可选项,且认知它属"搜索引擎方向"。
-- **RRF 混合检索保留**——理由是"轻且稳",仅作"相关性"这**一路线索**的供给,不是为了拉高精度。
+- **关键词+向量的混合检索保留**——仅作"相关性"这**一路线索**的供给,不是为了拉高精度。⚠️ **融合实现按参考共识用加权归一**(向量作一路 min-max 归一信号折进既有加性框架),非学界常推的 RRF——见 §5.7b 调研裁决(RRF 留作 `fusionMode` 备选)。
 
 **必须钉死的边界(区分"设计的遗忘" vs "不想要的失真")**:
 - **lite 档弱 embedder(bge-small)的退化 ≠ 人味**——那是噪声,别美化成"像人健忘"。
