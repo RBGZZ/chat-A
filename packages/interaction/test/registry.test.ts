@@ -74,12 +74,54 @@ describe('interaction/ActionRegistry 容错执行', () => {
 
   it('toolDefs 形态 + size(含全部内置动作)', () => {
     const reg = buildDefaultRegistry();
-    expect(reg.size).toBe(5);
+    expect(reg.size).toBe(8);
     const names = reg.toolDefs().map((d) => d.name);
     expect(names).toEqual(
-      expect.arrayContaining(['current_time', 'calculate', 'set_reminder', 'unit_convert', 'date_diff']),
+      expect.arrayContaining([
+        'current_time',
+        'calculate',
+        'set_reminder',
+        'unit_convert',
+        'date_diff',
+        'list_reminders',
+        'recall_fact',
+        'countdown',
+      ]),
     );
     expect(reg.toolDefs()[0]?.inputSchema).toBeDefined();
+  });
+});
+
+describe('interaction/buildDefaultRegistry 能力标注 + 能力门(§12.2)', () => {
+  it('list_reminders 与 set_reminder 共享 store:写入后可读', async () => {
+    const reg = buildDefaultRegistry();
+    await reg.execute(call('set_reminder', { text: '买菜' }, 's1'));
+    const res = await reg.execute(call('list_reminders', {}, 'l1'));
+    expect(res.isError).toBeUndefined();
+    expect(res.content).toContain('买菜');
+  });
+
+  it('注入 factLookup 经 recall_fact 命中', async () => {
+    const reg = buildDefaultRegistry({ factLookup: (q) => (q === 'k' ? 'v' : undefined) });
+    const res = await reg.execute(call('recall_fact', { query: 'k' }, 'r1'));
+    expect(res.content).toBe('v');
+  });
+
+  it('空能力集 new Set():仅纯计算动作可见(时间域被隐藏)', () => {
+    const reg = buildDefaultRegistry().withCapabilities(new Set<string>());
+    const names = reg.toolDefs().map((d) => d.name).sort();
+    expect(names).toEqual(['calculate', 'date_diff', 'recall_fact', 'unit_convert'].sort());
+    expect(names).not.toContain('current_time');
+    expect(names).not.toContain('list_reminders');
+    expect(names).not.toContain('countdown');
+  });
+
+  it('能力集 {time}:时间域动作恢复可见', () => {
+    const reg = buildDefaultRegistry().withCapabilities(new Set(['time']));
+    const names = reg.toolDefs().map((d) => d.name);
+    expect(names).toEqual(
+      expect.arrayContaining(['current_time', 'set_reminder', 'list_reminders', 'countdown']),
+    );
   });
 });
 

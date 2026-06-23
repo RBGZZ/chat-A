@@ -40,6 +40,7 @@ export function listReminders(store: ReminderStore): readonly StoredReminder[] {
  * 内置本地动作:设置提醒(**内存版**,§12.2)。入参 { text, atIso? }。
  * 仅入列 + 可经 listReminders 读取;**不接调度/定时器**(无外部副作用)。
  * atIso 若提供且不可解析 → isError(不抛)。store 可注入。
+ * 声明 `capability:'time'`(提醒属时间域;能力门关时仍始终可用)。
  */
 export function createSetReminderAction(store: ReminderStore): Action {
   return {
@@ -47,6 +48,7 @@ export function createSetReminderAction(store: ReminderStore): Action {
     description:
       '设置一个提醒(内存版,记下要提醒的事)。入参 {text:"要提醒的内容", atIso?:"ISO时间,可选"}。' +
       '当用户说"提醒我…"时用。',
+    capability: 'time',
     inputSchema: {
       type: 'object',
       properties: {
