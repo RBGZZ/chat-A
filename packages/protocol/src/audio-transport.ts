@@ -51,6 +51,13 @@ export interface AudioTransport {
    */
   onAudio(listener: AudioListener): Unsubscribe;
 
+  /**
+   * 排空"已下发但未投递"的输出音频(打断时用,§4.2.2:不设常驻队列,仅清 async 待投递)。
+   * 进程内实现:作废 `async` 模式下已 `queueMicrotask` 但尚未触发的待投递帧;
+   * 同步模式无待投递、`close()` 之后均为安全 no-op(幂等,不抛)。
+   */
+  clearBuffer(): void;
+
   /** 关闭传输:清理 listener、释放底层资源(进程内实现即清空 listener 集)。幂等。 */
   close(): void;
 }
@@ -72,6 +79,11 @@ export class InProcessAudioTransport implements AudioTransport {
   private listeners = new Set<AudioListener>();
   private closed = false;
   private readonly async: boolean;
+  /**
+   * 单调代际:async 投递的微任务回调启动时自检本字段;`clearBuffer` 自增使
+   * 所有"已排程未投递"的微任务因 epoch 不符而跳过投递(打断排空,见 §4.2.2)。
+   */
+  private pendingEpoch = 0;
 
   /** `async=true` 经微任务异步投递;默认 false 同步直通(测试友好)。 */
   constructor(options?: { readonly async?: boolean }) {
@@ -83,12 +95,20 @@ export class InProcessAudioTransport implements AudioTransport {
     // 快照:避免 listener 内增删 listener 影响本次遍历;无 listener 即静默丢弃(不抛)。
     const targets = [...this.listeners];
     if (this.async) {
+      const epoch = this.pendingEpoch; // 捕获排程时刻代际
       queueMicrotask(() => {
+        // 被 clearBuffer(代际自增)/close 作废:启动时自检,不符即跳过投递
+        if (this.closed || epoch !== this.pendingEpoch) return;
         for (const l of targets) this.deliver(l, frame);
       });
     } else {
       for (const l of targets) this.deliver(l, frame);
     }
+  }
+
+  clearBuffer(): void {
+    if (this.closed) return; // close 后无待投递,安全 no-op
+    this.pendingEpoch++; // 作废所有已排程未投递的微任务;同步模式无待投递,自增亦无害
   }
 
   onAudio(listener: AudioListener): Unsubscribe {
