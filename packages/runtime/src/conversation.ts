@@ -82,6 +82,7 @@ export class Conversation {
   readonly #stanceDetector: StanceDetector;
   readonly #selfNotions: readonly SelfNotion[];
   readonly #assertiveness: number;
+  readonly #expressiveness: number;
   readonly #traceSink: DecisionTraceSink;
   readonly #sessionId: string;
   #turnSeq = 0;
@@ -96,6 +97,8 @@ export class Conversation {
     this.#stanceDetector = deps.stanceDetector ?? new DefaultStanceDetector();
     this.#selfNotions = seed.selfNotions ?? [];
     this.#assertiveness = seed.dials.assertiveness;
+    // 风格 steer 强度(§7#4):由 expressiveness 旋钮微调 StyleDisciplineContributor。
+    this.#expressiveness = seed.dials.expressiveness;
     this.#traceSink = deps.traceSink ?? new NoopDecisionTraceSink();
     // 构造期建好 assembler(注册四个内置 contributor),实例稳定供 KV 复用(§5.4)。
     this.#assembler = new PromptAssembler([
@@ -139,6 +142,7 @@ export class Conversation {
       userText,
       history: this.#memory.snapshot(),
       stance,
+      expressiveness: this.#expressiveness,
     });
     // 同时回传 recalled 供决策 trace 记录(§8.1);assembler 仍只消费 ctx,不破接缝。
     return { assembled, recalled };
