@@ -7,4 +7,6 @@ export * from './llm-appraiser';
 export * from './store';
 export * from './seed';
 export * from './engine';
+export * from './card-loader';
+export * from './seed-memories';
 export * from './config-loader';

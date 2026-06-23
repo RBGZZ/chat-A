@@ -12,6 +12,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@chat-a/providers": "workspace:*"
+    "@chat-a/providers": "workspace:*",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@chat-a/memory": "workspace:*"
   }
 }

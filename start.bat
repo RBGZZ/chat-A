@@ -9,6 +9,12 @@ REM The API key is read from .env.local (gitignored, never committed).
 set "CHAT_A_LLM_PROVIDER=deepseek"
 set "CHAT_A_LLM_MODEL=deepseek-v4-flash"
 
+REM Optional: custom persona (name/identity/OCEAN/dials/lore/user profile).
+REM Copy persona.example.yaml to persona.yaml, edit it, then uncomment:
+REM set "CHAT_A_PERSONA_CARD=persona.yaml"
+REM Override priority: defaults < card < env. Env vars (CHAT_A_PERSONA_NAME /
+REM CHAT_A_PERSONA_IDENTITY / CHAT_A_DIAL_* / CHAT_A_USER_PROFILE) override card fields.
+
 if not exist ".env.local" (
   echo [chat-A] Missing .env.local. Create it in the project root with one line:
   echo         CHAT_A_LLM_API_KEY=sk-your-key

@@ -65,6 +65,34 @@ export interface PersonaSeed {
   readonly greetings?: readonly string[];
 }
 
+/**
+ * 用户手写的 PersonaCard(§6.2,card-as-config)的 YAML 形态。
+ * 全字段可选:缺省回落默认种子;OCEAN/dials 部分子字段可选(逐字段回落)。
+ * lore=角色背景/故事(→ subject=agent 可召回记忆,不进骨架);
+ * userProfile=用户画像(→ subject=person 主用户种子记忆)。
+ */
+export interface PersonaCard {
+  readonly name?: string;
+  readonly identity?: string;
+  readonly ocean?: Partial<Ocean>;
+  readonly dials?: Partial<PersonaDials>;
+  readonly greetings?: readonly string[];
+  readonly lore?: readonly string[];
+  readonly userProfile?: readonly string[];
+}
+
+/**
+ * 加载 PersonaCard 的产物:可直接喂 PersonaEngine 的种子 + 两个待"种子化"的列表。
+ * 加载器只产数据,不碰 MemoryStore(接缝边界,§3.1);落库副作用留给编排层。
+ */
+export interface LoadedPersonaCard {
+  readonly seed: PersonaSeed;
+  /** 角色背景/故事 → subject=agent 记忆。 */
+  readonly lore: readonly string[];
+  /** 用户画像 → subject=person(主用户)记忆。 */
+  readonly userProfile: readonly string[];
+}
+
 /** 离散情绪(P1 小集合,够 tone 区分)。 */
 export type Emotion = 'joyful' | 'content' | 'neutral' | 'down' | 'irritated';
 
