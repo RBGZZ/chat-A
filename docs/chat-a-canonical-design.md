@@ -275,7 +275,7 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 | **未来:用户组** | 花名册扩成多人,**每人各有独立关系状态**(亲密度/IPC 轨迹/记忆);主用户仍是锚 |
 | **未来:Agent 自主纳入** | Agent 多次遇到某访客后,**自主决定把他从"访客"提升为花名册成员**(由 `autonomy/` 发起,§7),像人会"逐渐认识一个人" |
 
-- **schema 要点**:`people(person_id, name, is_primary, relationship_state, voiceprint_ref, status: primary|member|guest, added_by: user|agent)`;记忆/关系都挂 `person_id`。**现在只填主用户,但结构已支持用户组与自主纳入,免未来重构。**
+- **schema 要点**:`people(person_id, name, is_primary, relationship_state, voiceprint_ref, status: primary|member|guest, added_by: user|agent)`;记忆/关系都挂 `person_id`。**现在只填主用户,但结构已支持用户组与自主纳入,免未来重构。** `relationship_state` 为 JSON,**首字段 = `closeness`(关系亲密度,见 §6.1b)**;日后可扩多维(trust/familiarity/affection),JSON 天然支持、免迁移。
 - 说话人识别走大脑侧(声纹模型/diarization),适配 B 架构(终端只送音频);Provider 能力 `speaker_id`。
 - 区别于 deferred 的**多租户**(多个互相独立的主用户、各自一套伴侣)——那仍是后续大版本。这里是**一个伴侣、一个主用户、可认识多人**。
 
@@ -435,6 +435,14 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 - **夜间沉淀(借 Nexus dream)**:睡眠/低活跃时把 daily 压成长期记忆 + 反思 + 叙事线,并**自动写 Agent 第一人称自传记忆**(§5.3),摊销到本就要跑的 LLM。
 - 公式/file:line 细节见 `reference-code-findings` §C/§D/§F/§G。
 
+### 6.1b 关系亲密度 closeness(中速慢变量,2026-06-23)
+> 调研发现 chat-A 缺"关系"这条轴(MeuxCompanion 等有 trust/affection 演化),详见 `github-learnings-2026-06-23.md`。补一个**单标量**填齐。
+
+- **`closeness ∈ [0,1]`**:每个 `person_id` 一个,存 §5.3b `people.relationship_state` JSON(填实预留位)。**与人格(特质·慢)/ PAD(情绪·快)正交**,补齐缺失的"**关系**·中速"轴。
+- **演化(单一权威公式)**:积极互动**缓升** `c += k·valence⁺·(1−c)`(valence⁺ 取当轮 appraiser 的 pleasure 正分量,渐近饱和);长期缺席**惰性衰减** `0.5^(days/H)`(同 §5.5 衰减族,读时实时算、不写回);速率/半衰期可配(行为即配置)。在**回合收尾**更新,**不进首字热路径**(承非阻塞约束)。默认初值 `0.1`(陌生起步)。
+- **作用(单向 → 表达)**:喂 tone(warmth / 自我披露深度 / 称呼亲昵度:高 closeness = 更暖、更愿分享自己的事);(未来 autonomy 主动倾向钩子落地后)微调主动倾向。**绝不反向**改 OCEAN/PAD(避免难调反馈环)。
+- **升级路径(标注,不实现)**:日后可把 `relationship_state` 扩为多维(trust/familiarity/affection),`closeness` 作其一或派生量;读写接缝与 JSON 存储天然支持,无 schema 迁移。
+
 ### 6.2 用户自定义 Persona 创作(用户自治的落地)
 角色不是设计者写死的,**用户自己造**:
 - **角色背景设定 / 故事**:用户填写人物的身份、背景故事、性格、爱好、说话风格 → 成为人格种子(YAML)+ 自我 lore(§5.3,embedding 进向量库供语义召回)。
@@ -469,6 +477,7 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
    - **做实 `self_notions`**(LingYa 留的空壳):"我相信X/讨厌Y/对Z有看法",作为反对依据。
    - **改写"服从人类"默认**(LingYa STATIC_PROMPT 写死服从);借 LingYa belief 概率门控的**思路**做"坚持强度"。
    - **🎛️ 强度由用户可调**(见 §6 人格旋钮):`assertiveness` 旋钮 0→1 控制"分歧检测的触发阈值 + 异议表达的强度",从"温和顺从"到"敢顶嘴有主见"。
+   - **🆕 反谄媚原则(2026-06-23 调研,详见 `github-learnings-2026-06-23.md`)**:反谄媚 = 系统基于**真实信念冲突**(`core_belief`/`self_notions`)的**自主涌现判断,非强制机制**;**双向防偏**——既不被用户压服成谄媚,也不"为反对而反对"(performative contrarianism,lechmazur Contrarian rate 所测的失败模式),两者都偏离真诚、都反伴侣。assertiveness 仍用户自治;"必须开口"由危机/安全底线(不可配,§0)覆盖。**暂缓(已记录、不采纳)**:同意连击熔断器 / 主动性硬下限 / 生成后改写 pass(均属强制反谄媚,留未来可选/eval)。**eval 指标(只测不逼)**:SYCON-Bench Turn-of-Flip/Number-of-Flips(测被压服)+ lechmazur Contrarian rate(测硬顶)+ persona_drift 探针(测人格漂移)。
 4. **对话风格 = 人不是 essay**(`TurnStrategy` 生成纪律):话短、口语、有口头禅、会"嗯嗯"接话、用共同的梗;禁"作为AI…"/过度解释。借 LingYa tone(已能输出冷淡/俏皮腔)。
 5. **从语音读情绪 prosody**(`stt`/情感预检测):听出疲惫/低落(怎么说的),不只是说了什么。Nexus 已有语音韵律情绪信号可借。
 6. **可控的不完美 + 负面情绪姿态**(记忆衰减 + 心情影响):外围记忆允许模糊、心情影响状态;**🆕 IPC 新增 SULKING/WITHDRAWN 等负面姿态**(LingYa 5 态全亲社会,缺"赌气/冷淡/我现在不想说话")。**🎛️ 负面姿态表达程度由用户可调**(`negative_affect_expression` 旋钮 0→1:从"永远愉悦不闹脾气"到"完整表达坏心情/会赌气冷淡")。核心事实永不忘(§5.4)。
@@ -485,7 +494,8 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
   - **不可配的底线**:① **永远感知/捕获**用户语音(即使不立即响应,绝不"装聋",prosody 不丢);② **危机覆盖**(危险信号永远最高,无视任何模式,承 §0);③ **硬打断通道始终保留**("停一下/看着我"任何时刻把她拉回)。
   - **落地**:`attention_mode` 调三个量——用户语音事件在队列中的等级、是否触发 abort 三件套打断她正在说的话/在飞外部动作、"判定为真打断"的门槛(focus=要求更长坚持/关键词,而非真聋)。游戏动作默认压低(low/medium),**绝不发 critical 抢占用户语音**。
 - **给模型一个"沉默"工具**:让 LLM 显式选择不回应(系统提示明说"不必回应每个信号"),叠加衰减概率 governor(被提及/触发词加分、空闲衰减),base rate 由 PAD/OCEAN 调制。
-- **⚠️ chat-A 的超越点**:三参考项目自主性**全是定时器触发,从不评估"此刻开口是否值得/用户会不会烦"**。chat-A 的 `决策 LLM(silent|speak|idle) + 三道节流` 把"是否值得说"作为**一等决策**,是质的超越——这是差异化护城河,须自创。
+- **🔧 worth-of-speaking 的定位修正(2026-06-23 GitHub 调研,详见 `github-learnings-2026-06-23.md`)**:"是否值得说"**已是既有先验技术**——**Inner Thoughts**(CHI 2025,开源:8 因子动机量表 → CoT 权衡 → 说/打断双阈值)、**ProactiveAgent**(学习型奖励模型 + False-Alarm 分类 + 反馈防刷屏)、**Proact-VL**(微软实时陪伴,自主决定何时/多久/语速)均已实现打分式评估。**故不再宣称"别人只定时器、我们独有评估"**;chat-A 可防守的差异化在**组合**:决策 LLM(silent|speak|idle)+ **三道节流** + **跨会话持久内在生活** + **会反对/不服从** + 可插拔 SkillScheduler + no-action 预算单消费者优先级队列(无单一项目集齐)。真实蓝海:**§7#1 内在生活 + open-thread 主动跟进 + 会反对**。
+- **🆕 判断力增益(决策 LLM prompt,待决策 LLM 实现时落入)**:"是否值得说"采用 **Inner Thoughts 8 因子动机量表**(关联 / 信息缺口 / 预期影响 / 紧迫 / 连贯 / 原创 / 平衡 / 动态)作评估维度——**给系统更好判断依据,非强制规则**(量表权重/启用可配)。**eval(只测不逼)**:记 ProactiveAgent 的 False-Alarm / Missed-Needed / Non-Response / Correct 四分类为 autonomy 决策评估框架。
 
 ---
 
