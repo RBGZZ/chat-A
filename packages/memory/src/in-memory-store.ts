@@ -4,18 +4,23 @@ import type {
   MemoryRecord,
   MemoryStore,
   MemorySubject,
+  Pad,
   Person,
   StoredMessage,
 } from './types';
 import {
   decayFactor,
+  emotionResonance,
+  keywordScore,
   makePrimaryPerson,
+  mixedRecallScore,
   recallScore,
   reinforceImportance,
   resolveAttribution,
   resolveMemoryConfig,
   tokenize,
   type MemoryConfig,
+  type RecallSignal,
 } from './config';
 
 interface MutableRecord {
@@ -117,20 +122,36 @@ export class InMemoryMemoryStore implements MemoryStore {
     });
   }
 
-  recall(query: string, limit: number = this.#cfg.recallLimit): readonly MemoryRecord[] {
+  recall(
+    query: string,
+    limit: number = this.#cfg.recallLimit,
+    pad?: Pad,
+  ): readonly MemoryRecord[] {
     const tokens = tokenize(query, this.#cfg.normalize);
     if (tokens.length === 0) return [];
-    // 不按主语过滤:一次跨 person+agent+shared 召回(§5.3 末条),与 SQLite 行为一致。
-    const hits = [...this.#memories.values()].filter((r) =>
-      tokens.some((t) => r.normalized.includes(t)),
-    );
     const now = this.#now();
-    // 融合得分排序(承 §5.5):用 config.ts 单一权威公式算 score = importance × decay,与 SQLite 零漂移。
-    // 衰减用强化前的值算,保证本次返回排序确定(强化只影响后续召回)。
-    const scored = hits.map((r) => ({
-      r,
-      score: recallScore(r.importance, decayFactor(r.lastSeenAtMs, now, r.pinned, this.#cfg)),
-    }));
+    // 候选过滤:逐 token 命中(includes);命中去重 token 数作关键词原始分 raw(与 SQLite 同规则,零漂移)。
+    // 不按主语过滤:一次跨 person+agent+shared 召回(§5.3 末条),与 SQLite 行为一致。
+    const scored: { r: MutableRecord; score: number }[] = [];
+    for (const r of this.#memories.values()) {
+      const raw = tokens.reduce((n, t) => (r.normalized.includes(t) ? n + 1 : n), 0);
+      if (raw === 0) continue; // 关键词无命中 → 不进候选池。
+      // 混合归一得分(承 §5.5):关键词归一 + 记忆强度(importance×decay)+ 可选情感共振;
+      // 全部经 config.ts 单一权威公式,自适应分母 + 零信号门控,与 SQLite 零漂移。
+      // 衰减/强度用强化前的值算,保证本次返回排序确定(强化只影响后续召回)。
+      const signals: RecallSignal[] = [
+        { present: true, value: keywordScore(raw, tokens.length, this.#cfg) },
+        {
+          present: true,
+          value: recallScore(r.importance, decayFactor(r.lastSeenAtMs, now, r.pinned, this.#cfg)),
+        },
+      ];
+      // 情感共振仅当调用方传入 PAD 时在场(默认不启用,§5.5);记忆侧 emotion 本期缺省按中性。
+      if (pad !== undefined) signals.push({ present: true, value: emotionResonance(pad) });
+      const score = mixedRecallScore(signals);
+      if (score <= 0) continue; // 零信号门控:全部在场信号为 0 才丢(只对零信号生效,§5.5)。
+      scored.push({ r, score });
+    }
     scored.sort((a, b) => b.score - a.score || b.r.hits - a.r.hits || b.r.id - a.r.id);
     const top = scored.slice(0, limit).map((s) => s.r);
     // 检索即强化:只对实际返回的 top-N 升 access_count/importance、更新 last_accessed(被想起→记得牢,§5.5)。
