@@ -1,4 +1,4 @@
-import { trace, type Tracer } from '@opentelemetry/api';
+import { trace, isSpanContextValid, type Tracer } from '@opentelemetry/api';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import {
   ConsoleSpanExporter,
@@ -78,4 +78,23 @@ function makeHandle(provider: NodeTracerProvider, timeoutMs: number): TelemetryH
 /** 取 chat-A 的 tracer;未 init 时返回 API 默认的 no-op tracer(不污染测试/生产降级)。 */
 export function getTracer(): Tracer {
   return trace.getTracer(SERVICE_NAME);
+}
+
+/**
+ * 当前活动 OTel span 的缝合键(§8.1「两层追踪,同 ID 缝合」)。
+ *
+ * 读 `trace.getActiveSpan()?.spanContext()` 拿 `traceId`/`spanId`,供决策 trace 落库时缝合——
+ * 「OTel 发现慢回合 → 跳到 SQLite 完整决策记录」。底层走 OTel 默认的 AsyncLocalStorage
+ * context manager,跨 async 自动传播(§8.1)。
+ *
+ * 返回值刻意用「条件展开」而非显式 `undefined`(合 exactOptionalPropertyTypes):
+ * - 无活动 span(未 init / no-op tracer / 不在 span 内)→ 返回 `{}`;
+ * - span context 无效(全零 id,如 sampled-out 占位)→ 同样返回 `{}`,绝不写垃圾 id。
+ * 调用方据「键是否存在」判断有无缝合键,不会拿到 `traceId: undefined`。
+ */
+export function captureActiveSpanContext(): { traceId?: string; spanId?: string } {
+  const ctx = trace.getActiveSpan()?.spanContext();
+  // 无 span 或 span context 无效(全零)→ 不缝合,省略键。
+  if (ctx === undefined || !isSpanContextValid(ctx)) return {};
+  return { traceId: ctx.traceId, spanId: ctx.spanId };
 }

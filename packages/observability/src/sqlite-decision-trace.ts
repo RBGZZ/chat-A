@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { DecisionTrace, DecisionTraceSink } from './decision-trace';
 import { NoopDecisionTraceSink } from './decision-trace';
+import { captureActiveSpanContext } from './telemetry';
 
 /** 当前决策 trace 库 schema 版本。破坏性/累加性变更 +1 并新增迁移。 */
 export const CURRENT_TRACE_SCHEMA_VERSION = 2;
@@ -48,6 +49,13 @@ export interface SqliteDecisionTraceSinkOptions {
   readonly path: string;
   /** 错误回调(§8.1 error 层);默认 console.error。降级时记录而非抛出。 */
   readonly onError?: (err: unknown, op: string) => void;
+  /**
+   * 落库时是否自动捕获当前活动 OTel span 的 trace_id/span_id 缝合(§8.1 两层同 ID)。
+   * 默认 `true`:trace 自身未带缝合键时,读 `captureActiveSpanContext()` 补上。
+   * trace 已显式带 traceId 时**以 trace 为准**(编排层显式覆盖优先,见 #record)。
+   * 置 `false` 可完全关闭自动捕获(测试隔离 / 不想依赖 ALS 时)。
+   */
+  readonly captureActiveSpan?: boolean;
 }
 
 /**
@@ -57,9 +65,11 @@ export interface SqliteDecisionTraceSinkOptions {
 export class SqliteDecisionTraceSink implements DecisionTraceSink {
   readonly #db: DatabaseSync;
   readonly #onError: (err: unknown, op: string) => void;
+  readonly #captureActiveSpan: boolean;
 
   constructor(opts: SqliteDecisionTraceSinkOptions) {
     this.#onError = opts.onError ?? ((err, op) => console.error(`[decision-trace] ${op} 失败`, err));
+    this.#captureActiveSpan = opts.captureActiveSpan ?? true;
     this.#db = new DatabaseSync(opts.path);
     try {
       this.#db.exec('PRAGMA journal_mode=WAL;');
@@ -101,8 +111,31 @@ export class SqliteDecisionTraceSink implements DecisionTraceSink {
     }
   }
 
+  /**
+   * 解析本条 trace 的缝合键(trace_id/span_id):
+   * - trace 自身已带 traceId → 以 trace 为准(编排层显式覆盖优先);
+   * - 否则若开启自动捕获,读当前活动 OTel span 上下文补上(§8.1);
+   * - 无活动 span / 关闭捕获 / span 上下文无效 → 返回 null/null(落库写 NULL,不写垃圾 id)。
+   * span_id 跟随各自来源(trace 显式 span_id 与 trace_id 配套;否则用捕获到的)。
+   */
+  #resolveStitchKeys(trace: DecisionTrace): { traceId: string | null; spanId: string | null } {
+    if (trace.traceId !== undefined) {
+      return { traceId: trace.traceId, spanId: trace.spanId ?? null };
+    }
+    if (!this.#captureActiveSpan) {
+      return { traceId: null, spanId: trace.spanId ?? null };
+    }
+    const active = captureActiveSpanContext();
+    return {
+      traceId: active.traceId ?? null,
+      // trace 未带 traceId 时,span_id 也以捕获为准(同一来源);trace 若单独带 span_id 则保留。
+      spanId: active.spanId ?? trace.spanId ?? null,
+    };
+  }
+
   record(trace: DecisionTrace): void {
     try {
+      const stitch = this.#resolveStitchKeys(trace);
       this.#db
         .prepare(
           `INSERT INTO decision_traces(
@@ -113,8 +146,8 @@ export class SqliteDecisionTraceSink implements DecisionTraceSink {
         )
         .run(
           trace.correlationId,
-          trace.traceId ?? null,
-          trace.spanId ?? null,
+          stitch.traceId,
+          stitch.spanId,
           trace.sessionId,
           trace.turnId,
           trace.createdAtMs,
