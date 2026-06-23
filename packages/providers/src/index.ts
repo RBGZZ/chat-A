@@ -6,3 +6,8 @@ export * from './config';
 export * from './registry';
 export * from './json';
 export * from './tool-json';
+export * from './embedder';
+export * from './hash-embedder';
+export * from './openai-compat-embedder';
+export * from './embedder-config';
+export * from './embedder-registry';
