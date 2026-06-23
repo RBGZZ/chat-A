@@ -148,3 +148,22 @@ describe('InProcessAudioTransport — 异步投递模式(async=true)', () => {
     expect(received).toHaveLength(1);
   });
 });
+
+describe('InProcessAudioTransport — clearBuffer 打断排空(VoiceLoop v1)', () => {
+  it('clearBuffer 丢弃 async 模式下未投递的帧', async () => {
+    const t = new InProcessAudioTransport({ async: true });
+    const got: AudioFrame[] = [];
+    t.onAudio((f) => got.push(f));
+    t.sendAudio(makeDownstream(1)); // 排进微任务,未投递
+    t.clearBuffer(); // 应丢弃
+    await Promise.resolve(); // 放行微任务
+    expect(got).toHaveLength(0);
+  });
+
+  it('clearBuffer 同步模式 + close 后均不抛(幂等)', () => {
+    const t = new InProcessAudioTransport();
+    expect(() => t.clearBuffer()).not.toThrow();
+    t.close();
+    expect(() => t.clearBuffer()).not.toThrow();
+  });
+});
