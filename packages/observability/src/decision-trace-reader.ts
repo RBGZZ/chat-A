@@ -131,6 +131,29 @@ export class DecisionTraceReader {
     return this.#getBy('trace_id', traceId, 'getByTraceId');
   }
 
+  /**
+   * 按 OTel `trace_id` + `span_id` **精确**取单回合完整决策链(§8.1 两层同 ID 缝合的精确缝合点)。
+   * 一条 OTel trace 下可能挂多个 span/回合,trace_id 单键可能多命中;span_id 配合可定位到产出
+   * 该决策的具体 span。未命中 / 降级返回 undefined。
+   */
+  getByTraceAndSpanId(traceId: string, spanId: string): DecisionTrace | undefined {
+    const db = this.#db;
+    if (db === null) return undefined;
+    try {
+      const row = db
+        .prepare(
+          `SELECT * FROM decision_traces WHERE trace_id = ? AND span_id = ?
+           ORDER BY created_at DESC, id DESC LIMIT 1`,
+        )
+        .get(traceId, spanId) as Record<string, unknown> | undefined;
+      if (row === undefined) return undefined;
+      return this.#rowToTrace(row);
+    } catch (err) {
+      this.#onWarn(err, 'getByTraceAndSpanId');
+      return undefined;
+    }
+  }
+
   #getBy(column: string, value: string, op: string): DecisionTrace | undefined {
     const db = this.#db;
     if (db === null) return undefined;
