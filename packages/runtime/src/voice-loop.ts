@@ -14,8 +14,10 @@
  *   合法则 emit 对应 BusEvent + 设态，非法记 warn 不抛（§3.2 优雅降级）。
  * - **generation 自检作废**：持单调 `#gen`；每次喂 TTS / sendAudio 前自检 `gen === #gen`，
  *   不等即不发（单消费者单生产者，自检即足）。打断 = `#gen++` 使在途 onToken/#speak 变 no-op。
- * - **协作式放弃**（§4 限制）：`send` 不可取消（零改签名），打断后在途 send 在后台跑完但
- *   输出被忽略（Fake 即时无浪费，真 LLM 浪费尾部 token —— 后续加 AbortSignal 切片解决）。
+ * - **真取消**（§3.2 真打断）：每个「想」回合建一个 `AbortController`，把 `signal` 传进注入的
+ *   `send(text, onToken, signal)`；打断/停止时 `abort()` 之，使底层 LLM 流**真正停止**（不再后台
+ *   跑到完）。被取消的 send 以 AbortError reject，因 gen 已变在 .catch 里静默忽略（不重复 reset）。
+ *   generation 自检仍兜住「输出作废」，二者叠加：既不浪费尾部算力，也不污染状态。
  * - 全程容错：任一步抛错被 catch，回 listening，永不崩（§3.2）。
  */
 import type { AudioFrame, AudioTransport, Unsubscribe } from '@chat-a/protocol';
@@ -43,8 +45,12 @@ export interface VoiceLoopDeps {
   readonly turnDetector: TurnDetector;
   readonly stt: SttProvider;
   readonly tts: TtsProvider;
-  /** 想：吃用户文本 + onToken（逐 token 回调），resolve 完整回复。零改 Conversation。 */
-  readonly send: (text: string, onToken: (t: string) => void) => Promise<string>;
+  /**
+   * 想：吃用户文本 + onToken（逐 token 回调）+ 可选 signal（协作取消），resolve 完整回复。
+   * `signal` 在打断时被 abort，使底层 LLM 流真停（§3.2 真打断）；可选、向后兼容（不传 signal 的
+   * 旧实现仍可注入，只是不可取消）。装配处传 `conversation.send.bind(conversation)`。
+   */
+  readonly send: (text: string, onToken: (t: string) => void, signal?: AbortSignal) => Promise<string>;
   /** 半句写回只用到 appendMessage（最小面，§4 半句写回）。 */
   readonly memory: Pick<MemoryStore, 'appendMessage'>;
   readonly bus: LightVoiceBus;
@@ -59,7 +65,7 @@ export class VoiceLoop {
   readonly #turnDetector: TurnDetector;
   readonly #stt: SttProvider;
   readonly #tts: TtsProvider;
-  readonly #send: (text: string, onToken: (t: string) => void) => Promise<string>;
+  readonly #send: (text: string, onToken: (t: string) => void, signal?: AbortSignal) => Promise<string>;
   readonly #memory: Pick<MemoryStore, 'appendMessage'>;
   readonly #bus: LightVoiceBus;
   readonly #sessionId: string;
@@ -81,6 +87,11 @@ export class VoiceLoop {
   #unsub: Unsubscribe | null = null;
   /** 当前回合的 send 链（仅用于内部追踪，不阻塞）。 */
   #currentTurn: Promise<void> | null = null;
+  /**
+   * 当前「想」回合的取消控制器（§3.2 真打断）：打断/停止时 abort() 之，使底层 LLM 流真停。
+   * 每回合在 #startThinking 新建;无在途回合时为 null。
+   */
+  #currentAbort: AbortController | null = null;
 
   constructor(deps: VoiceLoopDeps) {
     this.#transport = deps.transport;
@@ -107,15 +118,28 @@ export class VoiceLoop {
     this.#unsub = this.#transport.onAudio((frame) => this.#onAudio(frame));
   }
 
-  /** 停止：退订上行 + 作废当前回合（在途 send 输出被忽略，协作式放弃）。 */
+  /** 停止：退订上行 + 作废当前回合（gen 作废 onToken/TTS + abort 真停底层 LLM 流，§3.2）。 */
   stop(): void {
     if (this.#unsub !== null) {
       this.#unsub();
       this.#unsub = null;
     }
     this.#gen++; // 作废在途回合（onToken/#speak 自检失败而 no-op）
+    this.#abortCurrent(); // 真取消在途「想」回合的底层 LLM 流
     this.#replyAccum = '';
     this.#audioBuf = [];
+  }
+
+  /** abort 当前回合的取消控制器（若有）并清空句柄；幂等、不抛（§3.2）。 */
+  #abortCurrent(): void {
+    const ac = this.#currentAbort;
+    this.#currentAbort = null;
+    if (ac === null) return;
+    try {
+      ac.abort();
+    } catch (err) {
+      console.warn('[VoiceLoop] abort 当前回合抛错(已捕获):', err);
+    }
   }
 
   // ───────────────────────────── 状态迁移 ─────────────────────────────
@@ -290,7 +314,10 @@ export class VoiceLoop {
       for (const sentence of splitter.push(tok)) enqueueSpeak(sentence);
     };
 
-    this.#currentTurn = this.#send(text, onToken)
+    // 本回合取消控制器（§3.2 真打断）：打断/停止时 abort 之，使底层 LLM 流真停（不再后台跑到完）。
+    const ac = new AbortController();
+    this.#currentAbort = ac;
+    this.#currentTurn = this.#send(text, onToken, ac.signal)
       .then(async (full) => {
         if (gen !== this.#gen) return; // 已被打断：忽略输出（协作式放弃）
         // 累积以 send 返回的完整回复为准(onToken 可能漏拼)
@@ -301,8 +328,16 @@ export class VoiceLoop {
         this.#finishTurn(gen);
       })
       .catch((err) => {
-        console.warn('[VoiceLoop] send 抛错(回 listening):', err);
-        if (gen === this.#gen) this.#resetToListening();
+        // 被打断的回合(gen 已变)其 send 多以 AbortError reject —— 属正常取消,静默忽略不重复 reset;
+        // 仅当仍是本回合(真错误)才 warn + 回 listening 兜底(§3.2)。
+        if (gen === this.#gen) {
+          console.warn('[VoiceLoop] send 抛错(回 listening):', err);
+          this.#resetToListening();
+        }
+      })
+      .finally(() => {
+        // 回合自然结束/出错收尾后清理本回合控制器(若仍是它);打断已在 #interrupt 里清。
+        if (this.#currentAbort === ac) this.#currentAbort = null;
       });
   }
 
@@ -363,12 +398,14 @@ export class VoiceLoop {
   /**
    * 核心打断（barge_in_pending → listening，§4）：
    *   1. `#gen++` 作废在途 TTS/onToken；
-   *   2. transport.clearBuffer() 排空已下发未播音频；
-   *   3. 半句写回（`#replyAccum + [被用户打断]`，仅非空时）；
-   *   4. 清状态、回 listening。send 不取消（协作式放弃,§4 限制）。
+   *   2. `abort()` 真停在途「想」回合的底层 LLM 流（§3.2 真打断，不再后台跑到完）；
+   *   3. transport.clearBuffer() 排空已下发未播音频；
+   *   4. 半句写回（`#replyAccum + [被用户打断]`，仅非空时）；
+   *   5. 清状态、回 listening。被取消的 send 以 AbortError reject,因 gen 已变在 .catch 里静默忽略。
    */
   #interrupt(): void {
     this.#gen++; // 在途旧 TTS 帧/onToken 立即作废
+    this.#abortCurrent(); // 真取消:abort 本回合底层 LLM 流(承 §3.2)
     try {
       this.#transport.clearBuffer();
     } catch (err) {

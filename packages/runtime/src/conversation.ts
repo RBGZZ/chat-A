@@ -117,6 +117,11 @@ export interface TurnContext {
   readonly turnStartMs: number;
   /** 会话内回合序号(§7#3 演化轮次,供 selfNotionsManager.advance)。 */
   readonly turn: number;
+  /**
+   * 协作取消信号(承 §3.2 真打断):由外壳从 `send` 第三形参透传,策略转交底层 LLM 调用
+   * (`llm.stream(req, signal)` / `completeWithTools(req, signal)`)。缺省=回合不可取消(等价现状)。
+   */
+  readonly signal?: AbortSignal;
   readonly deps: TurnDeps;
 }
 
@@ -138,7 +143,7 @@ export interface TurnStrategy {
  */
 export class SingleShotStrategy implements TurnStrategy {
   async run(ctx: TurnContext): Promise<string> {
-    const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs, turn } = ctx;
+    const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs, turn, signal } = ctx;
     // 回合前:读关系亲密度(§6.1b,惰性衰减、同步快)+ 当前心情渲染本轮 tone
     // (不改状态;情绪推进/closeness 抬升留到回合后,保首字零额外延迟)。
     const closeness = deps.memory.getCloseness(deps.primaryPersonId);
@@ -164,7 +169,8 @@ export class SingleShotStrategy implements TurnStrategy {
       llmSpan.setAttribute(GENAI.OUTPUT_TYPE, 'text');
       let acc = '';
       try {
-        for await (const token of deps.llm.stream({ system, messages })) {
+        // 透传 signal(§3.2 真打断):打断时底层 LLM 流真停;缺省 signal=undefined 等价 stream(req)。
+        for await (const token of deps.llm.stream({ system, messages }, signal)) {
           acc += token;
           onToken(token);
         }
@@ -273,7 +279,12 @@ export class Conversation {
     this.#strategy = deps.strategy ?? new SingleShotStrategy();
   }
 
-  async send(userText: string, onToken: (token: string) => void): Promise<string> {
+  async send(
+    userText: string,
+    onToken: (token: string) => void,
+    /** 协作取消信号(可选,向后兼容):透传至 TurnContext → 策略 → LLM 调用;不传=回合不可取消。 */
+    signal?: AbortSignal,
+  ): Promise<string> {
     const turnId = `t${++this.#turnSeq}`;
     const correlationId = `${this.#sessionId}/${turnId}/0`;
     const tracer = getTracer();
@@ -295,6 +306,8 @@ export class Conversation {
             turnSpan,
             turnStartMs,
             turn: this.#turnSeq,
+            // 仅在提供时填(exactOptionalPropertyTypes 友好;不传则 ctx.signal 为 undefined)。
+            ...(signal ? { signal } : {}),
             deps: this.#deps,
           });
           this.#bus.emit(makeBusEvent('turn:end', { reason: 'completed', atMs: Date.now() }, correlationId));

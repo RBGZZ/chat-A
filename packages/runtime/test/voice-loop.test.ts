@@ -192,6 +192,98 @@ describe('runtime/VoiceLoop', () => {
     expect(down.length).toBe(downBeforeInterrupt); // 打断后无新 tts:chunk
   });
 
+  it('④ 真取消：barge-in 打断时本回合 send 的 signal 变 aborted', async () => {
+    const mem = fakeMemory();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let capturedSignal: AbortSignal | undefined;
+    let abortedAtSend = false;
+    const { deps, transport, bus } = makeDeps({
+      memory: { appendMessage: mem.appendMessage },
+      vad: new StubVadDetector([0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.9, 0.9]),
+      // 扩展签名:(text, onToken, signal?) —— 捕获 signal,监听其 abort
+      send: async (_t, onToken, signal?: AbortSignal) => {
+        capturedSignal = signal;
+        signal?.addEventListener('abort', () => {
+          abortedAtSend = true;
+        });
+        onToken('我正在说一句话。'); // 触发 speaking,进 #replyAccum
+        await gate; // 卡住直到被打断
+        onToken('后面还没说完。'); // 打断后 no-op
+        return '我正在说一句话。后面还没说完。';
+      },
+    });
+    recorders(transport, bus);
+    const loop = new VoiceLoop(deps);
+    loop.start();
+
+    await driveSpeechThenSilence(loop, transport);
+    await flush();
+    expect(loop.state).toBe('speaking');
+    // send 拿到了一个未取消的 signal
+    expect(capturedSignal).toBeInstanceOf(AbortSignal);
+    expect(capturedSignal?.aborted).toBe(false);
+
+    // 打断
+    transport.sendAudio(micFrame(20_000));
+    transport.sendAudio(micFrame(20_010));
+    await flush();
+
+    // 真取消:本回合 signal 已 aborted(底层 LLM 流会真停)
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(abortedAtSend).toBe(true);
+    expect(loop.state).toBe('listening');
+
+    // 半句写回仍与现状一致
+    const written = mem.calls[0] as { role: string; content: string };
+    expect(written.content).toContain('[被用户打断]');
+
+    release();
+    await flush();
+  });
+
+  it('④ send 以 AbortError reject(被打断回合)不致崩、不重复 reset', async () => {
+    const mem = fakeMemory();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const { deps, transport, bus } = makeDeps({
+      memory: { appendMessage: mem.appendMessage },
+      vad: new StubVadDetector([0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.9, 0.9]),
+      send: async (_t, onToken, signal?: AbortSignal) => {
+        onToken('我正在说一句话。');
+        await gate;
+        // 模拟真 Provider:abort 后抛 AbortError
+        if (signal?.aborted === true) {
+          const e = new Error('aborted');
+          e.name = 'AbortError';
+          throw e;
+        }
+        return '我正在说一句话。';
+      },
+    });
+    recorders(transport, bus);
+    const loop = new VoiceLoop(deps);
+    loop.start();
+    await driveSpeechThenSilence(loop, transport);
+    await flush();
+    expect(loop.state).toBe('speaking');
+
+    // 打断 → abort
+    transport.sendAudio(micFrame(20_000));
+    transport.sendAudio(micFrame(20_010));
+    await flush();
+    expect(loop.state).toBe('listening');
+
+    // 放行被卡的 send:它将以 AbortError reject —— 不应改变已回到的 listening 态、不崩
+    release();
+    await flush();
+    expect(loop.state).toBe('listening');
+  });
+
   it('③ 降级：STT 空文本 → 回 listening 不崩', async () => {
     const { deps, transport } = makeDeps({
       stt: new FakeStt({ script: [{ text: '', isFinal: true }] }),

@@ -41,12 +41,15 @@ export class FakeLlm implements LlmProvider {
     return this.#toolScript !== undefined;
   }
 
-  async *stream(req: LlmRequest): AsyncIterable<string> {
+  async *stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<string> {
     const lastUser = [...req.messages].reverse().find((m) => m.role === 'user');
     const reply = lastUser
       ? `嗯,你说"${lastUser.content}"——我在听。(FakeLLM 占位回复;设 ANTHROPIC_API_KEY 后换真模型。)`
       : '你好,我是小雪。(FakeLLM 占位回复。)';
     for (const ch of reply) {
+      // 协作取消(承 §3.2 真打断):每次 yield 前自检 signal;已 abort 则停止 yield 干净结束。
+      // 真 Provider 的 SDK 会抛 AbortError(由回合外壳 catch);桩干净结束即足以断言「流停止」。
+      if (signal?.aborted === true) return;
       yield ch;
     }
   }
