@@ -403,6 +403,19 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 - **lite 档弱 embedder(bge-small)的退化 ≠ 人味**——那是噪声,别美化成"像人健忘"。
 - **核心事实绝不参与人类式遗忘**:用户名字/过敏、安全/危机信息(§ 法律底线"救命不可配")——**core/pinned 永久豁免衰减、豁免情绪过滤、豁免惊奇门控**(承 §5.4 核心档)。人会忘小事,但伴侣不该"忘了你对花生过敏"。
 
+### 5.10 簇B/C 设计决议（2026-06-23,承 `github-learnings-2026-06-23.md`）
+> 簇A(行为/人格)已实现。本节定簇B(记忆算法升级)、簇C(端侧/工程)的设计;标注**【实现中】/【设计记录·待依赖】**。
+
+**B1 — 联想扩散升级为 PPR(HippoRAG 式)【实现中】**:现有 `#spread()` 是固定 1–2 跳 BFS(sqlite-store.ts);升级为 **Personalized PageRank 随机游走** `r=(1−α)·M·r+α·s`(α≈0.15,~十几次迭代),`M` = 现有无向邻接边(共现权重)行归一,种子 `s` = query 命中的一阶记忆。产出"按 PPR 稳态分加权衰减的多跳联想",比固定跳更像人类联想且自然处理多跳衰减。**复用已有邻接表 + recallByVector 近邻**(可作额外软边),不引图库;端侧几千节点单位数毫秒;放非阻塞快路径之外(承 §5.5)。退化:无边/超时→空(同现状)。
+
+**B2 — 夜间巩固纪律【设计记录·待夜间巩固流水线】**:① **Nemori predict-calibrate 惊奇编码**(由已有语义记忆预测本情景→对比原文取 prediction gap→只蒸馏 gap 入语义),放夜间 dream pass(有 LLM 预算);② **Letta 读写分离 + 整块重写**(主体活时只读、夜间重生成 clean summary,不外科打补丁);③ **Graphiti LSH 去重前置**(ADD 去重在 SimHash 前加 MinHash/LSH 候选 + 熵门 + LRU,降本降方差)——其中 **LSH 前置可独立先做**(不依赖夜间流水线)。
+
+**C1 — `compute_type` per-profile 接缝先行【实现中,接缝层】**:量化绑 profile 非 backend(RK3588=w8a8 / Jetson=int4 / Pi-PC=int8/float16)。各 Provider config(LLM/STT/TTS/Embedder)统一带 `device`/`computeType` 能力字段 + `requiresCuda` 等声明,留 `--target pc|raspberry|browser` 的 profile→config 解析接缝(本次只埋字段与解析 helper,cli 消费以后接)。
+
+**C2/C3 — 端侧 LLM 藏 Provider 接缝 + Mycroft 入宪【设计记录】**:未来端侧 LLM(rkllama/llama.cpp/vLLM 均 OpenAI 兼容)直接走现有 openai-compat Provider,近零成本;**Mycroft 反模式入宪**:绝不让任一组件(尤其远程)成为不可降级依赖——已体现于 local-first + 可选云 + 模块可重写,作为硬原则记录。
+
+**C4 — Memobase 式 profile 槽位【设计记录·待与 §5.3b 人物层一并做】**:`people` 的结构化 profile 用 topic→sub_topic→content 槽位 + 每槽自然语言"合并策略"(名字覆盖 vs 兴趣累积);profile 结构化召回**无需 embedding**(只事件用向量)。与现有 `relationship_state` 同属人物层,后续一并扩。
+
 ---
 
 ## 6. 人格与情感系统(承 v2.1 + LingYa/eros_ai 公式)
