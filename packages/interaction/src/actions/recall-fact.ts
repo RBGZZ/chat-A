@@ -11,6 +11,70 @@ export type FactLookup = (query: string) => string | undefined;
 const unavailableLookup: FactLookup = () => undefined;
 
 /**
+ * 召回记录的**最小结构契约**(适配 memory 的 `MemoryRecord`,只取本适配器关心的字段)。
+ * 用结构化类型而非 import `@chat-a/memory`——interaction 仍不依赖 memory 包(§3.1):
+ * 调用方传入满足此形状的对象即可(memory 的 `MemoryRecord` 天然满足)。
+ */
+export interface FactRecord {
+  readonly text: string;
+}
+
+/**
+ * 召回存储的**最小结构契约**(适配 memory 的 `MemoryStore.recall`,只取关键词召回一项)。
+ * 同步签名,与 `FactLookup` 的同步纯本地约定一致;memory 的 `MemoryStore` 天然满足此形状。
+ */
+export interface FactRecallStore {
+  recall(query: string, limit?: number): readonly FactRecord[];
+}
+
+/** `createMemoryFactLookup` 选项(行为即配置,§3.2):topN 等参数外置,不写 magic number。 */
+export interface MemoryFactLookupOptions {
+  /** 召回返回上限(映射到 store.recall 的 limit);省略用 `DEFAULT_RECALL_FACT_TOP_N`。 */
+  readonly topN?: number;
+  /** 多条命中拼接的分隔串;省略用 `DEFAULT_RECALL_FACT_JOINER`。 */
+  readonly joiner?: string;
+}
+
+/** recall_fact 召回默认 topN(行为即配置;调用方可经 env 覆盖后传入)。 */
+export const DEFAULT_RECALL_FACT_TOP_N = 3;
+/** recall_fact 多条命中默认拼接分隔(换行,便于模型逐条阅读)。 */
+export const DEFAULT_RECALL_FACT_JOINER = '\n';
+
+/**
+ * 把一个**真实召回存储**(memory 的 `MemoryStore` 等满足 `FactRecallStore` 形状者)
+ * 适配成 `recall_fact` 期望的同步 `FactLookup`(§12.2 事实查询接缝)。
+ *
+ * 行为:对 query 调 `store.recall(query, topN)`,取前 topN 条非空文本拼接返回;
+ * **降级(§3.2「永不崩永不哑」)**:检索为空 / 全为空白 / `recall` 抛错 → 返回 `undefined`
+ * (交由 `recall_fact` 表达"想不起",**非崩溃、非 isError**)。
+ *
+ * 保持 interaction 与 memory **解耦**:用结构化类型,不 import `@chat-a/memory`;真接线由
+ * 调用方(client cli)注入 `mem.store`。
+ */
+export function createMemoryFactLookup(
+  store: FactRecallStore,
+  opts: MemoryFactLookupOptions = {},
+): FactLookup {
+  const topN = opts.topN ?? DEFAULT_RECALL_FACT_TOP_N;
+  const joiner = opts.joiner ?? DEFAULT_RECALL_FACT_JOINER;
+  return (query: string): string | undefined => {
+    let hits: readonly FactRecord[];
+    try {
+      hits = store.recall(query, topN);
+    } catch {
+      // 检索出错:优雅降级为"没找到",绝不把故障抛给回合(§3.2)。
+      return undefined;
+    }
+    const texts = hits
+      .slice(0, topN)
+      .map((h) => (typeof h.text === 'string' ? h.text.trim() : ''))
+      .filter((t) => t.length > 0);
+    if (texts.length === 0) return undefined;
+    return texts.join(joiner);
+  };
+}
+
+/**
  * 内置本地动作:召回一条事实(§12.2)。入参 `{ query }`,经**注入的事实查询回调**查询。
  * **不依赖 memory 包**:缺省回调返回"暂不可用"。回调未命中(undefined/空)属正常"没查到"
  * (返回可读说明,**非** isError);query 缺失/空 → isError(不抛)。
