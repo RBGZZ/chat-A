@@ -5,18 +5,23 @@ import type {
   MemoryRecord,
   MemoryStore,
   MemorySubject,
+  Pad,
   Person,
   StoredMessage,
 } from './types';
 import {
   decayFactor,
+  emotionResonance,
+  keywordScore,
   makePrimaryPerson,
+  mixedRecallScore,
   recallScore,
   reinforceImportance,
   resolveAttribution,
   resolveMemoryConfig,
   tokenize,
   type MemoryConfig,
+  type RecallSignal,
 } from './config';
 
 /** 当前代码支持的记忆库 schema 版本。每次破坏性/累加性变更 +1 并新增一条迁移。 */
@@ -268,17 +273,22 @@ export class SqliteMemoryStore implements MemoryStore {
     }
   }
 
-  recall(query: string, limit: number = this.#cfg.recallLimit): readonly MemoryRecord[] {
+  recall(
+    query: string,
+    limit: number = this.#cfg.recallLimit,
+    pad?: Pad,
+  ): readonly MemoryRecord[] {
     const tokens = tokenize(query, this.#cfg.normalize);
     if (tokens.length === 0) return [];
     try {
       // 不按主语过滤:一次覆盖 person+agent+shared,让上层同时拿到自述/事实/共同经历,防自相矛盾(§5.3 末条)。
-      // SQL 只做 LIKE 候选过滤;融合得分排序在 JS 层用 config.ts 单一权威公式算(两后端零漂移,§5.5/§3.2)。
+      // SQL 只做 LIKE 候选过滤;归一/混合/排序在 JS 层用 config.ts 单一权威公式算(两后端零漂移,§5.5/§3.2)。
+      // 取回 normalized_text 以在 JS 层用与 InMemory 同一规则复算关键词命中数(不依赖 SQL 端计数,免两套)。
       const where = tokens.map(() => `normalized_text LIKE ?`).join(' OR ');
       const params = tokens.map((t) => `%${t}%`);
       const rows = this.#db
         .prepare(
-          `SELECT id, text, kind, created_at, last_seen_at, hits, subject, person_id,
+          `SELECT id, text, normalized_text, kind, created_at, last_seen_at, hits, subject, person_id,
                   importance, access_count, last_accessed, pinned
            FROM memories
            WHERE ${where}`,
@@ -286,7 +296,8 @@ export class SqliteMemoryStore implements MemoryStore {
         .all(...params);
       const now = this.#now();
       // 读列兜底:旧库残留 NULL 时给安全默认(importance→初值、access_count→0、pinned→false、last_accessed→last_seen)。
-      const candidates = rows.map((r) => {
+      const candidates: { record: MemoryRecord; score: number }[] = [];
+      for (const r of rows) {
         const lastSeenAtMs = asNumber(r['last_seen_at']);
         const importance =
           r['importance'] === null || r['importance'] === undefined
@@ -312,11 +323,22 @@ export class SqliteMemoryStore implements MemoryStore {
           accessCount: r['access_count'] === null || r['access_count'] === undefined ? 0 : asNumber(r['access_count']),
           pinned,
         };
-        // 衰减/得分用强化前的值算,保证本次返回排序确定(强化只影响后续召回,§5.5 决策 3)。
-        const score = recallScore(importance, decayFactor(lastSeenAtMs, now, pinned, this.#cfg));
-        return { record, score };
-      });
-      // 融合得分降序;同分按 hits / id 兜底,排序完全确定(与 InMemory 一致)。
+        // 关键词原始分:命中查询 token 去重数(与 InMemory 同 normalized includes 规则,零漂移)。
+        const normalized = asString(r['normalized_text']);
+        const raw = tokens.reduce((n, t) => (normalized.includes(t) ? n + 1 : n), 0);
+        // 混合归一得分(承 §5.5):关键词归一 + 记忆强度(importance×decay)+ 可选情感共振;
+        // 衰减/强度用强化前的值算,保证本次返回排序确定(强化只影响后续召回,§5.5 决策 3)。
+        const signals: RecallSignal[] = [
+          { present: true, value: keywordScore(raw, tokens.length, this.#cfg) },
+          { present: true, value: recallScore(importance, decayFactor(lastSeenAtMs, now, pinned, this.#cfg)) },
+        ];
+        // 情感共振仅当调用方传入 PAD 时在场(默认不启用,§5.5);记忆侧 emotion 本期缺省按中性。
+        if (pad !== undefined) signals.push({ present: true, value: emotionResonance(pad) });
+        const score = mixedRecallScore(signals);
+        if (score <= 0) continue; // 零信号门控:全部在场信号为 0 才丢(只对零信号生效,§5.5)。
+        candidates.push({ record, score });
+      }
+      // 混合得分降序;同分按 hits / id 兜底,排序完全确定(与 InMemory 一致)。
       candidates.sort(
         (a, b) =>
           b.score - a.score || b.record.hits - a.record.hits || b.record.id - a.record.id,

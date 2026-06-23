@@ -2,6 +2,17 @@ import type { ChatMessage } from '@chat-a/protocol';
 
 export type { ChatMessage };
 
+/**
+ * PAD 情感状态(承 §5.5 情感共振):各分量 [-1,1]。
+ * memory 包**本地定义**、结构与 persona 包的 `Pad` 兼容,但 memory **不跨包 import persona**(§3.1)。
+ * 仅用于 `recall` 的可选情感共振入参(默认不启用,保持签名向后兼容)。
+ */
+export interface Pad {
+  readonly pleasure: number;
+  readonly arousal: number;
+  readonly dominance: number;
+}
+
 /** 落库的对话消息(snapshot 的来源;承 §5 真相源)。 */
 export interface StoredMessage {
   readonly sessionId: string;
@@ -110,8 +121,12 @@ export interface MemoryStore {
   messagesForSession(sessionId: string, limit?: number): readonly ChatMessage[];
   /** ADD 一条记忆条目(带去重)。 */
   addMemory(rec: MemoryInput): void;
-  /** 关键词召回(P1 关键词级;语义/向量属 P2)。 */
-  recall(query: string, limit?: number): readonly MemoryRecord[];
+  /**
+   * 关键词召回(P1 关键词级;语义/向量属 P2)。
+   * 排序用混合归一得分(关键词归一 + 记忆强度 + 可选情感共振,§5.5)。
+   * `pad` 为**可选**:传入则启用情感共振重排,缺省不启用(签名向后兼容,默认行为不变)。
+   */
+  recall(query: string, limit?: number, pad?: Pad): readonly MemoryRecord[];
   /** 通用状态 KV 读(真相源持久化原语;persona 状态等复用)。无则 undefined。 */
   getState(key: string): string | undefined;
   /** 通用状态 KV 写(同 key 覆盖)。 */

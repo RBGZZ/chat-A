@@ -220,5 +220,74 @@ export function runMemoryStoreContract(name: string, make: MakeStore): void {
       expect(r[0]).toBe('乙事');
       s.close();
     });
+
+    // —— 混合召回打分归一(承 §5.5;关键词归一 / 自适应分母 / 零信号门控 / 情感共振开关)——
+
+    it('多关键词:命中更多 token 者排更前(关键词归一生效,§5.5)', () => {
+      let nowMs = 5 * DAY;
+      const s = make({ now: () => nowMs });
+      // 同一时刻、同 importance → 记忆强度路相同;靠关键词命中数区分。
+      // 甲命中两个 token(咖啡/茶),乙只命中一个(咖啡)。
+      s.addMemory({ text: '我爱咖啡和茶', createdAtMs: 5 * DAY });
+      s.addMemory({ text: '我爱咖啡', createdAtMs: 5 * DAY });
+      // 多 token 查询(空白分隔 → 两个 token)。
+      const r = s.recall('咖啡 茶', 2).map((x) => x.text);
+      // 命中更多 token 的甲,经查询长度自适应 sigmoid 归一后关键词分更高 → 排前。
+      expect(r[0]).toBe('我爱咖啡和茶');
+      s.close();
+    });
+
+    it('单关键词:排序仍由记忆强度驱动(向后兼容,§5.5)', () => {
+      let nowMs = 10 * DAY;
+      const s = make({ now: () => nowMs });
+      // 单 token 查询下所有候选关键词分相同(raw=1, m=1)→ 排序由 importance×decay 决定。
+      s.addMemory({ text: '要紧的事', createdAtMs: 10 * DAY, importance: 0.9 });
+      s.addMemory({ text: '琐碎的事', createdAtMs: 10 * DAY, importance: 0.1 });
+      const r = s.recall('事', 2).map((x) => x.text);
+      expect(r).toEqual(['要紧的事', '琐碎的事']);
+      s.close();
+    });
+
+    it('零信号门控只丢全零:关键词命中即进候选池(不硬丢,§5.5)', () => {
+      let nowMs = DAY;
+      const s = make({ now: () => nowMs });
+      // 即使 importance 很低(记忆强度路接近 0),只要关键词命中(归一分 > 0)就不被门控丢弃。
+      s.addMemory({ text: '冷门小事', createdAtMs: DAY, importance: 0.01 });
+      const r = s.recall('冷门');
+      expect(r.length).toBe(1);
+      expect(r[0]?.text).toBe('冷门小事');
+      s.close();
+    });
+
+    it('情感共振开关:不传 PAD = 基线,传 PAD 不改变命中集合且为确定重排(§5.5)', () => {
+      let nowMs = 3 * DAY;
+      const s = make({ now: () => nowMs });
+      s.addMemory({ text: '关于猫的事甲', createdAtMs: 3 * DAY });
+      s.addMemory({ text: '关于猫的事乙', createdAtMs: 3 * DAY });
+      // 不传 PAD:默认不启用情感共振(基线)。
+      const baseline = s.recall('猫', 5).map((x) => x.text).sort();
+      // 传 PAD:启用情感共振一路信号;命中集合不变(情感不作硬过滤),只可能影响排序。
+      const withPad = s
+        .recall('猫', 5, { pleasure: 0.8, arousal: 0.6, dominance: 0 })
+        .map((x) => x.text)
+        .sort();
+      // 同一命中集合(情感共振不丢候选,只重排)。
+      expect(withPad).toEqual(baseline);
+      s.close();
+    });
+
+    it('情感共振不主导排序:不让情感盖过关键词/强度差异(§5.5)', () => {
+      let nowMs = 3 * DAY;
+      const s = make({ now: () => nowMs });
+      // 启用 PAD 时,两条记忆情感分相同(本期记忆侧 emotion 缺省中性)→ 排序仍由关键词/强度决定。
+      s.addMemory({ text: '重要的猫事', createdAtMs: 3 * DAY, importance: 0.9 });
+      s.addMemory({ text: '次要的猫事', createdAtMs: 3 * DAY, importance: 0.1 });
+      const r = s
+        .recall('猫', 2, { pleasure: -0.7, arousal: 0.5, dominance: 0 })
+        .map((x) => x.text);
+      // 情感共振对两者等权加成,不改变 importance 决定的相对顺序。
+      expect(r).toEqual(['重要的猫事', '次要的猫事']);
+      s.close();
+    });
   });
 }

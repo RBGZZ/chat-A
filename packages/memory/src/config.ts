@@ -1,4 +1,4 @@
-import type { MemoryInput, MemorySubject, Person } from './types';
+import type { MemoryInput, MemorySubject, Pad, Person } from './types';
 
 /**
  * 记忆行为配置(行为即配置,§3.2):召回上限/滑窗大小/规范化规则全外置,无 magic number。
@@ -34,6 +34,16 @@ export interface MemoryConfig {
    * 落在 [0,1];默认 0.5。
    */
   readonly initialImportance: number;
+  /**
+   * 关键词原始分归一 sigmoid 陡度 s(承 §5.5 混合召回 / §3.2):
+   * `keywordScore = 1/(1+exp(-s·(raw-m)))`。s 越大越接近阶跃;默认 1.5(行为即配置,无 magic number)。
+   */
+  readonly keywordSigmoidSteepness: number;
+  /**
+   * 关键词归一 sigmoid 中点比例(承 §5.5):中点 `m = clamp(ceil(查询token数·此比例), 1, 查询token数)`。
+   * 长查询要求命中更多 token 才算高分,随查询长度自适应;默认 0.5(过半命中即过中点)。
+   */
+  readonly keywordMidpointFraction: number;
 }
 
 /** 默认规范化:去首尾空白、小写、空白折叠。去重与召回共用此规则。 */
@@ -53,6 +63,9 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
   halfLifeDays: 30,
   reinforceK: 0.18,
   initialImportance: 0.5,
+  // §5.5 混合召回打分归一参数(行为即配置,§3.2):关键词 sigmoid 陡度 1.5、中点比例 0.5(过半命中过中点)。
+  keywordSigmoidSteepness: 1.5,
+  keywordMidpointFraction: 0.5,
 };
 
 /** 合并用户覆盖与默认值。 */
@@ -128,9 +141,113 @@ export function reinforceImportance(
 }
 
 /**
- * 召回融合得分(单一权威融合式,承 §5.5):`score = importance × decay`。
- * P1 只含重要性 × 时间衰减;P2 接入向量/FTS/情感分时在此单点扩展,不另起第二套。
+ * 记忆强度分(单一权威公式,承 §5.5):`score = importance × decay`。
+ * 是混合召回里"记忆强度"那一路信号的值;importance∈[0,1]、decay∈(0,1] → 天然 ∈[0,1]。
+ * P2 接入向量/FTS/情感分时在 `mixedRecallScore` 单点融合,本式与衰减/重要性式都不另起第二套。
  */
 export function recallScore(importance: number, decay: number): number {
   return importance * decay;
+}
+
+// —— §5.5 混合召回:关键词归一 + 自适应分母混合 + 情感共振(单一权威,承 §3.2)——
+// 全部纯函数,两 store 调用同一套,杜绝两后端各写一遍导致漂移。
+
+/** [0,1] 夹取(局部小工具,避免散落)。 */
+function clamp01(x: number): number {
+  return x < 0 ? 0 : x > 1 ? 1 : x;
+}
+
+/**
+ * 关键词原始分归一(单一权威公式,承 §5.5 mem0 `scoring.py` 思路):
+ * 查询长度自适应 sigmoid `1/(1+exp(-s·(raw-m)))` 把无界命中数压到 [0,1]。
+ * - `raw`:该候选命中的查询 token 去重数(本期 LIKE/includes;未来 FTS5 `bm25()` 同接入点)。
+ * - 中点 `m = clamp(ceil(queryTokenCount·fraction), 1, queryTokenCount)`,随查询长度自适应:
+ *   长查询要求命中更多 token 才算高分;单 token 查询 m=1,命中即过中点(>0.5)。
+ * 向后兼容关键:单 token(或各候选命中数相同)时本分对所有候选恒定,排序仍由记忆强度驱动。
+ */
+export function keywordScore(
+  raw: number,
+  queryTokenCount: number,
+  cfg: Pick<MemoryConfig, 'keywordSigmoidSteepness' | 'keywordMidpointFraction'>,
+): number {
+  if (queryTokenCount <= 0) return 0;
+  const m = Math.min(
+    Math.max(1, Math.ceil(queryTokenCount * cfg.keywordMidpointFraction)),
+    queryTokenCount,
+  );
+  return 1 / (1 + Math.exp(-cfg.keywordSigmoidSteepness * (raw - m)));
+}
+
+/** 混合打分的一路信号:`present=false` 表示该路缺席(不计入自适应分母)。 */
+export interface RecallSignal {
+  /** 该路是否在场(缺席则不进分子也不进分母,自适应分母,承 §5.5)。 */
+  readonly present: boolean;
+  /** 信号值,约定 ∈[0,1](缺席时忽略)。 */
+  readonly value: number;
+}
+
+/**
+ * 混合召回得分(单一权威融合式,承 §5.5):自适应分母 `min(Σ在场信号 / 在场信号数, 1)`。
+ * - **自适应分母**:只除以"在场信号数",某路缺席时分母自动缩 → 不被不存在的信号稀释。
+ * - **零信号门控**:无任何在场信号、或全部在场信号为 0 → 返回 0(调用方据此可门控丢弃)。
+ *   注意门控只对"零信号"生效;关键词/情感单路非零即把项拉进候选(别学 mem0 语义硬丢)。
+ * - 每路值已 ∈[0,1],平均后仍 ∈[0,1],`min(·,1)` 仅防御性封顶。
+ */
+export function mixedRecallScore(signals: readonly RecallSignal[]): number {
+  let sum = 0;
+  let count = 0;
+  for (const s of signals) {
+    if (!s.present) continue;
+    sum += s.value;
+    count += 1;
+  }
+  if (count === 0) return 0;
+  return Math.min(sum / count, 1);
+}
+
+// —— 情感共振:PAD/Russell 扇区常量矩阵(O(1) 查表,承 §5.5)——
+// PAD 类型见 types.ts(memory 包本地定义,不跨包 import persona,§3.1)。
+
+/**
+ * Russell 2D(valence×arousal)情感扇区(承 §5.5):4 象限 + 中性。
+ * 0=neutral(低唤起或近中性)、1=高兴(+V+A)、2=平静(+V-A)、3=愤怒/紧张(-V+A)、4=低落(-V-A)。
+ */
+export const EMOTION_SECTOR_COUNT = 5;
+
+/**
+ * 情感共振常量矩阵(承 §5.5,5×5,行=当前 PAD 扇区、列=记忆情感扇区):对角线(同扇区)高、
+ * 邻接中、对立低;中性行/列居中。值 ∈[0,1],O(1) 查表。外置为常量,非散落 magic number。
+ */
+export const EMOTION_RESONANCE_MATRIX: readonly (readonly number[])[] = [
+  //          neu   高兴   平静   愤怒   低落
+  /* neu  */ [0.5, 0.5, 0.5, 0.5, 0.5],
+  /* 高兴 */ [0.5, 1.0, 0.7, 0.3, 0.2],
+  /* 平静 */ [0.5, 0.7, 1.0, 0.2, 0.4],
+  /* 愤怒 */ [0.5, 0.3, 0.2, 1.0, 0.6],
+  /* 低落 */ [0.5, 0.2, 0.4, 0.6, 1.0],
+];
+
+/**
+ * 把一个 PAD/VA 投影到 Russell 扇区(单一权威映射,承 §5.5)。
+ * 低唤起(|arousal| 小)或近中性(|pleasure| 小)归 neutral;否则按 (pleasure,arousal) 象限分。
+ * 阈值用配置外置的"中性带半宽"——这里用固定的小常量 0.15 作为近中性带(行为即配置可后续提取)。
+ */
+export function emotionSector(va: Pick<Pad, 'pleasure' | 'arousal'>): number {
+  const NEUTRAL_BAND = 0.15; // 近中性带半宽(§5.5;过小幅情感视作中性,免噪声扰动排序)。
+  if (Math.abs(va.pleasure) < NEUTRAL_BAND && Math.abs(va.arousal) < NEUTRAL_BAND) return 0;
+  if (Math.abs(va.arousal) < NEUTRAL_BAND) return 0; // 低唤起 → 视作中性扇区。
+  if (va.pleasure >= 0) return va.arousal >= 0 ? 1 : 2; // +V:高唤起=高兴,低唤起=平静。
+  return va.arousal >= 0 ? 3 : 4; // -V:高唤起=愤怒/紧张,低唤起=低落。
+}
+
+/**
+ * 情感共振分(单一权威 O(1) 查表,承 §5.5):当前 PAD 扇区 × 记忆情感扇区 → 矩阵值 ∈[0,1]。
+ * 记忆侧情感(`memoryEmotion`)本期可缺(v4 `emotion_snapshot` 列 P2 才落库)→ 缺省按中性扇区,
+ * 取矩阵中性列(恒 0.5),不主导排序。P2 接入 `emotion_snapshot` 后同接缝增强,矩阵/公式不变。
+ */
+export function emotionResonance(pad: Pad, memoryEmotion?: Pick<Pad, 'pleasure' | 'arousal'>): number {
+  const cur = emotionSector(pad);
+  const mem = memoryEmotion === undefined ? 0 : emotionSector(memoryEmotion);
+  const row = EMOTION_RESONANCE_MATRIX[cur] ?? EMOTION_RESONANCE_MATRIX[0]!;
+  return clamp01(row[mem] ?? 0.5);
 }
