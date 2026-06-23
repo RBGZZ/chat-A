@@ -8,8 +8,12 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "bin": {
+    "chat-a-trace": "./src/bin/trace.ts"
+  },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "trace": "tsx src/bin/trace.ts"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",
