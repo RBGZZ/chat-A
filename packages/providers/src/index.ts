@@ -5,3 +5,4 @@ export * from './openai-compat-llm';
 export * from './config';
 export * from './registry';
 export * from './json';
+export * from './tool-json';

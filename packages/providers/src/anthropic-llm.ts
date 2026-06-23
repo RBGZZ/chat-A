@@ -30,7 +30,7 @@ export class AnthropicLlm implements LlmProvider {
         model: this.model,
         max_tokens: req.maxTokens ?? this.#maxTokens,
         system: req.system,
-        messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
+        messages: AnthropicLlm.#toTextMessages(req),
       },
       signal ? { signal } : undefined,
     );
@@ -46,7 +46,7 @@ export class AnthropicLlm implements LlmProvider {
         model: this.model,
         max_tokens: req.maxTokens ?? this.#maxTokens,
         system: req.system,
-        messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
+        messages: AnthropicLlm.#toTextMessages(req),
       },
       signal ? { signal } : undefined,
     );
@@ -55,5 +55,17 @@ export class AnthropicLlm implements LlmProvider {
         yield event.delta.text;
       }
     }
+  }
+
+  /**
+   * 纯文本通道(stream/complete)的消息映射:Anthropic 文本 messages 仅接受 user/assistant。
+   * 本通道不发起工具调用,'tool' 角色不应出现于此;防御性归并为 'user',保持旧路径形状不变。
+   * (工具往返由 completeWithTools/streamWithTools 负责,本切片仅在 FakeLlm 落地。)
+   */
+  static #toTextMessages(req: LlmRequest): Array<{ role: 'user' | 'assistant'; content: string }> {
+    return req.messages.map((m) => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: m.content,
+    }));
   }
 }
