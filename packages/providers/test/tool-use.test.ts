@@ -147,4 +147,14 @@ describe('providers/detectToolCallJson(降级备用)', () => {
   it('无 { 返回 null', () => {
     expect(detectToolCallJson('纯文本无对象')).toBeNull();
   });
+  it('前置字符串里的 { 不被误锚定,定位到真正的对象', () => {
+    // 前缀引号文本含 `{}`,真正对象在其后——锚点必须跳过字符串内的花括号。
+    expect(detectToolCallJson('他说"用 {} 格式"然后{"name":"a"}')).toEqual({
+      json: '{"name":"a"}',
+      rest: '',
+    });
+  });
+  it('只有字符串内 { 没有真实对象 → null', () => {
+    expect(detectToolCallJson('"{"x}')).toBeNull();
+  });
 });

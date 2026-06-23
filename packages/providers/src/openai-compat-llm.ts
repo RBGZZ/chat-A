@@ -33,7 +33,9 @@ export class OpenAiCompatLlm implements LlmProvider {
   #buildMessages(req: LlmRequest): Array<{ role: string; content: string }> {
     return [
       ...(req.system ? [{ role: 'system', content: req.system }] : []),
-      ...req.messages.map((m) => ({ role: m.role, content: m.content })),
+      // 文本通道只走 user/assistant;工具往返('tool' 角色)由 *WithTools 通道处理,
+      // 这里把非 assistant(含 'tool')归并为 user,避免发出缺 tool_call_id 的 tool 消息(与 anthropic 实现对称)。
+      ...req.messages.map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content })),
     ];
   }
 

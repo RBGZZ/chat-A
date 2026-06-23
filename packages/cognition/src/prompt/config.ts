@@ -25,9 +25,10 @@ export const PROMPT_PRIORITY = {
  * >= expressiveFloor:外放档(更多口头禅/语气词)。
  * 仅调"口头禅·语气词放开程度";硬纪律(禁"作为AI…"/禁过度解释/别像写文章/话短口语)三档恒守。
  */
+// 阈值与 persona/tone.ts 的 expressiveness 分档对齐(0.34/0.66),避免同一旋钮双源漂移。
 export const STYLE_EXPRESSIVENESS = {
-  reservedCeil: 0.35,
-  expressiveFloor: 0.65,
+  reservedCeil: 0.34,
+  expressiveFloor: 0.66,
 } as const;
 
 /**

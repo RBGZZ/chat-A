@@ -91,6 +91,8 @@ export class FakeLlm implements LlmProvider {
       // 无脚本:退化为单轮回声文本,工具调用为空。
       return { text: this.#echo(req.messages) };
     }
+    // 约定:每一轮的所有 tool_result 聚合为**单条** 'tool' 消息回传(Agent loop 标准形态),
+    // 故含结果的 tool 消息条数 = 已完成轮数 = 下一条脚本索引。
     const returned = req.messages.filter(
       (m) => m.role === 'tool' && (m.toolResults?.length ?? 0) > 0,
     ).length;
