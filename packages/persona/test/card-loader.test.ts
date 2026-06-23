@@ -142,6 +142,37 @@ describe('config-loader: 装配优先级 默认 < 卡 < env', () => {
     expect(seed.identity).toBe(XIAOXUE_SEED.identity);
   });
 
+  it('negativeAffectExpression 默认中性 0.5(无卡无 env)', () => {
+    expect(loadPersonaFromEnv({}).seed.dials.negativeAffectExpression).toBe(0.5);
+  });
+
+  it('CHAT_A_DIAL_NEGATIVE_AFFECT env 覆盖负面表达旋钮', () => {
+    const { seed } = loadPersonaFromEnv({ CHAT_A_DIAL_NEGATIVE_AFFECT: '0.9' });
+    expect(seed.dials.negativeAffectExpression).toBe(0.9);
+  });
+
+  it('CHAT_A_DIAL_NEGATIVE_AFFECT 越界 → 回落卡/默认值', () => {
+    const { seed } = loadPersonaFromEnv({ CHAT_A_DIAL_NEGATIVE_AFFECT: '7' });
+    expect(seed.dials.negativeAffectExpression).toBe(0.5); // 非法 → 默认
+  });
+
+  it('负面表达旋钮:卡设值,env 缺省时取卡', () => {
+    const os = require('node:os') as typeof import('node:os');
+    const fs = require('node:fs') as typeof import('node:fs');
+    const path = require('node:path') as typeof import('node:path');
+    const file = path.join(os.tmpdir(), `persona-nae-test-${process.pid}.yaml`);
+    fs.writeFileSync(file, 'dials:\n  negativeAffectExpression: 0.0\n', 'utf8');
+    try {
+      const { seed } = loadPersonaFromEnv({ CHAT_A_PERSONA_CARD: file });
+      expect(seed.dials.negativeAffectExpression).toBe(0.0); // 卡值生效(0=永不闹脾气)
+      // env 盖卡
+      const overridden = loadPersonaFromEnv({ CHAT_A_PERSONA_CARD: file, CHAT_A_DIAL_NEGATIVE_AFFECT: '1' });
+      expect(overridden.seed.dials.negativeAffectExpression).toBe(1);
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
+  });
+
   it('有卡 + env = env 逐字段覆盖卡,其余取卡', () => {
     // 用真临时文件验证卡+env 合成。
     const os = require('node:os') as typeof import('node:os');
