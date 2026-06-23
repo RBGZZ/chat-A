@@ -2,8 +2,14 @@ import { describe, it, expect } from 'vitest';
 import type { LlmProvider } from '@chat-a/providers';
 import type { DecisionTrace, DecisionTraceSink } from '@chat-a/observability';
 import { initTelemetry } from '@chat-a/observability';
+import { XIAOXUE_SEED, type Appraiser, type PersonaSeed } from '@chat-a/persona';
 import { LightVoiceBus } from '../src/bus';
 import { Conversation } from '../src/conversation';
+
+/** 固定负向拉力的 appraiser:把 PAD 推到低 Pleasure、正 arousal(→ sulking)。 */
+const negPull: Appraiser = {
+  appraise: () => Promise.resolve({ pleasure: -0.9, arousal: 0.5, dominance: 0 }),
+};
 
 function recordingLlm(): LlmProvider {
   return {
@@ -72,6 +78,27 @@ describe('runtime/Conversation 决策 trace(§8.1)', () => {
   it('默认无 sink(Noop)行为与现状一致(不抛、正常回复)', async () => {
     const convo = new Conversation({ bus: new LightVoiceBus(), llm: recordingLlm(), sessionId: 'n' });
     expect(await convo.send('你好', () => {})).toBe('ok');
+  });
+
+  it('高 negativeAffectExpression + 持续负面 → trace.posture 落库且 system 含【姿态】(§7#6)', async () => {
+    const { sink, traces } = spySink();
+    const seed: PersonaSeed = {
+      ...XIAOXUE_SEED,
+      dials: { ...XIAOXUE_SEED.dials, negativeAffectExpression: 0.9 },
+    };
+    const convo = new Conversation({
+      bus: new LightVoiceBus(),
+      llm: recordingLlm(),
+      personaSeed: seed,
+      appraiser: negPull,
+      traceSink: sink,
+      sessionId: 'neg',
+    });
+    // 多轮把 PAD 推到深度负面(越过冷启动;mood 取回合前快照,故滞后)。
+    for (let i = 0; i < 14; i++) await convo.send('随便说点', () => {});
+    const last = traces.at(-1)!;
+    expect(last.posture).toBe('sulking'); // 负面 + 高 arousal
+    expect(last.system).toContain('【姿态】');
   });
 
   it('有 OTel 时 traceId/spanId 非空且为合法长度(缝合键)', async () => {

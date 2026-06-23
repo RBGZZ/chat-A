@@ -3,7 +3,7 @@ import type { DecisionTrace, DecisionTraceSink } from './decision-trace';
 import { NoopDecisionTraceSink } from './decision-trace';
 
 /** 当前决策 trace 库 schema 版本。破坏性/累加性变更 +1 并新增迁移。 */
-export const CURRENT_TRACE_SCHEMA_VERSION = 1;
+export const CURRENT_TRACE_SCHEMA_VERSION = 2;
 
 const MIGRATIONS: Record<number, (db: DatabaseSync) => void> = {
   1(db) {
@@ -32,6 +32,10 @@ const MIGRATIONS: Record<number, (db: DatabaseSync) => void> = {
       CREATE INDEX IF NOT EXISTS idx_traces_correlation ON decision_traces(correlation_id);
       CREATE INDEX IF NOT EXISTS idx_traces_session ON decision_traces(session_id);
     `);
+  },
+  2(db) {
+    // §7#6 负面姿态:加可空列(历史行为 NULL,顺序迁移不丢数据)。
+    db.exec(`ALTER TABLE decision_traces ADD COLUMN posture TEXT;`);
   },
 };
 
@@ -104,8 +108,8 @@ export class SqliteDecisionTraceSink implements DecisionTraceSink {
           `INSERT INTO decision_traces(
             correlation_id, trace_id, span_id, session_id, turn_id, created_at, latency_ms,
             user_text, recalled, emotion, pad, assertiveness, stance_notions, system, messages,
-            provider, model, reply
-          ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            provider, model, reply, posture
+          ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           trace.correlationId,
@@ -126,6 +130,7 @@ export class SqliteDecisionTraceSink implements DecisionTraceSink {
           trace.provider,
           trace.model,
           trace.reply,
+          trace.posture ?? null,
         );
     } catch (err) {
       // 可观测性绝不打断回合(§3.2):记录失败仅告警。

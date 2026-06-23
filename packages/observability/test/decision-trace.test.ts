@@ -110,6 +110,61 @@ describe('SqliteDecisionTraceSink', () => {
   });
 });
 
+describe('SqliteDecisionTraceSink: posture(§7#6)+ v1→v2 迁移', () => {
+  it('posture 往返:写 sulking 查回 sulking;无姿态 → NULL', () => {
+    const path = tmpDb('posture');
+    const sink = new SqliteDecisionTraceSink({ path });
+    sink.record({ ...TRACE, turnId: 't1', posture: 'sulking' });
+    sink.record({ ...TRACE, turnId: 't2' }); // 无 posture
+    sink.close();
+    const db = new DatabaseSync(path);
+    const rows = db.prepare('SELECT turn_id, posture FROM decision_traces ORDER BY turn_id').all() as Record<
+      string,
+      unknown
+    >[];
+    db.close();
+    expect(rows[0]).toMatchObject({ turn_id: 't1', posture: 'sulking' });
+    expect(rows[1]).toMatchObject({ turn_id: 't2', posture: null });
+  });
+
+  it('v1 旧库重开 → 迁移到 v2 补 posture 列,历史行不丢、posture=NULL', () => {
+    const path = tmpDb('v1migrate');
+    // 手工建一个 v1 库(无 posture 列)+ 一条历史行。
+    const v1 = new DatabaseSync(path);
+    v1.exec(`
+      CREATE TABLE trace_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE decision_traces(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        correlation_id TEXT NOT NULL, trace_id TEXT, span_id TEXT,
+        session_id TEXT NOT NULL, turn_id TEXT NOT NULL, created_at INTEGER NOT NULL,
+        latency_ms INTEGER NOT NULL, user_text TEXT NOT NULL, recalled TEXT NOT NULL,
+        emotion TEXT NOT NULL, pad TEXT, assertiveness REAL NOT NULL, stance_notions TEXT NOT NULL,
+        system TEXT NOT NULL, messages TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, reply TEXT NOT NULL
+      );
+      INSERT INTO trace_meta(key,value) VALUES('schema_version','1');
+      INSERT INTO decision_traces(correlation_id,session_id,turn_id,created_at,latency_ms,user_text,recalled,emotion,assertiveness,stance_notions,system,messages,provider,model,reply)
+        VALUES('old/t0/0','old','t0',1,1,'hi','[]','neutral',0.5,'[]','sys','[]','fake','fake-1','hello');
+    `);
+    v1.close();
+
+    // 用当前代码打开 → 应迁移到 v2(加 posture 列),不抛、不丢历史。
+    const sink = new SqliteDecisionTraceSink({ path });
+    sink.record({ ...TRACE, turnId: 't1', posture: 'withdrawn' });
+    sink.close();
+
+    const db = new DatabaseSync(path);
+    const ver = db.prepare(`SELECT value FROM trace_meta WHERE key='schema_version'`).get() as { value: string };
+    const rows = db.prepare('SELECT turn_id, posture FROM decision_traces ORDER BY id').all() as Record<
+      string,
+      unknown
+    >[];
+    db.close();
+    expect(Number(ver.value)).toBe(CURRENT_TRACE_SCHEMA_VERSION);
+    expect(rows[0]).toMatchObject({ turn_id: 't0', posture: null }); // 历史行保留,新列 NULL
+    expect(rows[1]).toMatchObject({ turn_id: 't1', posture: 'withdrawn' });
+  });
+});
+
 describe('createDecisionTraceSinkFromEnv', () => {
   it('默认关 → Noop', () => {
     const s = createDecisionTraceSinkFromEnv({});

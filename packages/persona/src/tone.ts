@@ -1,5 +1,6 @@
 import type { Emotion, Pad, PersonaDials } from './types';
 import { padToEmotion } from './numeric';
+import { resolveNegativePosture, renderPostureLine } from './posture';
 
 const MOOD_TEXT: Record<Emotion, string> = {
   joyful: '此刻心情很好、有点兴奋,语气可以轻快、带点雀跃。',
@@ -20,5 +21,8 @@ export function renderToneFragment(pad: Pad, dials: PersonaDials): string {
   else if (dials.baselineWarmth <= 0.34) lines.push('整体基调偏冷淡克制。');
   if (dials.expressiveness >= 0.66) lines.push('情绪可以外放、表达明显。');
   else if (dials.expressiveness <= 0.34) lines.push('情绪表达含蓄、点到为止。');
+  // 负面人际姿态(§7#6):激活时追加【姿态】行为指令(由 negativeAffectExpression 门控)。
+  const postureLine = renderPostureLine(resolveNegativePosture(pad, dials), dials);
+  if (postureLine !== null) lines.push(`【姿态】${postureLine}`);
   return lines.join('\n');
 }

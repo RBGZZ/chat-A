@@ -33,6 +33,8 @@ export interface DecisionTrace {
   readonly assertiveness: number;
   /** 本轮命中、她有立场的观点(§7#3)。 */
   readonly stanceNotions: readonly string[];
+  /** 当轮负面人际姿态(§7#6:'sulking'/'withdrawn');无姿态时省略。 */
+  readonly posture?: string;
   /** 最终组装的 system 与 messages(完整,仅落本地,绝不导出远端)。 */
   readonly system: string;
   readonly messages: readonly { readonly role: string; readonly content: string }[];

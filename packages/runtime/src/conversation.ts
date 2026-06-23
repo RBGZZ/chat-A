@@ -174,6 +174,7 @@ export class Conversation {
     recalled: readonly MemoryRecord[];
     emotion: string;
     pad: { pleasure: number; arousal: number; dominance: number };
+    posture: string | undefined;
     stance: StanceInput;
     system: string;
     messages: readonly { role: string; content: string }[];
@@ -197,6 +198,7 @@ export class Conversation {
         recalled,
         emotion: args.emotion,
         pad: args.pad,
+        ...(args.posture !== undefined ? { posture: args.posture } : {}),
         assertiveness: args.stance.assertiveness,
         stanceNotions: args.stance.notions,
         system: args.system,
@@ -307,6 +309,7 @@ export class Conversation {
             recalled,
             emotion: mood.emotion,
             pad: mood.pad,
+            posture: mood.posture ?? undefined,
             stance,
             system,
             messages,

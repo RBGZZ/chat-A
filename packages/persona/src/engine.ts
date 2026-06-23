@@ -1,7 +1,8 @@
-import type { Appraiser, Emotion, Pad, PersonaConfig, PersonaSeed, PersonaSnapshot, PersonaStore } from './types';
+import type { Appraiser, Emotion, Pad, PersonaConfig, PersonaSeed, PersonaSnapshot, PersonaStore, Posture } from './types';
 import { DEFAULT_PERSONA_CONFIG } from './defaults';
 import { oceanToPadBaseline, padToEmotion, stepPad } from './numeric';
 import { renderToneFragment } from './tone';
+import { resolveNegativePosture } from './posture';
 import { DefaultAppraiser } from './appraiser';
 import { InMemoryPersonaStore } from './store';
 
@@ -10,6 +11,8 @@ export interface ToneView {
   readonly toneFragment: string;
   /** 当前 PAD 状态(供决策 trace 记录"当时心情",§8.1)。 */
   readonly pad: Pad;
+  /** 当轮负面人际姿态(§7#6);无则 null。 */
+  readonly posture: Posture | null;
 }
 
 export interface PersonaEngineOptions {
@@ -55,6 +58,7 @@ export class PersonaEngine {
       emotion: padToEmotion(this.#snapshot.pad),
       toneFragment: renderToneFragment(this.#snapshot.pad, dials),
       pad: this.#snapshot.pad,
+      posture: resolveNegativePosture(this.#snapshot.pad, dials),
     };
   }
 

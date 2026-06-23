@@ -31,7 +31,7 @@ ocean:
 dials:
   # —— 人格旋钮 ——
   assertiveness: 0.5             # 温和顺从 ↔ 敢顶嘴有主见(§7#3 控"会不会反对":<0.2 几乎不反对，越高越敢，建议从低起调)
-  negativeAffectExpression: 0.5 # 永远愉悦 ↔ 会完整表达坏心情/赌气冷淡
+  negativeAffectExpression: 0.5 # 永远愉悦 ↔ 完整表达坏心情(§7#6:<0.2 不闹脾气；心情转差时越高越会赌气[sulking]/冷淡抽离[withdrawn]，建议从低起调)
   proactivity: 0.5              # 主动频率
   intimacyPace: 0.5            # 关系升温快慢
   # —— 情感旋钮 ——

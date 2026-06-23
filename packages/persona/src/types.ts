@@ -132,6 +132,12 @@ export interface StanceDetector {
 /** 离散情绪(P1 小集合,够 tone 区分)。 */
 export type Emotion = 'joyful' | 'content' | 'neutral' | 'down' | 'irritated';
 
+/**
+ * 负面人际姿态(§7#6):在情绪之上的人际行为叠加层,仅负面区激活、由 negativeAffectExpression 门控。
+ * sulking=赌气(心情差且有气);withdrawn=冷淡抽离(心情差且蔫)。无姿态时为 null。
+ */
+export type Posture = 'sulking' | 'withdrawn';
+
 export interface AppraiseContext {
   readonly userText: string;
   readonly pad: Pad;
