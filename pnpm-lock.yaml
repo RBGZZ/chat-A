@@ -23,6 +23,9 @@ importers:
 
   packages/client:
     dependencies:
+      '@chat-a/interaction':
+        specifier: workspace:*
+        version: link:../interaction
       '@chat-a/memory':
         specifier: workspace:*
         version: link:../memory
@@ -50,6 +53,15 @@ importers:
       '@chat-a/protocol':
         specifier: workspace:*
         version: link:../protocol
+
+  packages/interaction:
+    dependencies:
+      '@chat-a/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@chat-a/providers':
+        specifier: workspace:*
+        version: link:../providers
 
   packages/memory:
     dependencies:
@@ -107,6 +119,9 @@ importers:
       '@chat-a/cognition':
         specifier: workspace:*
         version: link:../cognition
+      '@chat-a/interaction':
+        specifier: workspace:*
+        version: link:../interaction
       '@chat-a/memory':
         specifier: workspace:*
         version: link:../memory

@@ -23,6 +23,12 @@ REM Decision trace (§8.1 replay): CHAT_A_DECISION_TRACE=1 logs each turn's full
 REM decision chain (recall/mood/stance/assembled prompt/reply) to a local SQLite
 REM truth source (CHAT_A_DECISION_TRACE_DB, default chat-a-trace.db) for replay.
 REM Distinct from CHAT_A_TRACE (OTel console spans); stitched by same trace_id/span_id.
+REM
+REM Persona evolution (§6.1): CHAT_A_OCEAN_EVOLVE=llm lets her personality drift
+REM slowly over many turns (LLM, every N turns, default off).
+REM Agent loop (§3.3/§12.2): CHAT_A_STRATEGY=tools lets her call local actions
+REM (e.g. current_time) via a tool-use loop; falls back to single-shot if the
+REM provider has no tool support. Default = single-shot.
 
 if not exist ".env.local" (
   echo [chat-A] Missing .env.local. Create it in the project root with one line:

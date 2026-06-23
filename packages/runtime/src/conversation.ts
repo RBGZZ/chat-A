@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { SpanStatusCode, isSpanContextValid, type Span, type Tracer } from '@opentelemetry/api';
+import { SpanStatusCode, type Span, type Tracer } from '@opentelemetry/api';
 import { makeBusEvent } from '@chat-a/protocol';
 import type { LlmProvider } from '@chat-a/providers';
 import {
@@ -10,14 +10,11 @@ import {
   ToneContributor,
   StyleDisciplineContributor,
   DissentContributor,
-  type AssembledPrompt,
-  type StanceInput,
 } from '@chat-a/cognition';
 import {
   InMemoryMemoryStore,
   NoopMemoryExtractor,
   type MemoryExtractor,
-  type MemoryRecord,
   type MemoryStore,
 } from '@chat-a/memory';
 import {
@@ -31,19 +28,9 @@ import {
   type SelfNotion,
   type StanceDetector,
 } from '@chat-a/persona';
-import {
-  getTracer,
-  GENAI,
-  CHAT_A,
-  NoopDecisionTraceSink,
-  type DecisionTraceSink,
-  type DecisionTraceRecalled,
-} from '@chat-a/observability';
+import { getTracer, GENAI, CHAT_A, NoopDecisionTraceSink, type DecisionTraceSink } from '@chat-a/observability';
 import type { LightVoiceBus } from './bus';
-
-function toException(err: unknown): Error {
-  return err instanceof Error ? err : new Error(String(err));
-}
+import { composeSystem, detectStance, finalizeTurn, toException } from './turn-shared';
 
 export interface ConversationDeps {
   readonly bus: LightVoiceBus;
@@ -123,133 +110,16 @@ export interface TurnStrategy {
  * 后续:Agent loop(工具)、打断、二级人格演化、三层记忆/语义召回。
  */
 export class SingleShotStrategy implements TurnStrategy {
-  /**
-   * 组装本轮 prompt(§5.4):构造 PromptContext(骨架/召回/tone/userText/history=snapshot())
-   * 委托 assembler 产出 { system, messages }。召回失败走空(§3.2,保留现有降级);
-   * 取数在编排层、assembler 不直接碰 MemoryStore(接缝边界,§3.1)。
-   */
-  #composeSystem(
-    deps: TurnDeps,
-    userText: string,
-    toneFragment: string,
-    stance: StanceInput,
-  ): { assembled: AssembledPrompt; recalled: readonly MemoryRecord[] } {
-    let recalled: readonly MemoryRecord[] = [];
-    try {
-      recalled = deps.memory.recall(userText);
-    } catch {
-      recalled = [];
-    }
-    const assembled = deps.assembler.assemble({
-      skeleton: deps.skeleton,
-      recalled,
-      toneFragment,
-      userText,
-      history: deps.memory.snapshot(),
-      stance,
-      expressiveness: deps.expressiveness,
-    });
-    // 同时回传 recalled 供决策 trace 记录(§8.1);assembler 仍只消费 ctx,不破接缝。
-    return { assembled, recalled };
-  }
-
-  /**
-   * 本轮分歧检测(§7#3):跑 StanceDetector 得命中观点 → 映射为 cognition 侧 StanceInput。
-   * 检测抛错兜底空命中(assertiveness 仍带上,基线指令照常据档决定,§3.2 降级)。
-   */
-  async #detectStance(deps: TurnDeps, userText: string): Promise<StanceInput> {
-    const assertiveness = deps.assertiveness;
-    try {
-      const res = await deps.stanceDetector.detect({
-        userText,
-        selfNotions: deps.selfNotions,
-        assertiveness,
-      });
-      return { assertiveness, notions: res.notions.map((n) => n.position) };
-    } catch {
-      return { assertiveness, notions: [] };
-    }
-  }
-
-  /**
-   * 回合收尾写决策 trace(§8.1 可重放真相源)。在取得回复、落记忆后调用(不挡首字);
-   * 写入失败自吞,绝不打断回合(§3.2)。traceId/spanId 取本回合 OTel span(无效则省略,缝合用)。
-   */
-  #recordTrace(
-    deps: TurnDeps,
-    args: {
-      correlationId: string;
-      turnId: string;
-      spanContext: { traceId: string; spanId: string } | undefined;
-      createdAtMs: number;
-      latencyMs: number;
-      userText: string;
-      recalled: readonly MemoryRecord[];
-      emotion: string;
-      pad: { pleasure: number; arousal: number; dominance: number };
-      posture: string | undefined;
-      stance: StanceInput;
-      system: string;
-      messages: readonly { role: string; content: string }[];
-      reply: string;
-    },
-  ): void {
-    try {
-      const recalled: DecisionTraceRecalled[] = args.recalled.map((r) => ({
-        text: r.text,
-        subject: r.subject,
-        hits: r.hits,
-        ...(r.kind !== undefined ? { kind: r.kind } : {}),
-      }));
-      deps.traceSink.record({
-        correlationId: args.correlationId,
-        ...(args.spanContext ? { traceId: args.spanContext.traceId, spanId: args.spanContext.spanId } : {}),
-        sessionId: deps.sessionId,
-        turnId: args.turnId,
-        createdAtMs: args.createdAtMs,
-        latencyMs: args.latencyMs,
-        userText: args.userText,
-        recalled,
-        emotion: args.emotion,
-        pad: args.pad,
-        ...(args.posture !== undefined ? { posture: args.posture } : {}),
-        assertiveness: args.stance.assertiveness,
-        stanceNotions: args.stance.notions,
-        system: args.system,
-        messages: args.messages,
-        provider: deps.llm.id,
-        model: deps.llm.model,
-        reply: args.reply,
-      });
-    } catch {
-      /* 决策 trace 写入失败:可观测性绝不打断回合(§3.2) */
-    }
-  }
-
-  /** 回合后写记忆:启用抽取器则写抽取要点(失败跳过);否则 naive 存用户原话(§3.2 降级)。 */
-  async #writeMemories(deps: TurnDeps, userText: string, reply: string, atMs: number): Promise<void> {
-    if (deps.extractEnabled) {
-      try {
-        const items = await deps.extractor.extract(userText, reply);
-        for (const it of items) deps.memory.addMemory(it);
-      } catch {
-        /* 抽取失败:跳过本轮抽取,回合不受影响 */
-      }
-      return;
-    }
-    deps.memory.addMemory({ text: userText, kind: 'user_utterance', sourceSession: deps.sessionId, createdAtMs: atMs });
-  }
-
   async run(ctx: TurnContext): Promise<string> {
     const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs } = ctx;
     // 回合前:读当前心情渲染本轮 tone(不改状态;情绪推进留到回合后,保首字零额外延迟)。
     const mood = deps.persona.tone();
     turnSpan.setAttribute('chat_a.emotion', mood.emotion);
-    // 分歧检测(§7#3):确定性默认同步极快;LLM 实现会增首字延迟(默认关)。降级见 #detectStance。
-    const stance = await this.#detectStance(deps, userText);
+    // 分歧检测(§7#3):确定性默认同步极快;LLM 实现会增首字延迟(默认关)。降级见 turn-shared。
+    const stance = await detectStance(deps, userText);
     turnSpan.setAttribute('chat_a.stance_notions', stance.notions.length);
-    // 委托 assembler:system(骨架→记忆→tone→异议)+ messages([...history, userMsg],含 volatile 追加)。
-    const { assembled, recalled } = this.#composeSystem(deps, userText, mood.toneFragment, stance);
+    // 委托 assembler:system(骨架→记忆→tone→异议)+ messages([...history, userMsg])。
+    const { assembled, recalled } = composeSystem(deps, userText, mood.toneFragment, stance);
     const { system, messages } = assembled;
     const reply = await deps.tracer.startActiveSpan('llm', async (llmSpan) => {
       // GenAI 语义约定:id/model 仅供 trace,业务不据此分支(承 Provider 接缝)。
@@ -274,49 +144,19 @@ export class SingleShotStrategy implements TurnStrategy {
         llmSpan.end();
       }
     });
-    // 回合收尾落库(不阻塞流式首字)。
-    const at = Date.now();
-    deps.memory.appendMessage({
-      sessionId: deps.sessionId,
+    // 回合收尾(落库/情绪推进/写记忆/决策trace),与 ToolCalling 共用(turn-shared)。
+    await finalizeTurn(deps, {
       turnId,
-      role: 'user',
-      content: userText,
-      createdAtMs: at,
       correlationId,
-    });
-    deps.memory.appendMessage({
-      sessionId: deps.sessionId,
-      turnId,
-      role: 'assistant',
-      content: reply,
-      createdAtMs: at,
-      correlationId,
-    });
-    // 情绪推进(影响下一轮);appraiser 内部已自带降级,这里再兜一层不打断回合(§3.2)。
-    try {
-      await deps.persona.advance(userText);
-    } catch {
-      /* 心情本轮不更新,回合继续 */
-    }
-    // 记忆来源:有抽取器 → 抽要点入库(失败跳过);否则 naive 存用户原话(默认)。
-    await this.#writeMemories(deps, userText, reply, at);
-    // 决策 trace 收尾落库(§8.1,首字之后,失败不打断回合);trace_id/span_id 缝合 OTel。
-    const sc = turnSpan.spanContext();
-    this.#recordTrace(deps, {
-      correlationId,
-      turnId,
-      spanContext: isSpanContextValid(sc) ? { traceId: sc.traceId, spanId: sc.spanId } : undefined,
-      createdAtMs: turnStartMs,
-      latencyMs: Date.now() - turnStartMs,
+      turnSpan,
+      turnStartMs,
       userText,
+      reply,
       recalled,
-      emotion: mood.emotion,
-      pad: mood.pad,
-      posture: mood.posture ?? undefined,
+      mood: { emotion: mood.emotion, pad: mood.pad, posture: mood.posture ?? undefined },
       stance,
       system,
       messages,
-      reply,
     });
     return reply;
   }

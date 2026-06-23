@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@chat-a/cognition": "workspace:*",
+    "@chat-a/interaction": "workspace:*",
     "@chat-a/memory": "workspace:*",
     "@chat-a/observability": "workspace:*",
     "@chat-a/persona": "workspace:*",
