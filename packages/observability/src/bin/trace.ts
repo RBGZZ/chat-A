@@ -14,6 +14,7 @@ import { parseArgs } from 'node:util';
 import { DecisionTraceReader } from '../decision-trace-reader';
 import { DecisionTraceStats, type DecisionTraceStatsResult, type CountDistribution } from '../decision-trace-stats';
 import type { DecisionTrace } from '../decision-trace';
+import { SqliteSpanSink, type SpanRecord } from '../sqlite-span-trace';
 
 const DEFAULT_DB = 'chat-a-trace.db';
 
@@ -136,7 +137,31 @@ function printTrace(t: DecisionTrace): void {
   console.log('');
 }
 
-function runShow(reader: DecisionTraceReader, id: string): void {
+/**
+ * 缝合打印:若该回合带 traceId,从**同库** otel_spans 还原挂在同 trace 下的 span 树阶段耗时
+ * (§8.1 决策记录 ←→ span 阶段耗时对照)。纯只读、库无表/无 span 静默跳过(降级不崩)。
+ */
+function printSpans(dbPath: string, t: DecisionTrace): void {
+  if (t.traceId === undefined) return;
+  const sink = new SqliteSpanSink({ path: dbPath, onError: () => {} });
+  let spans: SpanRecord[] = [];
+  try {
+    spans = sink.getSpansByTraceId(t.traceId);
+  } finally {
+    sink.close();
+  }
+  if (spans.length === 0) return; // 无 span(未启用 span→SQLite)→ 静默跳过
+  section('OTel span 阶段耗时(同 trace 缝合)');
+  for (const s of spans) {
+    const star = s.spanId === t.spanId ? ' *' : '';
+    const status = s.statusCode !== 'unset' ? ` status=${s.statusCode}` : '';
+    const model = s.model !== undefined ? ` model=${s.model}` : '';
+    console.log(`  ${s.name}: ${num(s.durationMs)} ms${status}${model}  span_id=${s.spanId}${star}`);
+  }
+  console.log('  (* = 产出本决策的 span)');
+}
+
+function runShow(reader: DecisionTraceReader, id: string, dbPath: string): void {
   // 依次按 turnId → correlationId → trace_id 尝试,任一命中即打印。
   const trace =
     reader.getByTurnId(id) ?? reader.getByCorrelationId(id) ?? reader.getByTraceId(id);
@@ -145,6 +170,7 @@ function runShow(reader: DecisionTraceReader, id: string): void {
     return;
   }
   printTrace(trace);
+  printSpans(dbPath, trace);
 }
 
 /** 把"取值 → 计数"分布按计数倒序打印;可选 top 截断。空分布打印"(无)"。 */
@@ -257,7 +283,7 @@ function main(argv: string[]): void {
         process.exitCode = 1;
         return;
       }
-      runShow(reader, id);
+      runShow(reader, id, dbPath);
     } else {
       console.error(`未知子命令:${command}`);
       printUsage();
