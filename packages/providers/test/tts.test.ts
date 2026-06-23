@@ -128,9 +128,12 @@ describe('createTts(工厂按判别联合切换)+ loadTtsConfig', () => {
     ).toThrow(/gpt-sovits TTS.*尚未接入/);
   });
 
-  it('kind: edge / kokoro → 占位抛错', () => {
+  it('kind: edge → 占位抛错(真引擎以后接)', () => {
     expect(() => createTts({ kind: 'edge', voice: 'zh-CN-XiaoxiaoNeural' })).toThrow(/edge TTS 尚未接入/);
-    expect(() => createTts({ kind: 'kokoro', voice: 'af_bella' })).toThrow(/kokoro TTS 尚未接入/);
+  });
+
+  it('kind: kokoro 未注入 session → 明确报错"需运行时端口"(非崩,非"尚未接入")', () => {
+    expect(() => createTts({ kind: 'kokoro', voice: 'af_bella' })).toThrow(/需运行时提供 session 端口/);
   });
 
   it('未知 kind → 抛错并列出已注册项', () => {
