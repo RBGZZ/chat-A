@@ -176,6 +176,11 @@ export class DecisionTraceReader {
     const spanId = row['span_id'];
     const pad = parseJson<DecisionTrace['pad'] | null>(row['pad'], null);
     const posture = row['posture'];
+    // 语义召回元数据(§5.5/§8.1):0/1→bool,NULL/旧库无此列(undefined)→省略。
+    const semanticUsed = row['semantic_used'];
+    const embedLatencyMs = row['embed_latency_ms'];
+    const embedTimedOut = row['embed_timed_out'];
+    const embedCacheHit = row['embed_cache_hit'];
     return {
       correlationId: String(row['correlation_id']),
       ...(traceId !== null && traceId !== undefined ? { traceId: String(traceId) } : {}),
@@ -191,6 +196,18 @@ export class DecisionTraceReader {
       assertiveness: asNumber(row['assertiveness']),
       stanceNotions: parseJson<string[]>(row['stance_notions'], []),
       ...(posture !== null && posture !== undefined ? { posture: String(posture) } : {}),
+      ...(semanticUsed !== null && semanticUsed !== undefined
+        ? { semanticUsed: asNumber(semanticUsed) !== 0 }
+        : {}),
+      ...(embedLatencyMs !== null && embedLatencyMs !== undefined
+        ? { embedLatencyMs: asNumber(embedLatencyMs) }
+        : {}),
+      ...(embedTimedOut !== null && embedTimedOut !== undefined
+        ? { embedTimedOut: asNumber(embedTimedOut) !== 0 }
+        : {}),
+      ...(embedCacheHit !== null && embedCacheHit !== undefined
+        ? { embedCacheHit: asNumber(embedCacheHit) !== 0 }
+        : {}),
       system: String(row['system']),
       messages: parseJson<DecisionTrace['messages'][number][]>(row['messages'], []),
       provider: String(row['provider']),

@@ -4,7 +4,7 @@ import { NoopDecisionTraceSink } from './decision-trace';
 import { captureActiveSpanContext } from './telemetry';
 
 /** 当前决策 trace 库 schema 版本。破坏性/累加性变更 +1 并新增迁移。 */
-export const CURRENT_TRACE_SCHEMA_VERSION = 2;
+export const CURRENT_TRACE_SCHEMA_VERSION = 3;
 
 const MIGRATIONS: Record<number, (db: DatabaseSync) => void> = {
   1(db) {
@@ -37,6 +37,16 @@ const MIGRATIONS: Record<number, (db: DatabaseSync) => void> = {
   2(db) {
     // §7#6 负面姿态:加可空列(历史行为 NULL,顺序迁移不丢数据)。
     db.exec(`ALTER TABLE decision_traces ADD COLUMN posture TEXT;`);
+  },
+  3(db) {
+    // §5.5/§8.1 语义召回元数据:加可空列(历史行/未启用语义为 NULL,顺序迁移不丢数据)。
+    // 布尔以 INTEGER 存 0/1;延迟用 REAL。
+    db.exec(`
+      ALTER TABLE decision_traces ADD COLUMN semantic_used INTEGER;
+      ALTER TABLE decision_traces ADD COLUMN embed_latency_ms REAL;
+      ALTER TABLE decision_traces ADD COLUMN embed_timed_out INTEGER;
+      ALTER TABLE decision_traces ADD COLUMN embed_cache_hit INTEGER;
+    `);
   },
 };
 
@@ -141,8 +151,9 @@ export class SqliteDecisionTraceSink implements DecisionTraceSink {
           `INSERT INTO decision_traces(
             correlation_id, trace_id, span_id, session_id, turn_id, created_at, latency_ms,
             user_text, recalled, emotion, pad, assertiveness, stance_notions, system, messages,
-            provider, model, reply, posture
-          ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            provider, model, reply, posture,
+            semantic_used, embed_latency_ms, embed_timed_out, embed_cache_hit
+          ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           trace.correlationId,
@@ -164,6 +175,11 @@ export class SqliteDecisionTraceSink implements DecisionTraceSink {
           trace.model,
           trace.reply,
           trace.posture ?? null,
+          // 语义召回元数据:布尔→0/1,缺省→NULL(纯加法,向后兼容)。
+          trace.semanticUsed === undefined ? null : trace.semanticUsed ? 1 : 0,
+          trace.embedLatencyMs ?? null,
+          trace.embedTimedOut === undefined ? null : trace.embedTimedOut ? 1 : 0,
+          trace.embedCacheHit === undefined ? null : trace.embedCacheHit ? 1 : 0,
         );
     } catch (err) {
       // 可观测性绝不打断回合(§3.2):记录失败仅告警。
