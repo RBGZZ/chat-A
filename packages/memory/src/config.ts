@@ -8,6 +8,8 @@ export interface MemoryConfig {
   readonly snapshotLimit: number;
   /** recall 默认返回上限。 */
   readonly recallLimit: number;
+  /** messagesForSession 默认返回上限(会话级沉淀读取本会话消息时用,§6.1)。 */
+  readonly reflectionMessageLimit: number;
   /** 去重 / 关键词匹配的文本规范化(单一权威规则,勿引入多套漂移)。 */
   readonly normalize: (text: string) => string;
   /**
@@ -27,6 +29,8 @@ export function defaultNormalize(text: string): string {
 export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
   snapshotLimit: 20,
   recallLimit: 5,
+  // 沉淀读取本会话消息的上限:大于滑窗,尽量覆盖整段会话又不至失控(行为即配置,§3.2)。
+  reflectionMessageLimit: 200,
   normalize: defaultNormalize,
   primaryPersonId: 'primary',
   primaryPersonName: '主人',

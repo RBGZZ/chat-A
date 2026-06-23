@@ -66,6 +66,16 @@ export class InMemoryMemoryStore implements MemoryStore {
     return this.#messages.slice(start).map((m) => ({ role: m.role, content: m.content }));
   }
 
+  messagesForSession(
+    sessionId: string,
+    limit: number = this.#cfg.reflectionMessageLimit,
+  ): readonly ChatMessage[] {
+    // 只取该会话消息(§6.1 沉淀),按时序取最近 N。
+    const own = this.#messages.filter((m) => m.sessionId === sessionId);
+    const start = Math.max(0, own.length - limit);
+    return own.slice(start).map((m) => ({ role: m.role, content: m.content }));
+  }
+
   addMemory(rec: MemoryInput): void {
     const normalized = this.#cfg.normalize(rec.text);
     if (normalized.length === 0) return;

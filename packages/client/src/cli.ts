@@ -1,9 +1,11 @@
 import { createInterface } from 'node:readline';
+import { randomUUID } from 'node:crypto';
 import { stdin, stdout, env } from 'node:process';
 import { Conversation, LightVoiceBus } from '@chat-a/runtime';
 import { createLlm, loadLlmConfig } from '@chat-a/providers';
 import { initTelemetry, createDecisionTraceSinkFromEnv } from '@chat-a/observability';
-import { createMemoryStoreFromEnv, LlmMemoryExtractor } from '@chat-a/memory';
+import { createMemoryStoreFromEnv, LlmMemoryExtractor, LlmReflector, NoopReflector } from '@chat-a/memory';
+import type { Reflector } from '@chat-a/memory';
 import { loadPersonaFromEnv, seedPersonaMemories, createKvPersonaStore, LlmAppraiser, LlmStanceDetector } from '@chat-a/persona';
 
 /**
@@ -38,6 +40,12 @@ async function main(): Promise<void> {
   const stanceDetector = stanceMode === 'llm' ? new LlmStanceDetector({ provider: llm }) : undefined;
   // 决策 trace(§8.1 可重放):CHAT_A_DECISION_TRACE=1 开启 SQLite sink(默认 Noop)。
   const trace = createDecisionTraceSinkFromEnv();
+  // 会话沉淀(§5/§6.1 Reflection,默认关):CHAT_A_REFLECTION=llm 用 LLM 在会话结束蒸馏高层记忆+第一人称自传。
+  // sessionId 在此生成并贯穿 Conversation 与退出收尾的 reflect,保证沉淀只针对本会话消息。
+  const sessionId = randomUUID().slice(0, 8);
+  const reflectMode = (env['CHAT_A_REFLECTION'] ?? 'off').toLowerCase();
+  const reflector: Reflector =
+    reflectMode === 'llm' ? new LlmReflector({ provider: llm, store: mem.store }) : new NoopReflector();
   const convo = new Conversation({
     bus,
     llm,
@@ -45,6 +53,7 @@ async function main(): Promise<void> {
     personaSeed: seed,
     personaStore,
     traceSink: trace.sink,
+    sessionId,
     ...(appraiser ? { appraiser } : {}),
     ...(memoryExtractor ? { memoryExtractor } : {}),
     ...(stanceDetector ? { stanceDetector } : {}),
@@ -61,6 +70,7 @@ async function main(): Promise<void> {
   stdout.write(`认知: appraiser=${appraiser ? 'llm' : 'default'}  记忆抽取=${memoryExtractor ? 'llm' : 'off'}\n`);
   stdout.write(`立场: 分歧检测=${stanceDetector ? 'llm' : 'default'}  敢顶嘴(assertiveness)=${seed.dials.assertiveness}\n`);
   stdout.write(`决策trace: ${trace.enabled ? `on (${trace.dbPath})` : 'off'}\n`);
+  stdout.write(`沉淀: ${reflectMode === 'llm' ? 'llm (会话结束蒸馏)' : 'off'}\n`);
   if (traceOn) stdout.write('(OTel trace 已开:每回合在控制台输出 turn→llm span。)\n');
   if (cfg.provider === 'fake') {
     stdout.write('(未检测到 ANTHROPIC_API_KEY → FakeLLM 占位。设 ANTHROPIC_API_KEY 用真 Claude;\n');
@@ -91,6 +101,8 @@ async function main(): Promise<void> {
     if (!closed) rl.prompt();
   }
 
+  // 会话结束的夜间沉淀(§5/§6.1):在关库之前异步蒸馏一次;幂等 + 全程降级,失败吞掉不影响退出。
+  await reflector.reflect(sessionId).catch(() => {});
   mem.store.close();
   trace.sink.close();
   await telemetry?.shutdown();

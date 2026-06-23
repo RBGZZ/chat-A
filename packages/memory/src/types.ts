@@ -82,6 +82,12 @@ export interface MemoryStore {
   appendMessage(msg: StoredMessage): void;
   /** 取最近 N 条消息(滑窗快照,跨会话恢复连续性);N 省略用配置默认。 */
   snapshot(limit?: number): readonly ChatMessage[];
+  /**
+   * 取**指定会话**最近的若干条消息(按时序),供会话级沉淀(Reflection,§6.1)使用。
+   * 区别于 snapshot 的全局最近 N;只返回该 sessionId 的消息;N 省略用配置默认。
+   * 读失败优雅降级为空数组(承 §3.2),不抛。
+   */
+  messagesForSession(sessionId: string, limit?: number): readonly ChatMessage[];
   /** ADD 一条记忆条目(带去重)。 */
   addMemory(rec: MemoryInput): void;
   /** 关键词召回(P1 关键词级;语义/向量属 P2)。 */

@@ -24,6 +24,24 @@ export function runMemoryStoreContract(name: string, make: MakeStore): void {
       s.close();
     });
 
+    it('messagesForSession 只返回该会话的消息(按时序、受上限约束)', () => {
+      const s = make();
+      // 两个会话交错写入。
+      s.appendMessage({ sessionId: 'a', turnId: 't1', role: 'user', content: 'a1', createdAtMs: 1 });
+      s.appendMessage({ sessionId: 'b', turnId: 't1', role: 'user', content: 'b1', createdAtMs: 2 });
+      s.appendMessage({ sessionId: 'a', turnId: 't2', role: 'assistant', content: 'a2', createdAtMs: 3 });
+      s.appendMessage({ sessionId: 'a', turnId: 't3', role: 'user', content: 'a3', createdAtMs: 4 });
+      // 只取会话 a,且按时序。
+      expect(s.messagesForSession('a').map((m) => m.content)).toEqual(['a1', 'a2', 'a3']);
+      // 受上限约束:取最近 2 条。
+      expect(s.messagesForSession('a', 2).map((m) => m.content)).toEqual(['a2', 'a3']);
+      // 不混入其它会话。
+      expect(s.messagesForSession('b').map((m) => m.content)).toEqual(['b1']);
+      // 未知会话为空。
+      expect(s.messagesForSession('z')).toEqual([]);
+      s.close();
+    });
+
     it('addMemory 去重:等价文本只留一条并累加命中', () => {
       const s = make();
       s.addMemory({ text: '我叫小明' });

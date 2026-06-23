@@ -194,6 +194,24 @@ export class SqliteMemoryStore implements MemoryStore {
     }
   }
 
+  messagesForSession(
+    sessionId: string,
+    limit: number = this.#cfg.reflectionMessageLimit,
+  ): readonly ChatMessage[] {
+    try {
+      // 只取该会话消息(§6.1 沉淀):取最近 N 后正序还原。
+      const rows = this.#db
+        .prepare(`SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?`)
+        .all(sessionId, limit);
+      return rows
+        .map((r) => ({ role: asString(r['role']) as ChatMessage['role'], content: asString(r['content']) }))
+        .reverse();
+    } catch (err) {
+      this.#onError(err, 'messagesForSession');
+      return [];
+    }
+  }
+
   addMemory(rec: MemoryInput): void {
     const normalized = this.#cfg.normalize(rec.text);
     if (normalized.length === 0) return;
