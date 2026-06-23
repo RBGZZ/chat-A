@@ -67,15 +67,39 @@ export interface MemoryConfig {
    */
   readonly hybridSignalWeights: RecallSignalWeights;
   /**
-   * 联想扩散最大跳数(承 §5.9 缺口①):召回一阶命中后沿实体邻接图扩展的跳数(1–2 跳最像人)。
-   * 默认 2;设 0 关闭扩散(退化为纯一阶召回,向后兼容)。行为即配置(§3.2)。
+   * 联想扩散最大跳数(承 §5.9 缺口① / §5.10 B1):**升级为 PPR 后**复用为「子图圈定半径」——
+   * 从 query 命中的一阶种子出发 BFS 可达 `associationMaxHops` 跳内的节点集即 PPR 的工作子图
+   * (端侧只在邻接连通子图上迭代,几千节点单位数毫秒,承 §5.5)。设 0 关闭扩散(退化为纯一阶召回,
+   * 向后兼容)。**语义变化**:原"按跳数硬截"现仅圈定候选范围,稳态联想分由 PPR 在子图上算。行为即配置(§3.2)。
    */
   readonly associationMaxHops: number;
   /**
-   * 联想扩散每跳衰减系数(承 §5.9 缺口①):关联候选的「联想分」按 `decay^hop` 随跳数衰减。
-   * 默认 0.5(每跳减半);落在 (0,1]。行为即配置(§3.2),无 magic number。
+   * 联想扩散每跳衰减系数(承 §5.9 缺口①):**B1 PPR 升级后不再用于召回路**(稳态分由 PPR α/迭代决定),
+   * 仅保留供纯函数 `hopDecay`(向后兼容的几何衰减语义)。默认 0.5;落在 (0,1]。行为即配置(§3.2)。
    */
   readonly associationHopDecay: number;
+  /**
+   * PPR(Personalized PageRank)重启/teleport 系数 α(承 §5.10 B1):随机游走每步以 α 概率跳回种子集,
+   * `r = (1−α)·M·r + α·s`。α 越大越聚焦种子近邻(短程联想);越小越扩散(远程联想)。
+   * 默认 0.15(HippoRAG 惯用值);落在 (0,1)。行为即配置(§3.2),无 magic number。
+   */
+  readonly pprAlpha: number;
+  /**
+   * PPR 幂迭代上限(承 §5.10 B1):`r = (1−α)·M·r + α·s` 的最大迭代次数;在收敛阈
+   * `pprConvergenceEpsilon` 提前满足时早停(几千节点单位数毫秒)。默认 15(~十几次足够收敛)。
+   * 取非负整数。行为即配置(§3.2),无 magic number。
+   */
+  readonly pprIterations: number;
+  /**
+   * PPR 收敛阈(承 §5.10 B1):相邻两次迭代秩向量 L1 变化 `Σ|rₜ−rₜ₋₁|` 小于它即提前收敛早停
+   * (省迭代、不卡事件循环)。默认 1e-6(端侧足够精度)。落在 [0,1)。行为即配置(§3.2)。
+   */
+  readonly pprConvergenceEpsilon: number;
+  /**
+   * PPR 工作子图节点上限(承 §5.10 B1 端侧性能):BFS 圈定的子图节点数封顶,超出按 BFS 到达序截断
+   * (近种子优先),控制迭代规模(几千节点单位数毫秒,承 §5.5 非阻塞)。默认 2000。取正整数。行为即配置(§3.2)。
+   */
+  readonly pprMaxNodes: number;
   /**
    * 新记忆缺省的情景/语义分层(承 §5.9 缺口④):调用方/抽取层未给 `memoryKind` 时用它。
    * 默认 episodic——原始写入多为叙事性事件,语义蒸馏/核心标注属离线巩固或显式标注(承 §5.8)。
@@ -176,9 +200,16 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
   // 混合召回 weighted 融合的向量偏重权重(参考 Nexus 范式;行为即配置 §3.2,可调):
   // 向量路 0.6 / 关键词路 0.4(语义重于字面命中),情感/强度/联想各 1 不变。
   hybridSignalWeights: { keyword: 0.4, strength: 1, emotion: 1, association: 1, vector: 0.6 },
-  // §5.9 缺口① 联想扩散(行为即配置,§3.2):默认 2 跳、每跳 ×0.5 衰减(1–2 跳最像人)。
+  // §5.9 缺口① / §5.10 B1 联想扩散(行为即配置,§3.2):associationMaxHops 复用为 PPR 子图圈定半径(默认 2),
+  // associationHopDecay 仅留给向后兼容纯函数 hopDecay(召回路改由 PPR 稳态分)。
   associationMaxHops: 2,
   associationHopDecay: 0.5,
+  // §5.10 B1 PPR(HippoRAG 式随机游走)参数(行为即配置,§3.2,无 magic number):
+  // α=0.15(teleport 回种子)、最多 15 次幂迭代、收敛阈 1e-6 早停、子图节点上限 2000(端侧单位数毫秒)。
+  pprAlpha: 0.15,
+  pprIterations: 15,
+  pprConvergenceEpsilon: 1e-6,
+  pprMaxNodes: 2000,
   // §5.9 缺口④ 情景/语义分层(行为即配置,§3.2):写入缺省 episodic(叙事);
   // 召回 kind 权重 core>semantic>episodic(核心档优先注入语义,稳定事实略重于零散叙事)。
   defaultMemoryKind: 'episodic',
@@ -525,10 +556,119 @@ export function entityKeys(
 /**
  * 联想跳数衰减(承 §5.9 缺口①):一阶命中视作 hop=0,沿邻接边每跳 ×decay。
  * hop=1 → decay、hop=2 → decay²……落在 (0,1];供"联想分"那一路用。
+ * **B1 升级后召回路不再用它**(联想分改由 `personalizedPageRank` 稳态分),保留为向后兼容纯函数。
  */
 export function hopDecay(hop: number, decay: number): number {
   if (hop <= 0) return 1;
   return decay ** hop;
+}
+
+// —— §5.10 B1:Personalized PageRank(HippoRAG 式)联想扩散(单一权威纯函数,两 store 共用)——
+// 用随机游走 `r = (1−α)·M·r + α·s` 取代固定跳 BFS:M = 无向邻接边(共现 weight)行归一的转移矩阵、
+// 种子 s = query 命中的一阶记忆均匀分布。稳态 r[node] 即该记忆的「联想分」(替代原 hopDecay)。
+// 只在 query 命中实体的邻接连通子图上跑(调用方先 BFS 圈定子图并封顶),纯 JS 同步迭代,几千节点单位数毫秒。
+
+/** PPR 工作子图的一条无向加权边(承 §5.10 B1):`a`/`b` 为记忆 id,`weight` 为共现累计权重(>0)。 */
+export interface PprEdge {
+  readonly a: number;
+  readonly b: number;
+  readonly weight: number;
+}
+
+/** PPR 迭代参数(承 §5.10 B1):α/迭代上限/收敛阈,从 MemoryConfig 同名字段取(行为即配置)。 */
+export type PprParams = Pick<MemoryConfig, 'pprAlpha' | 'pprIterations' | 'pprConvergenceEpsilon'>;
+
+/**
+ * Personalized PageRank 稳态分(单一权威公式,承 §5.10 B1):在给定无向加权子图上做随机游走
+ * `r = (1−α)·M·r + α·s`,返回**每个非种子节点**的稳态联想分(种子本身不计入——一阶命中已在候选池,
+ * 与原 `#spread` 一致)。两 store 共用此纯函数,杜绝两后端各写一遍导致漂移(§3.2)。
+ *
+ * 转移矩阵 `M`:无向边 `weight` 构成对称邻接,**按出度(各节点边权之和)行归一**——
+ * 游走从节点 i 以 `weight(i,j)/Σ_k weight(i,k)` 概率走到邻居 j。**悬挂点**(出度 0,理论上子图内不应出现)
+ * 的质量回流到种子(等价 teleport),避免质量泄漏、保证 `Σr=1`。
+ * 种子向量 `s`:种子集均匀分布(和为 1);非种子 s=0。
+ *
+ * 确定性:纯函数、无随机/时间;节点遍历用排序后的 id 序,逐项确定。
+ * 退化:空种子 / 空边 / `pprIterations<=0` → 空 Map(优雅降级,同现状,§3.2)。
+ */
+export function personalizedPageRank(
+  seedIds: readonly number[],
+  edges: readonly PprEdge[],
+  params: PprParams,
+): Map<number, number> {
+  const out = new Map<number, number>();
+  if (seedIds.length === 0 || edges.length === 0 || params.pprIterations <= 0) return out;
+
+  // —— 节点全集(种子 + 边端点),按 id 升序固定遍历序(确定性)——
+  const nodeSet = new Set<number>(seedIds);
+  for (const e of edges) {
+    nodeSet.add(e.a);
+    nodeSet.add(e.b);
+  }
+  const nodes = [...nodeSet].sort((x, y) => x - y);
+  const n = nodes.length;
+  const idx = new Map<number, number>();
+  for (let i = 0; i < n; i++) idx.set(nodes[i]!, i);
+
+  // —— 无向邻接(对称)+ 各节点出度(边权之和),供行归一 ——
+  const neighbors: { j: number; w: number }[][] = Array.from({ length: n }, () => []);
+  const outDeg = new Array<number>(n).fill(0);
+  for (const e of edges) {
+    if (e.weight <= 0) continue; // 非正权边无意义,跳过(防归一除零/负质量)。
+    const ia = idx.get(e.a);
+    const ib = idx.get(e.b);
+    if (ia === undefined || ib === undefined || ia === ib) continue; // 自环跳过(无向联想不计自指)。
+    neighbors[ia]!.push({ j: ib, w: e.weight });
+    neighbors[ib]!.push({ j: ia, w: e.weight });
+    outDeg[ia]! += e.weight;
+    outDeg[ib]! += e.weight;
+  }
+
+  // —— 种子向量 s:种子均匀分布(和为 1);只计落在节点全集内的种子(去重) ——
+  const seedUnique = [...new Set(seedIds)].filter((s) => idx.has(s));
+  if (seedUnique.length === 0) return out;
+  const s = new Array<number>(n).fill(0);
+  const seedShare = 1 / seedUnique.length;
+  for (const sid of seedUnique) s[idx.get(sid)!] = seedShare;
+
+  // —— 幂迭代 r = (1−α)·M·r + α·s;r₀ = s;收敛阈早停(L1 变化)——
+  const alpha = params.pprAlpha;
+  let r = s.slice();
+  for (let iter = 0; iter < params.pprIterations; iter++) {
+    const next = new Array<number>(n).fill(0);
+    // 把每个节点的质量按出度行归一推给邻居;悬挂点(出度 0)质量回流种子(等价 teleport,防泄漏)。
+    let dangling = 0;
+    for (let i = 0; i < n; i++) {
+      const mass = r[i]!;
+      if (mass === 0) continue;
+      if (outDeg[i]! <= 0) {
+        dangling += mass;
+        continue;
+      }
+      const flow = mass / outDeg[i]!;
+      for (const { j, w } of neighbors[i]!) next[j]! += flow * w;
+    }
+    // r' = (1−α)·(M·r + 悬挂回流到种子) + α·s
+    for (let i = 0; i < n; i++) {
+      const teleport = s[i]! * (alpha + (1 - alpha) * dangling);
+      next[i] = (1 - alpha) * next[i]! + teleport;
+    }
+    // 收敛判定:L1 变化小于阈值即早停(省迭代,承端侧非阻塞)。
+    let l1 = 0;
+    for (let i = 0; i < n; i++) l1 += Math.abs(next[i]! - r[i]!);
+    r = next;
+    if (l1 < params.pprConvergenceEpsilon) break;
+  }
+
+  // —— 输出:仅非种子节点的稳态分(种子已在候选池,不重复计入联想候选,同原 #spread)——
+  const seedSet = new Set(seedUnique);
+  for (let i = 0; i < n; i++) {
+    const id = nodes[i]!;
+    if (seedSet.has(id)) continue;
+    const score = r[i]!;
+    if (score > 0) out.set(id, score);
+  }
+  return out;
 }
 
 // —— §5.6 接缝 7 / §5.5 末:向量存取 + 同步混合召回的纯函数地基(单一权威,两 store 共用)——

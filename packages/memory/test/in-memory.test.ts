@@ -3,5 +3,9 @@ import { runMemoryStoreContract } from './contract';
 
 runMemoryStoreContract(
   'InMemoryMemoryStore',
-  (opts) => new InMemoryMemoryStore({ ...(opts?.now ? { now: opts.now } : {}) }),
+  (opts) =>
+    new InMemoryMemoryStore({
+      ...(opts?.now ? { now: opts.now } : {}),
+      ...(opts?.config ? { config: opts.config } : {}),
+    }),
 );

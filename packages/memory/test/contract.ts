@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import type { MemoryStore } from '../src/index';
+import type { MemoryConfig, MemoryStore } from '../src/index';
 
-/** 工厂:可注入时钟以做确定性排序断言。 */
-export type MakeStore = (opts?: { now?: () => number }) => MemoryStore;
+/** 工厂:可注入时钟以做确定性排序断言;可选注入配置覆盖(如 PPR 子图上限,承 §5.10 B1)。 */
+export type MakeStore = (opts?: {
+  now?: () => number;
+  config?: Partial<MemoryConfig>;
+}) => MemoryStore;
 
 /**
  * MemoryStore 契约套件(§3.1):内存实现与 SQLite 实现跑同一套,重写实现用它验收。
@@ -543,7 +546,7 @@ export function runMemoryStoreContract(name: string, make: MakeStore): void {
       s.close();
     });
 
-    it('跳数衰减:近邻(1 跳)联想分高于远邻(2 跳)(§5.9 缺口①)', () => {
+    it('PPR 近 > 远:近邻(1 跳)联想分高于远邻(2 跳)(§5.10 B1)', () => {
       let t = 0;
       const s = make({ now: () => ++t });
       // 链:命中 A —(共享 token X)— B —(共享 token Y)— C;A 命中关键词"起点"。
@@ -552,14 +555,58 @@ export function runMemoryStoreContract(name: string, make: MakeStore): void {
       s.addMemory({ text: '链X 链Y' }); // B:与 A 共享"链X"(1 跳)、与 C 共享"链Y"
       s.addMemory({ text: '链Y 末端' }); // C:与 B 共享"链Y" → 对 A 是 2 跳
       const texts = s.recall('起点', 10).map((r) => r.text);
-      // A 一阶命中;B 1 跳、C 2 跳都被带入(默认 maxHops=2)。
+      // A 一阶命中(种子,不重复计入联想);B 1 跳、C 2 跳都被 PPR 带入(子图半径=默认 maxHops=2)。
       expect(texts).toContain('起点 链X');
       expect(texts).toContain('链X 链Y');
       expect(texts).toContain('链Y 末端');
-      // 1 跳邻居 B 的联想分(decay¹)高于 2 跳邻居 C(decay²)→ B 排在 C 前。
+      // PPR 稳态分:1 跳邻居 B 高于 2 跳邻居 C(质量随跳数自然衰减)→ B 排在 C 前。
       const idxB = texts.indexOf('链X 链Y');
       const idxC = texts.indexOf('链Y 末端');
       expect(idxB).toBeLessThan(idxC);
+      s.close();
+    });
+
+    it('PPR 强连接 > 弱连接:多共享键(重边)联想分高于单共享键(§5.10 B1)', () => {
+      let t = 0;
+      const s = make({ now: () => ++t });
+      // A 命中"锚";A 与 B 共享两个 token(强边 weight=2)、与 C 共享一个 token(弱边 weight=1)。
+      s.addMemory({ text: '锚 甲 乙' }); // A:命中"锚",与 B 共享"甲""乙",与 C 共享"乙"
+      s.addMemory({ text: '甲 乙 丙' }); // B:与 A 共享"甲""乙"(强边),与 C 共享"丙"
+      s.addMemory({ text: '乙 丁' }); // C:与 A 共享"乙"(弱边)
+      const texts = s.recall('锚', 10).map((r) => r.text);
+      expect(texts).toContain('锚 甲 乙'); // 一阶命中(种子)。
+      expect(texts).toContain('甲 乙 丙'); // 强连接带入。
+      expect(texts).toContain('乙 丁'); // 弱连接带入。
+      // 强连接 B 的 PPR 稳态分高于弱连接 C → B 排在 C 前。
+      expect(texts.indexOf('甲 乙 丙')).toBeLessThan(texts.indexOf('乙 丁'));
+      s.close();
+    });
+
+    it('PPR 一阶命中不重复计入联想(种子不进联想候选,§5.10 B1)', () => {
+      let t = 0;
+      const s = make({ now: () => ++t });
+      // 两条都命中关键词"猫"(都是一阶种子)且互为邻居;结果里各只出现一次,不因互为邻居被重复带入。
+      s.addMemory({ text: '猫 散步' });
+      s.addMemory({ text: '猫 打呼' });
+      const texts = s.recall('猫', 10).map((r) => r.text);
+      expect(texts.filter((x) => x === '猫 散步').length).toBe(1);
+      expect(texts.filter((x) => x === '猫 打呼').length).toBe(1);
+      s.close();
+    });
+
+    it('PPR 子图节点封顶生效:超上限的远端关联不被带入(§5.10 B1 端侧性能)', () => {
+      let t = 0;
+      // pprMaxNodes=2:子图最多 2 个节点(种子 + 1 个邻居),更远的关联被截断。
+      const s = make({ now: () => ++t, config: { pprMaxNodes: 2 } });
+      // 链:A(命中)—B—C—D;封顶 2 节点 → 只剩 A 自己 + 1 个邻居入子图,C/D 不入。
+      s.addMemory({ text: '锚点 边1' }); // A:命中"锚点",与 B 共享"边1"
+      s.addMemory({ text: '边1 边2' }); // B:1 跳
+      s.addMemory({ text: '边2 边3' }); // C:2 跳
+      s.addMemory({ text: '边3 末梢' }); // D:3 跳(本就超 maxHops,且更超节点上限)
+      const texts = s.recall('锚点', 10).map((r) => r.text);
+      expect(texts).toContain('锚点 边1'); // 一阶命中。
+      // 节点封顶 2:除种子外最多带入 1 个;D"末梢"必不在(既超跳数又超节点上限)。
+      expect(texts).not.toContain('边3 末梢');
       s.close();
     });
 

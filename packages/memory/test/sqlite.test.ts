@@ -21,7 +21,12 @@ const newPath = (): string => join(dir, `m${++seq}.db`);
 // 契约(内存库即可覆盖读写/去重/召回/快照)。
 runMemoryStoreContract(
   'SqliteMemoryStore(:memory:)',
-  (opts) => new SqliteMemoryStore({ path: ':memory:', ...(opts?.now ? { now: opts.now } : {}) }),
+  (opts) =>
+    new SqliteMemoryStore({
+      path: ':memory:',
+      ...(opts?.now ? { now: opts.now } : {}),
+      ...(opts?.config ? { config: opts.config } : {}),
+    }),
 );
 
 describe('SqliteMemoryStore 持久化 / 迁移 / 降级', () => {
