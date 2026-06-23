@@ -7,11 +7,14 @@ import {
   emotionSector,
   entityKeys,
   hopDecay,
+  inferMemoryKindForBackfill,
   keywordScore,
+  memoryKindWeight,
   mixedRecallScore,
   normalizeAndFuse,
   recallScore,
   resolveMemoryConfig,
+  resolveMemoryKind,
   type Pad,
   type RawRecallSignals,
   type RecallSignal,
@@ -309,5 +312,53 @@ describe('§5.9 缺口① entityKeys / hopDecay', () => {
     expect(hopDecay(1, 0.5)).toBeCloseTo(0.5, 6);
     expect(hopDecay(2, 0.5)).toBeCloseTo(0.25, 6);
     expect(hopDecay(2, 0.8)).toBeCloseTo(0.64, 6);
+  });
+});
+
+/**
+ * §5.9 缺口④ 情景/语义分层纯函数 golden:写入归类(core⟹pinned)、迁移归类(pinned→core/else semantic)、
+ * 召回 kind 权重调制。两 store 共用同一权威,锁住单点规则(§3.2)。
+ */
+describe('§5.9 缺口④ 情景/语义分层(单一权威纯函数 golden)', () => {
+  it('resolveMemoryKind:缺省取配置 defaultMemoryKind(默认 episodic)', () => {
+    expect(resolveMemoryKind({}, DEFAULT_MEMORY_CONFIG)).toEqual({
+      memoryKind: 'episodic',
+      pinned: false,
+    });
+    // 配置可改默认(行为即配置)。
+    const cfg = resolveMemoryConfig({ defaultMemoryKind: 'semantic' });
+    expect(resolveMemoryKind({}, cfg).memoryKind).toBe('semantic');
+  });
+
+  it('resolveMemoryKind:core ⟹ pinned(核心档永不衰减,承 §5.4)', () => {
+    expect(resolveMemoryKind({ memoryKind: 'core' }, DEFAULT_MEMORY_CONFIG)).toEqual({
+      memoryKind: 'core',
+      pinned: true,
+    });
+  });
+
+  it('resolveMemoryKind:显式 pinned 但非 core → 保留 kind、仅免衰(两概念正交可组合)', () => {
+    expect(resolveMemoryKind({ memoryKind: 'episodic', pinned: true }, DEFAULT_MEMORY_CONFIG)).toEqual(
+      { memoryKind: 'episodic', pinned: true },
+    );
+  });
+
+  it('inferMemoryKindForBackfill:pinned→core、其余→semantic(保守默认),幂等', () => {
+    expect(inferMemoryKindForBackfill(true)).toBe('core');
+    expect(inferMemoryKindForBackfill(false)).toBe('semantic');
+    // 纯函数幂等:同入参恒同出。
+    expect(inferMemoryKindForBackfill(true)).toBe(inferMemoryKindForBackfill(true));
+  });
+
+  it('memoryKindWeight:取配置权重,缺省 core>semantic>episodic;undefined 兜底 episodic', () => {
+    const w = DEFAULT_MEMORY_CONFIG.memoryKindWeights;
+    expect(memoryKindWeight('episodic', w)).toBe(w.episodic);
+    expect(memoryKindWeight('semantic', w)).toBe(w.semantic);
+    expect(memoryKindWeight('core', w)).toBe(w.core);
+    expect(memoryKindWeight('core', w)).toBeGreaterThan(memoryKindWeight('semantic', w));
+    expect(memoryKindWeight('semantic', w)).toBeGreaterThan(memoryKindWeight('episodic', w));
+    // undefined 兜底 episodic;负权重夹到 0(防御)。
+    expect(memoryKindWeight(undefined, w)).toBe(w.episodic);
+    expect(memoryKindWeight('semantic', { episodic: 1, semantic: -3, core: 1 })).toBe(0);
   });
 });

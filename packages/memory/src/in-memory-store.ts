@@ -1,12 +1,14 @@
 import type {
   ChatMessage,
   MemoryInput,
+  MemoryKind,
   MemoryRecord,
   MemoryStore,
   MemorySubject,
   Pad,
   Person,
   RecallContextOptions,
+  RecallKindOptions,
   RecallWithContext,
   RecalledMemory,
   StoredMessage,
@@ -18,11 +20,13 @@ import {
   entityKeys,
   hopDecay,
   makePrimaryPerson,
+  memoryKindWeight,
   normalizeAndFuse,
   recallScore,
   reinforceImportance,
   resolveAttribution,
   resolveMemoryConfig,
+  resolveMemoryKind,
   tokenize,
   windowRange,
   type MemoryConfig,
@@ -34,6 +38,8 @@ interface MutableRecord {
   text: string;
   normalized: string;
   kind: string | undefined;
+  /** 情景/语义分层(承 §5.9 缺口④):episodic / semantic / core。 */
+  memoryKind: MemoryKind;
   createdAtMs: number;
   lastSeenAtMs: number;
   hits: number;
@@ -120,22 +126,25 @@ export class InMemoryMemoryStore implements MemoryStore {
     }
     // 归属规则与 SQLite 共用单一权威 helper(承 §5.3 / §5.3b),避免两后端漂移。
     const { subject, personId } = resolveAttribution(rec, this.#cfg);
+    // 情景/语义分层(承 §5.9 缺口④):缺省 episodic;core ⟹ pinned(永不衰减,承 §5.4)。与 SQLite 共用单一权威。
+    const { memoryKind, pinned } = resolveMemoryKind(rec, this.#cfg);
     const id = ++this.#seq;
     this.#memories.set(normalized, {
       id,
       text: rec.text,
       normalized,
       kind: rec.kind,
+      memoryKind,
       createdAtMs: at,
       lastSeenAtMs: at,
       hits: 1,
       subject,
       personId,
-      // 评分列初值(承 §5.5):importance 缺省配置初值、access_count=0、last_accessed=创建时、pinned 缺省 false。
+      // 评分列初值(承 §5.5):importance 缺省配置初值、access_count=0、last_accessed=创建时。
       importance: rec.importance ?? this.#cfg.initialImportance,
       accessCount: 0,
       lastAccessedAtMs: at,
-      pinned: rec.pinned === true,
+      pinned,
       // 未闭合话题(承 §7#2):缺省非未了事、未闭合(镜像 SQLite open_thread=0 / closed_at=NULL)。
       openThread: rec.openThread === true,
       closedAtMs: undefined,
@@ -211,10 +220,16 @@ export class InMemoryMemoryStore implements MemoryStore {
     query: string,
     limit: number = this.#cfg.recallLimit,
     pad?: Pad,
+    kindOptions?: RecallKindOptions,
   ): readonly MemoryRecord[] {
     const tokens = tokenize(query, this.#cfg.normalize);
     if (tokens.length === 0) return [];
     const now = this.#now();
+    // 按 kind 分路过滤集(承 §5.9 缺口④):空 / 省略 = 不过滤(全 kind),与 SQLite 同一语义。
+    const kindFilter =
+      kindOptions?.kinds !== undefined && kindOptions.kinds.length > 0
+        ? new Set<MemoryKind>(kindOptions.kinds)
+        : undefined;
     // 不按主语过滤:一次跨 person+agent+shared 召回(§5.3 末条),与 SQLite 行为一致。
     // 候选过滤:逐 token 命中(includes);命中去重 token 数作关键词原始命中数 raw(与 SQLite 同规则,零漂移)。
     // 按 id 索引记忆,便于联想扩散按 id 取回(与 SQLite 一致)。
@@ -224,6 +239,8 @@ export class InMemoryMemoryStore implements MemoryStore {
     // —— 一阶候选(关键词命中)+ 原始信号(承 §5.5 / §5.9 缺口③)——
     const candById = new Map<number, { r: MutableRecord; raw: RawRecallSignals }>();
     for (const r of byId.values()) {
+      // 按 kind 分路(承 §5.9 缺口④):不在过滤集内的候选跳过(也不当扩散种子);与 SQLite 一致。
+      if (kindFilter !== undefined && !kindFilter.has(r.memoryKind)) continue;
       const rawHits = tokens.reduce((n, t) => (r.normalized.includes(t) ? n + 1 : n), 0);
       if (rawHits === 0) continue; // 关键词无命中 → 不进一阶候选池。
       candById.set(r.id, {
@@ -250,6 +267,8 @@ export class InMemoryMemoryStore implements MemoryStore {
       if (candById.has(id)) continue; // 已是一阶命中,不重复。
       const r = byId.get(id);
       if (r === undefined) continue;
+      // 按 kind 分路(承 §5.9 缺口④):联想带入的旁支若不在过滤集内也跳过(分路一致);与 SQLite 一致。
+      if (kindFilter !== undefined && !kindFilter.has(r.memoryKind)) continue;
       const rawHits = tokens.reduce((n, t) => (r.normalized.includes(t) ? n + 1 : n), 0);
       candById.set(id, {
         r,
@@ -272,8 +291,13 @@ export class InMemoryMemoryStore implements MemoryStore {
     // —— 缺口③:候选集尺度 min-max 归一 + 可配权重融合(单一权威公式,与 SQLite 零漂移)——
     const cands = [...candById.values()];
     const fused = normalizeAndFuse(cands.map((c) => c.raw), this.#cfg.recallSignalWeights);
+    // kind 权重调制(承 §5.9 缺口④):融合分 × 该候选 kind 权重(core>semantic>episodic 可配);与 SQLite 一致。
+    // 乘性调制不改变"谁能进池"(零仍零、非零仍非零),仅给分层不同分量(承 §5.5)。
     const scored = cands
-      .map((c, i) => ({ r: c.r, score: fused[i]! }))
+      .map((c, i) => ({
+        r: c.r,
+        score: fused[i]! * memoryKindWeight(c.r.memoryKind, this.#cfg.memoryKindWeights),
+      }))
       .filter((s) => s.score > 0); // 零信号门控只丢全零(任一路在场即进池,不学 mem0 硬丢,§5.5)。
     scored.sort((a, b) => b.score - a.score || b.r.hits - a.r.hits || b.r.id - a.r.id);
     const top = scored.slice(0, limit).map((s) => s.r);
@@ -282,6 +306,7 @@ export class InMemoryMemoryStore implements MemoryStore {
       id: r.id,
       text: r.text,
       kind: r.kind,
+      memoryKind: r.memoryKind,
       createdAtMs: r.createdAtMs,
       lastSeenAtMs: r.lastSeenAtMs,
       hits: r.hits,
@@ -303,7 +328,8 @@ export class InMemoryMemoryStore implements MemoryStore {
 
   recallWithContext(query: string, opts: RecallContextOptions = {}): RecallWithContext {
     // 复用 recall 的召回/排序/检索即强化(纯加法,不另起第二套打分);命中顺序即 recall 顺序。
-    const hits = this.recall(query, opts.limit, opts.pad);
+    // kindOptions 透传(承 §5.9 缺口④:带上下文窗口的召回同样支持按分层分路)。
+    const hits = this.recall(query, opts.limit, opts.pad, opts.kindOptions);
     const n = opts.windowSize ?? this.#cfg.contextWindowSize;
     // 全局 messages 时序(写入序即时序);时间戳数组供就近锚定(单一权威纯函数,§5.5)。
     const timestamps = this.#messages.map((m) => m.createdAtMs);
@@ -350,6 +376,7 @@ export class InMemoryMemoryStore implements MemoryStore {
       id: s.r.id,
       text: s.r.text,
       kind: s.r.kind,
+      memoryKind: s.r.memoryKind,
       createdAtMs: s.r.createdAtMs,
       lastSeenAtMs: s.r.lastSeenAtMs,
       hits: s.r.hits,

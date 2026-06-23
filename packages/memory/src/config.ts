@@ -1,4 +1,6 @@
-import type { MemoryInput, MemorySubject, Pad, Person } from './types';
+import type { MemoryInput, MemoryKind, MemorySubject, Pad, Person } from './types';
+
+export type { MemoryKind };
 
 /**
  * 记忆行为配置(行为即配置,§3.2):召回上限/滑窗大小/规范化规则全外置,无 magic number。
@@ -67,7 +69,23 @@ export interface MemoryConfig {
    * 默认 0.5(每跳减半);落在 (0,1]。行为即配置(§3.2),无 magic number。
    */
   readonly associationHopDecay: number;
+  /**
+   * 新记忆缺省的情景/语义分层(承 §5.9 缺口④):调用方/抽取层未给 `memoryKind` 时用它。
+   * 默认 episodic——原始写入多为叙事性事件,语义蒸馏/核心标注属离线巩固或显式标注(承 §5.8)。
+   * 行为即配置(§3.2)。
+   */
+  readonly defaultMemoryKind: MemoryKind;
+  /**
+   * 召回融合后的 **kind 权重调制**(承 §5.9 缺口④):候选融合分 × 该候选 kind 的权重,
+   * 让稳定事实(semantic)与叙事事件(episodic)在融合时按 kind 给不同权重,core 最高(优先注入语义)。
+   * **不破坏候选池规则**:只对已入池候选做乘性调制,不决定"谁能进池"(情感/关键词单独仍可入池,§5.5)。
+   * 权重非负;默认 core 最高、semantic 次之、episodic 基线(可调,承行为即配置 §3.2)。
+   */
+  readonly memoryKindWeights: MemoryKindWeights;
 }
+
+/** 各分层的召回权重(承 §5.9 缺口④);值非负。 */
+export type MemoryKindWeights = Readonly<Record<MemoryKind, number>>;
 
 /**
  * 混合召回的各路信号种类(承 §5.5 / §5.9 缺口③):min-max 归一融合的单一权威键集。
@@ -108,6 +126,10 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
   // §5.9 缺口① 联想扩散(行为即配置,§3.2):默认 2 跳、每跳 ×0.5 衰减(1–2 跳最像人)。
   associationMaxHops: 2,
   associationHopDecay: 0.5,
+  // §5.9 缺口④ 情景/语义分层(行为即配置,§3.2):写入缺省 episodic(叙事);
+  // 召回 kind 权重 core>semantic>episodic(核心档优先注入语义,稳定事实略重于零散叙事)。
+  defaultMemoryKind: 'episodic',
+  memoryKindWeights: { episodic: 1, semantic: 1.2, core: 1.5 },
 };
 
 /** 合并用户覆盖与默认值。 */
@@ -127,6 +149,46 @@ export function resolveAttribution(
   const subject: MemorySubject = rec.subject ?? 'person';
   const personId = subject === 'agent' ? undefined : (rec.personId ?? cfg.primaryPersonId);
   return { subject, personId };
+}
+
+/**
+ * 写入归类(单一权威,承 §5.9 缺口④):解析一条新记忆的情景/语义分层,
+ * 并给出它**是否应免衰减(core ⟺ pinned)**。两 store 共用此规则,避免分层语义在多后端漂移(§3.1)。
+ * - `memoryKind` 缺省取配置 `defaultMemoryKind`(默认 episodic)。
+ * - **core ⟹ pinned**:核心档永不衰减(承 §5.4);显式 `pinned:true` 也单独保留(免衰)。
+ *   即:`pinned = (memoryKind === 'core') || rec.pinned === true`。
+ *   不在此反推 kind(显式 pinned 但非 core 仍保留其 kind,仅免衰),保持两概念正交可组合。
+ */
+export function resolveMemoryKind(
+  rec: Pick<MemoryInput, 'memoryKind' | 'pinned'>,
+  cfg: Pick<MemoryConfig, 'defaultMemoryKind'>,
+): { memoryKind: MemoryKind; pinned: boolean } {
+  const memoryKind: MemoryKind = rec.memoryKind ?? cfg.defaultMemoryKind;
+  const pinned = memoryKind === 'core' || rec.pinned === true;
+  return { memoryKind, pinned };
+}
+
+/**
+ * 旧数据迁移归类(单一权威,承 §5.9 缺口④ / §3.2 数据迁移纪律):为存量记忆推断分层。
+ * - 已 pinned 的旧记忆 → `core`(它们本就是免衰减的核心档,语义最稳)。
+ * - 其余 → `semantic`(保守默认:旧库里多为已蒸馏的稳定事实/偏好,不臆断为叙事)。
+ * 幂等可回放:对同一行多次套用结果一致(纯函数,无状态)。
+ */
+export function inferMemoryKindForBackfill(pinned: boolean): MemoryKind {
+  return pinned ? 'core' : 'semantic';
+}
+
+/**
+ * 召回融合后的 kind 权重调制(单一权威,承 §5.9 缺口④):取该 kind 的配置权重(缺省 1)。
+ * 两 store 在融合分上做乘性调制时共用,杜绝漂移。kind 为 undefined(理论不应发生)兜底按 episodic。
+ */
+export function memoryKindWeight(
+  kind: MemoryKind | undefined,
+  weights: MemoryKindWeights,
+): number {
+  const k: MemoryKind = kind ?? 'episodic';
+  const w = weights[k];
+  return w >= 0 ? w : 0;
 }
 
 /**

@@ -2,12 +2,14 @@ import { DatabaseSync } from 'node:sqlite';
 import type {
   ChatMessage,
   MemoryInput,
+  MemoryKind,
   MemoryRecord,
   MemoryStore,
   MemorySubject,
   Pad,
   Person,
   RecallContextOptions,
+  RecallKindOptions,
   RecallWithContext,
   RecalledMemory,
   StoredMessage,
@@ -19,11 +21,13 @@ import {
   entityKeys,
   hopDecay,
   makePrimaryPerson,
+  memoryKindWeight,
   normalizeAndFuse,
   recallScore,
   reinforceImportance,
   resolveAttribution,
   resolveMemoryConfig,
+  resolveMemoryKind,
   tokenize,
   windowRange,
   type MemoryConfig,
@@ -31,7 +35,7 @@ import {
 } from './config';
 
 /** 当前代码支持的记忆库 schema 版本。每次破坏性/累加性变更 +1 并新增一条迁移。 */
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 7;
 
 /**
  * 迁移步骤上下文:主用户花名册条目 + 记忆重要性初值经此注入(承 §3.2 行为即配置),
@@ -169,6 +173,16 @@ const MIGRATIONS: Record<number, (db: DatabaseSync, ctx: MigrationContext) => vo
       );
     }
   },
+  7(db) {
+    // 情景/语义显式分层(承 §5.1 / §5.9 缺口④):新增 memory_kind 列 ∈ {episodic, semantic, core}。
+    // ALTER ADD COLUMN 无列级 IF NOT EXISTS,幂等性靠 v7 只在 schema_version<7 跑一次(同 v3..v6 手法)。
+    db.exec(`ALTER TABLE memories ADD COLUMN memory_kind TEXT;`);
+    // backfill 存量记忆:已 pinned → core(本就免衰减的核心档);其余 → semantic(保守:旧库多为稳定事实)。
+    // 单一权威推断规则见 config.inferMemoryKindForBackfill(纯函数,幂等可回放,§3.2)。
+    // 用两条 UPDATE 表达"pinned→core / 非 pinned→semantic",只覆盖 memory_kind IS NULL 的历史行,零丢失。
+    db.prepare(`UPDATE memories SET memory_kind = 'core' WHERE memory_kind IS NULL AND pinned = 1`).run();
+    db.prepare(`UPDATE memories SET memory_kind = 'semantic' WHERE memory_kind IS NULL`).run();
+  },
 };
 
 /**
@@ -236,6 +250,13 @@ function asNumber(v: unknown): number {
 }
 function asString(v: unknown): string {
   return typeof v === 'string' ? v : String(v);
+}
+/**
+ * 读列兜底:把 memory_kind 列值规范为 MemoryKind(承 §5.9 缺口④)。
+ * v7 迁移后该列必有合法值;旧 NULL / 未知值兜底为 episodic(单一权威读列规则,与 InMemory 零漂移)。
+ */
+function normalizeKind(v: unknown): MemoryKind {
+  return v === 'semantic' || v === 'core' ? v : 'episodic';
 }
 
 /**
@@ -351,9 +372,11 @@ export class SqliteMemoryStore implements MemoryStore {
     const at = rec.createdAtMs ?? this.#now();
     // 归属规则与 InMemory 共用单一权威 helper(承 §5.3 / §5.3b);SQLite 列接受 NULL,故 `?? null`。
     const { subject, personId } = resolveAttribution(rec, this.#cfg);
-    // 评分列初值(承 §5.5):importance 缺省配置初值、access_count=0、last_accessed=创建时、pinned 缺省 0。
+    // 情景/语义分层(承 §5.9 缺口④):缺省 episodic;core ⟹ pinned(永不衰减,承 §5.4)。
+    const { memoryKind, pinned: pinnedBool } = resolveMemoryKind(rec, this.#cfg);
+    // 评分列初值(承 §5.5):importance 缺省配置初值、access_count=0、last_accessed=创建时。
     const importance = rec.importance ?? this.#cfg.initialImportance;
-    const pinned = rec.pinned === true ? 1 : 0;
+    const pinned = pinnedBool ? 1 : 0;
     // 未闭合话题标记(承 §7#2):缺省 0(非未了事);closed_at 写 NULL(尚未闭合)。
     const openThread = rec.openThread === true ? 1 : 0;
     try {
@@ -372,8 +395,8 @@ export class SqliteMemoryStore implements MemoryStore {
       try {
         const info = this.#db
           .prepare(
-            `INSERT INTO memories(text, normalized_text, kind, created_at, last_seen_at, hits, source_session, subject, person_id, importance, access_count, last_accessed, pinned, open_thread, closed_at)
-             VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, ?, ?, ?, NULL)`,
+            `INSERT INTO memories(text, normalized_text, kind, created_at, last_seen_at, hits, source_session, subject, person_id, importance, access_count, last_accessed, pinned, open_thread, closed_at, memory_kind)
+             VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, ?, ?, ?, NULL, ?)`,
           )
           .run(
             rec.text,
@@ -388,6 +411,7 @@ export class SqliteMemoryStore implements MemoryStore {
             at,
             pinned,
             openThread,
+            memoryKind,
           );
         const memoryId = asNumber(info.lastInsertRowid);
         // 联想扩散地基(承 §5.9 缺口①):建实体索引 + 与共享实体的旧记忆增建无向邻接边。
@@ -464,6 +488,8 @@ export class SqliteMemoryStore implements MemoryStore {
       id: asNumber(r['id']),
       text: asString(r['text']),
       kind: r['kind'] === null || r['kind'] === undefined ? undefined : asString(r['kind']),
+      // 情景/语义分层(承 §5.9 缺口④):v7 迁移后必有值;为稳健对旧 NULL 兜底为 episodic。
+      memoryKind: normalizeKind(r['memory_kind']),
       createdAtMs: asNumber(r['created_at']),
       lastSeenAtMs,
       hits: asNumber(r['hits']),
@@ -487,15 +513,21 @@ export class SqliteMemoryStore implements MemoryStore {
     query: string,
     limit: number = this.#cfg.recallLimit,
     pad?: Pad,
+    kindOptions?: RecallKindOptions,
   ): readonly MemoryRecord[] {
     const tokens = tokenize(query, this.#cfg.normalize);
     if (tokens.length === 0) return [];
+    // 按 kind 分路过滤集(承 §5.9 缺口④):空 / 省略 = 不过滤(全 kind),与 InMemory 同一语义。
+    const kindFilter =
+      kindOptions?.kinds !== undefined && kindOptions.kinds.length > 0
+        ? new Set<MemoryKind>(kindOptions.kinds)
+        : undefined;
     try {
       // 不按主语过滤:一次覆盖 person+agent+shared,让上层同时拿到自述/事实/共同经历,防自相矛盾(§5.3 末条)。
       // SQL 只做 LIKE 候选过滤;归一/混合/排序在 JS 层用 config.ts 单一权威公式算(两后端零漂移,§5.5/§3.2)。
       // 取回 normalized_text 以在 JS 层用与 InMemory 同一规则复算关键词命中数(不依赖 SQL 端计数,免两套)。
       const cols = `id, text, normalized_text, kind, created_at, last_seen_at, hits, subject, person_id,
-                    importance, access_count, last_accessed, pinned, open_thread, closed_at`;
+                    importance, access_count, last_accessed, pinned, open_thread, closed_at, memory_kind`;
       const where = tokens.map(() => `normalized_text LIKE ?`).join(' OR ');
       const params = tokens.map((t) => `%${t}%`);
       const firstRows = this.#db
@@ -512,6 +544,8 @@ export class SqliteMemoryStore implements MemoryStore {
       const candById = new Map<number, Cand>();
       for (const r of firstRows) {
         const record = this.#rowToRecord(r);
+        // 按 kind 分路(承 §5.9 缺口④):不在过滤集内的候选直接跳过,不入候选池(也不当扩散种子)。
+        if (kindFilter !== undefined && !kindFilter.has(record.memoryKind ?? 'episodic')) continue;
         const normalized = asString(r['normalized_text']);
         const rawHits = tokens.reduce((n, t) => (normalized.includes(t) ? n + 1 : n), 0);
         candById.set(record.id, {
@@ -548,6 +582,8 @@ export class SqliteMemoryStore implements MemoryStore {
         for (const r of assocRows) {
           const record = this.#rowToRecord(r);
           if (candById.has(record.id)) continue; // 已是一阶命中,不重复。
+          // 按 kind 分路(承 §5.9 缺口④):联想带入的旁支若不在过滤集内也跳过(分路一致)。
+          if (kindFilter !== undefined && !kindFilter.has(record.memoryKind ?? 'episodic')) continue;
           const hop = hopOf.get(record.id)!;
           const normalized = asString(r['normalized_text']);
           // 联想候选也算其自身关键词命中(可能 0):0 命中则关键词路缺席(不硬丢,靠联想/强度入池)。
@@ -583,7 +619,12 @@ export class SqliteMemoryStore implements MemoryStore {
         cands.map((c) => c.raw),
         this.#cfg.recallSignalWeights,
       );
-      const scored = cands.map((c, i) => ({ record: c.record, score: fused[i]! }));
+      // kind 权重调制(承 §5.9 缺口④):融合分 × 该候选 kind 权重(core>semantic>episodic 可配)。
+      // 乘性调制不改变"谁能进池"(零信号仍为 0、非零仍非零),仅在融合后给分层不同分量(承 §5.5)。
+      const scored = cands.map((c, i) => ({
+        record: c.record,
+        score: fused[i]! * memoryKindWeight(c.record.memoryKind, this.#cfg.memoryKindWeights),
+      }));
       // 零信号门控只丢全零(承 §5.5:任一路在场即进池,不学 mem0 硬丢)。
       const kept = scored.filter((s) => s.score > 0);
       // 融合得分降序;同分按 hits / id 兜底,排序完全确定(与 InMemory 一致)。
@@ -620,7 +661,8 @@ export class SqliteMemoryStore implements MemoryStore {
 
   recallWithContext(query: string, opts: RecallContextOptions = {}): RecallWithContext {
     // 复用 recall 的召回/排序/检索即强化(纯加法,不另起第二套打分);命中顺序即 recall 顺序。
-    const hits = this.recall(query, opts.limit, opts.pad);
+    // kindOptions 透传(承 §5.9 缺口④:带上下文窗口的召回同样支持按分层分路)。
+    const hits = this.recall(query, opts.limit, opts.pad, opts.kindOptions);
     const n = opts.windowSize ?? this.#cfg.contextWindowSize;
     // 取全局 messages 时序(ORDER BY id = 写入序 = 对话时序),JS 层就近锚定+切窗(与内存零漂移)。
     // 读失败优雅降级:窗口为空、不抛、召回主结果仍返回(§3.2)。
@@ -665,7 +707,7 @@ export class SqliteMemoryStore implements MemoryStore {
       const rows = this.#db
         .prepare(
           `SELECT id, text, normalized_text, kind, created_at, last_seen_at, hits, subject, person_id,
-                  importance, access_count, last_accessed, pinned, open_thread, closed_at
+                  importance, access_count, last_accessed, pinned, open_thread, closed_at, memory_kind
            FROM memories
            WHERE open_thread = 1 AND closed_at IS NULL`,
         )
@@ -683,6 +725,7 @@ export class SqliteMemoryStore implements MemoryStore {
           id: asNumber(r['id']),
           text: asString(r['text']),
           kind: r['kind'] === null || r['kind'] === undefined ? undefined : asString(r['kind']),
+          memoryKind: normalizeKind(r['memory_kind']),
           createdAtMs: asNumber(r['created_at']),
           lastSeenAtMs,
           hits: asNumber(r['hits']),
