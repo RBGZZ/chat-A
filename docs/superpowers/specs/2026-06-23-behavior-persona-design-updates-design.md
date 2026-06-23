@@ -31,14 +31,14 @@
 - 新增**单标量 `closeness ∈ [0,1]`**,持久化在 **memory 人物花名册 `people.relationship_state` JSON**(§5.3b **已预留**该字段,本次填实)。
 - 每个 `person_id` 各有自己的 closeness(主用户为核心;访客可有浅 closeness)。
 - 定位:**中速慢变量**,与"人格(特质·慢)/ PAD(情绪·快)"正交,补齐缺失的"**关系**"轴。
-- 初值可配(默认偏低 = "陌生起步";用户画像冷启动可给更高初值,承 §6.2)。
+- 初值可配,**默认 `0.1`(陌生起步)**;用户画像冷启动可给更高初值(承 §6.2)。
 
 ### 2.2 接缝
 - memory 暴露关系状态读写(沿用现有 `MemoryStore`/KV 风格):`getCloseness(personId): number` / `bumpCloseness(personId, delta)` / 惰性衰减读取——**单一权威公式**,与 §5.5 衰减同纪律(惰性 SQL 实时算、不写回污染)。
 - **编排层(runtime)读 closeness,喂给 persona 与 autonomy**(取数在编排层,persona/autonomy 不反向依赖 memory,承 §3.1 接缝边界)。
 
 ### 2.3 演化(单一权威公式)
-- **上升**:每回合收尾(`finalizeTurn`,回复之后,不挡首字)按互动正向程度小步抬升 `closeness += k_up·(1−closeness)`(渐近饱和);k_up 可配。
+- **上升**:每回合收尾(`finalizeTurn`,回复之后,不挡首字)小步抬升 `closeness += k_up·valence⁺·(1−closeness)`(渐近饱和)。**正向程度 `valence⁺` 取自当轮情绪评估**(复用已有 appraiser 的 PAD/valence 输出,取其正分量;无 appraiser 时降级为"有实质互动即固定小步 +");k_up 与是否启用 valence 加权可配。
 - **衰减**:按"距上次互动时长"惰性下降(同 §5.5 衰减族,半衰期可配);pinned/核心关系可设下限避免归零。
 - 全部**速率可配**(行为即配置);演化在回合收尾异步段,**不进首字热路径**(承非阻塞约束)。
 
