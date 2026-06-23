@@ -4,4 +4,5 @@ export * from './pcm';
 export * from './chat';
 export * from './bus-events';
 export * from './frames';
+export * from './audio-transport';
 export * from './errors';
