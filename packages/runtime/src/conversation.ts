@@ -8,7 +8,9 @@ import {
   PersonaSkeletonContributor,
   MemoryRecallContributor,
   ToneContributor,
+  DissentContributor,
   type AssembledPrompt,
+  type StanceInput,
 } from '@chat-a/cognition';
 import {
   InMemoryMemoryStore,
@@ -20,9 +22,12 @@ import {
 import {
   PersonaEngine,
   XIAOXUE_SEED,
+  DefaultStanceDetector,
   type Appraiser,
   type PersonaSeed,
   type PersonaStore,
+  type SelfNotion,
+  type StanceDetector,
 } from '@chat-a/persona';
 import { getTracer, GENAI, CHAT_A } from '@chat-a/observability';
 import type { LightVoiceBus } from './bus';
@@ -44,6 +49,8 @@ export interface ConversationDeps {
   readonly personaStore?: PersonaStore;
   /** 记忆抽取接缝;提供则回合后用它抽取要点(替换 naive 存原话),默认不抽取。 */
   readonly memoryExtractor?: MemoryExtractor;
+  /** 分歧检测接缝(§7#3);默认确定性 DefaultStanceDetector(话题命中)。 */
+  readonly stanceDetector?: StanceDetector;
   readonly sessionId?: string;
 }
 
@@ -62,6 +69,9 @@ export class Conversation {
   readonly #extractEnabled: boolean;
   readonly #skeleton: string;
   readonly #assembler: PromptAssembler;
+  readonly #stanceDetector: StanceDetector;
+  readonly #selfNotions: readonly SelfNotion[];
+  readonly #assertiveness: number;
   readonly #sessionId: string;
   #turnSeq = 0;
 
@@ -71,11 +81,16 @@ export class Conversation {
     this.#memory = deps.memory ?? new InMemoryMemoryStore();
     const seed = deps.personaSeed ?? XIAOXUE_SEED;
     this.#skeleton = buildSystemPrompt(seed);
-    // 构造期建好 assembler(注册三个内置 contributor),实例稳定供 KV 复用(§5.4)。
+    // 分歧检测(§7#3):默认确定性话题命中;selfNotions/assertiveness 取自种子。
+    this.#stanceDetector = deps.stanceDetector ?? new DefaultStanceDetector();
+    this.#selfNotions = seed.selfNotions ?? [];
+    this.#assertiveness = seed.dials.assertiveness;
+    // 构造期建好 assembler(注册四个内置 contributor),实例稳定供 KV 复用(§5.4)。
     this.#assembler = new PromptAssembler([
       new PersonaSkeletonContributor(),
       new MemoryRecallContributor(),
       new ToneContributor(),
+      new DissentContributor(),
     ]);
     this.#persona = new PersonaEngine({
       seed,
@@ -93,7 +108,7 @@ export class Conversation {
    * 委托 assembler 产出 { system, messages }。召回失败走空(§3.2,保留现有降级);
    * 取数在编排层、assembler 不直接碰 MemoryStore(接缝边界,§3.1)。
    */
-  #composeSystem(userText: string, toneFragment: string): AssembledPrompt {
+  #composeSystem(userText: string, toneFragment: string, stance: StanceInput): AssembledPrompt {
     let recalled: readonly MemoryRecord[] = [];
     try {
       recalled = this.#memory.recall(userText);
@@ -106,7 +121,26 @@ export class Conversation {
       toneFragment,
       userText,
       history: this.#memory.snapshot(),
+      stance,
     });
+  }
+
+  /**
+   * 本轮分歧检测(§7#3):跑 StanceDetector 得命中观点 → 映射为 cognition 侧 StanceInput。
+   * 检测抛错兜底空命中(assertiveness 仍带上,基线指令照常据档决定,§3.2 降级)。
+   */
+  async #detectStance(userText: string): Promise<StanceInput> {
+    const assertiveness = this.#assertiveness;
+    try {
+      const res = await this.#stanceDetector.detect({
+        userText,
+        selfNotions: this.#selfNotions,
+        assertiveness,
+      });
+      return { assertiveness, notions: res.notions.map((n) => n.position) };
+    } catch {
+      return { assertiveness, notions: [] };
+    }
   }
 
   /** 回合后写记忆:启用抽取器则写抽取要点(失败跳过);否则 naive 存用户原话(§3.2 降级)。 */
@@ -137,8 +171,11 @@ export class Conversation {
         // 回合前:读当前心情渲染本轮 tone(不改状态;情绪推进留到回合后,保首字零额外延迟)。
         const mood = this.#persona.tone();
         turnSpan.setAttribute('chat_a.emotion', mood.emotion);
-        // 委托 assembler:system(骨架→记忆→tone)+ messages([...history, userMsg],含 volatile 追加)。
-        const { system, messages } = this.#composeSystem(userText, mood.toneFragment);
+        // 分歧检测(§7#3):确定性默认同步极快;LLM 实现会增首字延迟(默认关)。降级见 #detectStance。
+        const stance = await this.#detectStance(userText);
+        turnSpan.setAttribute('chat_a.stance_notions', stance.notions.length);
+        // 委托 assembler:system(骨架→记忆→tone→异议)+ messages([...history, userMsg],含 volatile 追加)。
+        const { system, messages } = this.#composeSystem(userText, mood.toneFragment, stance);
         try {
           const reply = await tracer.startActiveSpan('llm', async (llmSpan) => {
             // GenAI 语义约定:id/model 仅供 trace,业务不据此分支(承 Provider 接缝)。

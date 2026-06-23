@@ -55,7 +55,16 @@ export interface PersonaSnapshot {
   readonly turn: number;
 }
 
-/** 用户自定义人格种子(§6.2):身份/背景文本 + OCEAN + 旋钮。 */
+/**
+ * Agent 自己的一个观点/信念/好恶(§7#3 反对依据):
+ * topic=可匹配的话题线索(关键词),position=她在该话题上的立场文本。
+ */
+export interface SelfNotion {
+  readonly topic: readonly string[];
+  readonly position: string;
+}
+
+/** 用户自定义人格种子(§6.2):身份/背景文本 + OCEAN + 旋钮 + 自我观点。 */
 export interface PersonaSeed {
   readonly name: string;
   /** 身份/背景/说话风格文本 → system 静态骨架。 */
@@ -63,6 +72,8 @@ export interface PersonaSeed {
   readonly ocean: Ocean;
   readonly dials: PersonaDials;
   readonly greetings?: readonly string[];
+  /** 她会坚持的观点(§7#3);缺省为空 = 无具体异议依据。 */
+  readonly selfNotions?: readonly SelfNotion[];
 }
 
 /**
@@ -79,6 +90,7 @@ export interface PersonaCard {
   readonly greetings?: readonly string[];
   readonly lore?: readonly string[];
   readonly userProfile?: readonly string[];
+  readonly selfNotions?: readonly SelfNotion[];
 }
 
 /**
@@ -91,6 +103,30 @@ export interface LoadedPersonaCard {
   readonly lore: readonly string[];
   /** 用户画像 → subject=person(主用户)记忆。 */
   readonly userProfile: readonly string[];
+  /** 她的观点(§7#3)→ subject=agent 记忆;立场文本也供分歧检测。 */
+  readonly selfNotions: readonly SelfNotion[];
+}
+
+/** 分歧检测输入(§7#3):本轮用户输入 + 她的观点 + assertiveness 旋钮。 */
+export interface StanceContext {
+  readonly userText: string;
+  readonly selfNotions: readonly SelfNotion[];
+  /** assertiveness 旋钮 [0,1];低=温和顺从,高=敢顶嘴。 */
+  readonly assertiveness: number;
+}
+
+/** 分歧检测结果(§7#3):本轮话题相关、她有立场的观点(可空)。 */
+export interface StanceResult {
+  readonly notions: readonly SelfNotion[];
+}
+
+/**
+ * 分歧检测接缝(§3.1/§7#3):据用户输入与 self_notions 产出本轮 stance。
+ * 异步以容纳 LLM 实现;确定性实现返回已决议 Promise。只判"话题相关、她有立场",
+ * 不臆测语义同异(冲突交由生成 LLM 判断)。
+ */
+export interface StanceDetector {
+  detect(ctx: StanceContext): Promise<StanceResult>;
 }
 
 /** 离散情绪(P1 小集合,够 tone 区分)。 */

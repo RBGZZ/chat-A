@@ -9,4 +9,5 @@ export * from './seed';
 export * from './engine';
 export * from './card-loader';
 export * from './seed-memories';
+export * from './stance';
 export * from './config-loader';

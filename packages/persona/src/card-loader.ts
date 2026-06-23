@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
-import type { Ocean, PersonaCard, PersonaDials, PersonaSeed, LoadedPersonaCard } from './types';
+import type { Ocean, PersonaCard, PersonaDials, PersonaSeed, LoadedPersonaCard, SelfNotion } from './types';
 import { XIAOXUE_SEED } from './seed';
 
 /**
@@ -39,13 +39,33 @@ function coerceStrList(v: unknown): string[] {
   return v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((s) => s.trim());
 }
 
+/**
+ * 解析 self_notions(§7#3):每条须有非空 position 与至少一个 topic 关键词,否则丢弃该条。
+ * topic 接受字符串(单关键词)或字符串数组;非数组/全非法 → []。
+ */
+function coerceSelfNotions(v: unknown): SelfNotion[] {
+  if (!Array.isArray(v)) return [];
+  const out: SelfNotion[] = [];
+  for (const item of v) {
+    if (typeof item !== 'object' || item === null) continue;
+    const o = item as Record<string, unknown>;
+    const position = typeof o['position'] === 'string' ? o['position'].trim() : '';
+    if (position.length === 0) continue;
+    const rawTopic = o['topic'];
+    const topic = typeof rawTopic === 'string' ? coerceStrList([rawTopic]) : coerceStrList(rawTopic);
+    if (topic.length === 0) continue;
+    out.push({ topic, position });
+  }
+  return out;
+}
+
 function warn(msg: string): void {
   process.stderr.write(`[persona-card] ${msg}\n`);
 }
 
-/** 默认产物:等价 XIAOXUE 种子 + 空 lore/画像。 */
+/** 默认产物:等价 XIAOXUE 种子 + 空 lore/画像/观点。 */
 function defaultLoaded(): LoadedPersonaCard {
-  return { seed: XIAOXUE_SEED, lore: [], userProfile: [] };
+  return { seed: XIAOXUE_SEED, lore: [], userProfile: [], selfNotions: XIAOXUE_SEED.selfNotions ?? [] };
 }
 
 /** 把(可能部分/含错的)PersonaCard 对象映射成种子 + 列表,逐字段回落默认。 */
@@ -69,14 +89,21 @@ function cardToLoaded(card: PersonaCard): LoadedPersonaCard {
     expressiveness: coerce01(card.dials?.expressiveness, base.dials.expressiveness),
   };
   const greetings = coerceStrList(card.greetings);
+  const selfNotions = coerceSelfNotions(card.selfNotions);
   const seed: PersonaSeed = {
     name: coerceStr(card.name, base.name),
     identity: coerceStr(card.identity, base.identity),
     ocean,
     dials,
     ...(greetings.length > 0 ? { greetings } : base.greetings ? { greetings: base.greetings } : {}),
+    ...(selfNotions.length > 0 ? { selfNotions } : base.selfNotions ? { selfNotions: base.selfNotions } : {}),
   };
-  return { seed, lore: coerceStrList(card.lore), userProfile: coerceStrList(card.userProfile) };
+  return {
+    seed,
+    lore: coerceStrList(card.lore),
+    userProfile: coerceStrList(card.userProfile),
+    selfNotions,
+  };
 }
 
 /**

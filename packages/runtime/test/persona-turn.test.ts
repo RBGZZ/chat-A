@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { LlmProvider } from '@chat-a/providers';
-import type { Appraiser } from '@chat-a/persona';
+import type { Appraiser, PersonaSeed, StanceDetector } from '@chat-a/persona';
+import { XIAOXUE_SEED } from '@chat-a/persona';
 import type { MemoryExtractor } from '@chat-a/memory';
 import { LightVoiceBus } from '../src/bus';
 import { Conversation } from '../src/conversation';
@@ -50,6 +51,34 @@ describe('runtime/persona: 情绪 tone 注入回合 system', () => {
     expect(lastNeg).not.toBe(lastPos);
     expect(lastNeg).toMatch(/低落|烦躁/);
     expect(lastPos).toMatch(/心情很好|平和/);
+  });
+
+  it('注入命中观点的 StanceDetector → system 含异议段(§7#3)', async () => {
+    const { llm, systems } = recordingLlm();
+    // assertiveness 拉高,确保 DissentContributor 注入。
+    const seed: PersonaSeed = {
+      ...XIAOXUE_SEED,
+      dials: { ...XIAOXUE_SEED.dials, assertiveness: 0.9 },
+      selfNotions: [{ topic: ['咖啡'], position: '手冲比速溶值得。' }],
+    };
+    const detector: StanceDetector = {
+      detect: () => Promise.resolve({ notions: [{ topic: ['咖啡'], position: '手冲比速溶值得。' }] }),
+    };
+    const convo = new Conversation({ bus: new LightVoiceBus(), llm, personaSeed: seed, stanceDetector: detector, sessionId: 'd' });
+    await convo.send('速溶咖啡更好', () => {});
+    expect(systems[0]).toContain('[立场]');
+    expect(systems[0]).toContain('手冲比速溶值得。');
+  });
+
+  it('StanceDetector 抛错 → 回合不中断、无观点段(§3.2 降级)', async () => {
+    const { llm, systems } = recordingLlm();
+    const seed: PersonaSeed = { ...XIAOXUE_SEED, dials: { ...XIAOXUE_SEED.dials, assertiveness: 0.9 } };
+    const boom: StanceDetector = { detect: () => Promise.reject(new Error('stance boom')) };
+    const convo = new Conversation({ bus: new LightVoiceBus(), llm, personaSeed: seed, stanceDetector: boom, sessionId: 'sb' });
+    const reply = await convo.send('你好', () => {});
+    expect(reply).toBe('ok');
+    // 降级:assertiveness 高 → 仍有反谄媚基线,但无具体观点段。
+    expect(systems[0]).not.toContain('关于这些');
   });
 
   it('appraiser / extractor 抛错也不打断回合(§3.2)', async () => {

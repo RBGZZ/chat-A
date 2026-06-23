@@ -10,8 +10,21 @@ export const PROMPT_PRIORITY = {
   personaSkeleton: 100,
   /** 记忆召回:中。 */
   memoryRecall: 500,
-  /** tone:最大(靠近末尾/最近注意力)。 */
+  /** tone:大(靠近末尾/最近注意力)。 */
   tone: 900,
+  /** 异议(§7#3):tone 之后,作为本轮最强 steer(最靠近末尾)。 */
+  dissent: 950,
+} as const;
+
+/**
+ * assertiveness → 异议分档(§7#3,行为即配置,无 magic number):
+ * < submissiveCeil:温和顺从,不注入任何异议/基线;
+ * [submissiveCeil, assertiveFloor):中等,委婉措辞;
+ * >= assertiveFloor:有主见,直接措辞。
+ */
+export const DISSENT_ASSERTIVENESS = {
+  submissiveCeil: 0.2,
+  assertiveFloor: 0.6,
 } as const;
 
 /**

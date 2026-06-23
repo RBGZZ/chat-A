@@ -4,7 +4,7 @@ import { Conversation, LightVoiceBus } from '@chat-a/runtime';
 import { createLlm, loadLlmConfig } from '@chat-a/providers';
 import { initTelemetry } from '@chat-a/observability';
 import { createMemoryStoreFromEnv, LlmMemoryExtractor } from '@chat-a/memory';
-import { loadPersonaFromEnv, seedPersonaMemories, createKvPersonaStore, LlmAppraiser } from '@chat-a/persona';
+import { loadPersonaFromEnv, seedPersonaMemories, createKvPersonaStore, LlmAppraiser, LlmStanceDetector } from '@chat-a/persona';
 
 /**
  * chat-A 文字版 MVP REPL(瘦客户端的文字形态,承 §9)。
@@ -33,6 +33,9 @@ async function main(): Promise<void> {
   const extractMode = (env['CHAT_A_MEMORY_EXTRACT'] ?? 'off').toLowerCase();
   const appraiser = appraiserMode === 'llm' ? new LlmAppraiser({ provider: llm }) : undefined;
   const memoryExtractor = extractMode === 'llm' ? new LlmMemoryExtractor({ provider: llm }) : undefined;
+  // 分歧检测(§7#3 会反对):默认确定性话题命中;CHAT_A_STANCE=llm 用 LLM 检测器(失败降级)。
+  const stanceMode = (env['CHAT_A_STANCE'] ?? 'default').toLowerCase();
+  const stanceDetector = stanceMode === 'llm' ? new LlmStanceDetector({ provider: llm }) : undefined;
   const convo = new Conversation({
     bus,
     llm,
@@ -41,6 +44,7 @@ async function main(): Promise<void> {
     personaStore,
     ...(appraiser ? { appraiser } : {}),
     ...(memoryExtractor ? { memoryExtractor } : {}),
+    ...(stanceDetector ? { stanceDetector } : {}),
   });
 
   // OTel 追踪骨架(§8.1):默认不开以免刷屏;设 CHAT_A_TRACE=1 打开控制台 span 树。
@@ -50,8 +54,9 @@ async function main(): Promise<void> {
   stdout.write(`chat-A · 文字版 MVP  [provider=${cfg.provider} model=${cfg.model}]\n`);
   stdout.write(`记忆: ${mem.backend}${mem.dbPath ? ` (${mem.dbPath})` : ''}\n`);
   stdout.write(`人格: ${seed.name}  [暖=${seed.dials.baselineWarmth} 外显=${seed.dials.expressiveness} 波动=${seed.dials.emotionalVolatility}]\n`);
-  stdout.write(`来源: ${personaSource}${personaEnvOverride ? ' + env 覆盖' : ''}  lore=${seeded.lore} 画像=${seeded.userProfile}\n`);
+  stdout.write(`来源: ${personaSource}${personaEnvOverride ? ' + env 覆盖' : ''}  lore=${seeded.lore} 画像=${seeded.userProfile} 观点=${seeded.selfNotions}\n`);
   stdout.write(`认知: appraiser=${appraiser ? 'llm' : 'default'}  记忆抽取=${memoryExtractor ? 'llm' : 'off'}\n`);
+  stdout.write(`立场: 分歧检测=${stanceDetector ? 'llm' : 'default'}  敢顶嘴(assertiveness)=${seed.dials.assertiveness}\n`);
   if (traceOn) stdout.write('(OTel trace 已开:每回合在控制台输出 turn→llm span。)\n');
   if (cfg.provider === 'fake') {
     stdout.write('(未检测到 ANTHROPIC_API_KEY → FakeLLM 占位。设 ANTHROPIC_API_KEY 用真 Claude;\n');

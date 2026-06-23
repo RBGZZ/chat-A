@@ -12,6 +12,17 @@ import type { ChatMessage } from '@chat-a/protocol';
 /** 注入档:核心 pinned 永驻、不参与预算裁剪;外围可裁(§5.4)。缺省按外围。 */
 export type PromptTier = 'core' | 'peripheral';
 
+/**
+ * 本轮分歧检测结果(§7#3),由回合编排层据 StanceDetector + assertiveness 产出后填入 ctx。
+ * cognition 自有最小形状,不依赖 persona 的 StanceResult 类型(松耦合)。
+ */
+export interface StanceInput {
+  /** assertiveness 旋钮 [0,1];DissentContributor 据此分档与门控。 */
+  readonly assertiveness: number;
+  /** 本轮命中、她有立场的观点文本(可空)。 */
+  readonly notions: readonly string[];
+}
+
 /** 一个 contributor 本轮产出的注入片段。 */
 export interface PromptFragment {
   /** 注入文本(空字符串视为有内容、照常拼;无内容应由 contributor 返回 null)。 */
@@ -48,6 +59,8 @@ export interface PromptContext {
   readonly userText: string;
   /** 历史滑窗(memory.snapshot());裁剪在 assembler 内对其切片,不改 MemoryStore。 */
   readonly history: readonly ChatMessage[];
+  /** 本轮分歧检测结果(§7#3);由编排层调 StanceDetector 产出,缺省/无异议时省略。 */
+  readonly stance?: StanceInput;
   /** volatile 上下文键值(时间戳/turnId 等),追加到末条用户消息(§5.4);P1 可空。 */
   readonly volatile?: ReadonlyArray<readonly [key: string, value: string]>;
 }

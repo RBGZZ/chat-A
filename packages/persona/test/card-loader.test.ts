@@ -166,9 +166,9 @@ describe('config-loader: 装配优先级 默认 < 卡 < env', () => {
 describe('seed-memories: 种子化主语 + 幂等', () => {
   it('lore→agent、画像→person,重复 seed 不新建(命中去重)', () => {
     const store = new InMemoryMemoryStore({ now: () => 1000 });
-    const loaded = { lore: ['我来自海边小城。'], userProfile: ['用户叫阿明，是程序员。'] };
+    const loaded = { lore: ['我来自海边小城。'], userProfile: ['用户叫阿明，是程序员。'], selfNotions: [] };
     const r1 = seedPersonaMemories(store, loaded, '用户怕冷。');
-    expect(r1).toEqual({ lore: 1, userProfile: 2 }); // 画像 = 卡1 + legacy1
+    expect(r1).toEqual({ lore: 1, userProfile: 2, selfNotions: 0 }); // 画像 = 卡1 + legacy1
 
     const lore = store.recall('海边');
     expect(lore).toHaveLength(1);
@@ -190,7 +190,7 @@ describe('seed-memories: 种子化主语 + 幂等', () => {
 
   it('legacyProfile 空/缺省时不写入', () => {
     const store = new InMemoryMemoryStore();
-    const r = seedPersonaMemories(store, { lore: [], userProfile: ['仅卡画像'] }, '   ');
+    const r = seedPersonaMemories(store, { lore: [], userProfile: ['仅卡画像'], selfNotions: [] }, '   ');
     expect(r.userProfile).toBe(1);
     expect(store.recall('仅卡画像')).toHaveLength(1);
   });

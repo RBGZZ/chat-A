@@ -74,7 +74,12 @@ describe('runtime/Conversation 接入 PromptAssembler 对外等价(§5.4)', () =
       expect(parts[0]).toBe(buildSystemPrompt());
       expect(parts[1]).toContain('[与当前输入相关的记忆]');
       expect(parts[1]).toContain('- 我喜欢猫');
-      expect(parts.at(-1)).toContain('【当前情绪】');
+      // 段序 骨架→记忆→tone→异议(默认 assertiveness=0.5 追加温和反谄媚基线,§7#3)。
+      expect(last).toContain('【当前情绪】');
+      const toneIdx = parts.findIndex((p) => p.includes('【当前情绪】'));
+      const dissentIdx = parts.findIndex((p) => p.includes('[立场]'));
+      expect(toneIdx).toBeGreaterThan(1);
+      expect(dissentIdx).toBeGreaterThan(toneIdx); // 异议在 tone 之后
     }
   });
 });
