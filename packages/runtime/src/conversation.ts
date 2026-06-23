@@ -8,6 +8,7 @@ import {
   PersonaSkeletonContributor,
   MemoryRecallContributor,
   ToneContributor,
+  StyleDisciplineContributor,
   DissentContributor,
   type AssembledPrompt,
   type StanceInput,
@@ -101,6 +102,7 @@ export class Conversation {
       new PersonaSkeletonContributor(),
       new MemoryRecallContributor(),
       new ToneContributor(),
+      new StyleDisciplineContributor(),
       new DissentContributor(),
     ]);
     this.#persona = new PersonaEngine({
