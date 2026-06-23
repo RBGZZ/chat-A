@@ -48,6 +48,10 @@ interface MutableRecord {
   lastAccessedAtMs: number;
   /** 是否核心记忆(承 §5);true 则免于时间衰减。 */
   pinned: boolean;
+  /** 是否标记为未闭合话题(承 §7#2);与是否已闭合(closedAtMs)正交。 */
+  openThread: boolean;
+  /** 闭合时间戳(承 §7#2);undefined=尚未闭合。镜像 SQLite closed_at 语义。 */
+  closedAtMs: number | undefined;
 }
 
 export interface InMemoryMemoryStoreOptions {
@@ -124,6 +128,9 @@ export class InMemoryMemoryStore implements MemoryStore {
       accessCount: 0,
       lastAccessedAtMs: at,
       pinned: rec.pinned === true,
+      // 未闭合话题(承 §7#2):缺省非未了事、未闭合(镜像 SQLite open_thread=0 / closed_at=NULL)。
+      openThread: rec.openThread === true,
+      closedAtMs: undefined,
     });
   }
 
@@ -172,6 +179,8 @@ export class InMemoryMemoryStore implements MemoryStore {
       importance: r.importance,
       accessCount: r.accessCount,
       pinned: r.pinned,
+      // 当前未闭合 = 标记 openThread 且尚未闭合(承 §7#2;与 SQLite open_thread=1 AND closed_at IS NULL 同义)。
+      openThread: r.openThread && r.closedAtMs === undefined,
     }));
     for (const r of top) {
       r.accessCount += 1;
@@ -210,6 +219,46 @@ export class InMemoryMemoryStore implements MemoryStore {
         return { role: m.role, content: m.content };
       });
     return { memories, mergedContext: merged };
+  }
+
+  openThreads(limit: number = this.#cfg.recallLimit): readonly MemoryRecord[] {
+    const now = this.#now();
+    // 候选 = 标记 openThread 且尚未闭合(承 §7#2);排序用与 recall 同一权威强度公式(零漂移)。
+    const candidates: { r: MutableRecord; score: number }[] = [];
+    for (const r of this.#memories.values()) {
+      if (!r.openThread || r.closedAtMs !== undefined) continue;
+      const score = recallScore(r.importance, decayFactor(r.lastSeenAtMs, now, r.pinned, this.#cfg));
+      candidates.push({ r, score });
+    }
+    // 强度降序;同分按近因(last_seen)、再按 id 兜底,与 SQLite 一致。
+    candidates.sort(
+      (a, b) => b.score - a.score || b.r.lastSeenAtMs - a.r.lastSeenAtMs || b.r.id - a.r.id,
+    );
+    // 决策 2:巡检不触发检索即强化(不升 importance/accessCount),免待办虚高强度污染 recall 排序。
+    return candidates.slice(0, limit).map((s) => ({
+      id: s.r.id,
+      text: s.r.text,
+      kind: s.r.kind,
+      createdAtMs: s.r.createdAtMs,
+      lastSeenAtMs: s.r.lastSeenAtMs,
+      hits: s.r.hits,
+      subject: s.r.subject,
+      personId: s.r.personId,
+      importance: s.r.importance,
+      accessCount: s.r.accessCount,
+      pinned: s.r.pinned,
+      openThread: true, // 候选条件已保证。
+    }));
+  }
+
+  closeThread(id: number): void {
+    // 幂等(承 §7#2 决策 3):只闭合尚未闭合者;已闭合 / 未知 id 无副作用、不抛。
+    for (const r of this.#memories.values()) {
+      if (r.id === id && r.closedAtMs === undefined) {
+        r.closedAtMs = this.#now();
+        return;
+      }
+    }
   }
 
   getState(key: string): string | undefined {

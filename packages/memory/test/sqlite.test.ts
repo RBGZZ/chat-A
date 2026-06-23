@@ -178,6 +178,65 @@ describe('SqliteMemoryStore 持久化 / 迁移 / 降级', () => {
     check.close();
   });
 
+  it('v4→v5 迁移:存量记忆补默认未闭合列(open_thread=0/closed_at NULL),零丢失(§7#2/§3.2)', () => {
+    const path = newPath();
+    // 造一个 v4 库:memories 带 v4 全列(subject/person_id + 评分列),无 open_thread/closed_at + schema_version=4。
+    const v4 = new DatabaseSync(path);
+    v4.exec(`CREATE TABLE memory_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+    v4.exec(`CREATE TABLE memories(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, normalized_text TEXT NOT NULL UNIQUE,
+      kind TEXT, created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+      hits INTEGER NOT NULL DEFAULT 1, source_session TEXT, subject TEXT, person_id TEXT,
+      importance REAL, access_count INTEGER, last_accessed INTEGER, pinned INTEGER, emotion_snapshot TEXT);`);
+    v4.exec(`CREATE TABLE kv_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+    v4.exec(`CREATE TABLE people(
+      person_id TEXT PRIMARY KEY, name TEXT NOT NULL, is_primary INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL, added_by TEXT NOT NULL, relationship_state TEXT, voiceprint_ref TEXT);`);
+    v4.prepare(`INSERT INTO people(person_id, name, is_primary, status, added_by) VALUES('primary','主人',1,'primary','user')`).run();
+    v4.prepare(`INSERT INTO memories(text, normalized_text, created_at, last_seen_at, subject, person_id, importance, access_count, last_accessed, pinned)
+                VALUES(?,?,?,?,?,?,?,?,?,?)`).run('v4记忆甲', 'v4记忆甲', 1, 1, 'person', 'primary', 0.5, 0, 1, 0);
+    v4.prepare(`INSERT INTO memories(text, normalized_text, created_at, last_seen_at, subject, person_id, importance, access_count, last_accessed, pinned)
+                VALUES(?,?,?,?,?,?,?,?,?,?)`).run('v4记忆乙', 'v4记忆乙', 2, 2, 'person', 'primary', 0.5, 0, 2, 0);
+    v4.prepare(`INSERT INTO memory_meta(key, value) VALUES('schema_version', '4')`).run();
+    v4.close();
+
+    const store = new SqliteMemoryStore({ path });
+    // 零丢失:两条存量记忆仍可召回。
+    expect(store.recall('v4记忆甲').map((r) => r.text)).toEqual(['v4记忆甲']);
+    // backfill:存量记忆为"非未了事"(openThread=false),不进未闭合查询。
+    expect(store.recall('v4记忆乙')[0]?.openThread).toBe(false);
+    expect(store.openThreads()).toEqual([]);
+    store.close();
+
+    const check = new DatabaseSync(path);
+    // schema 升至 v5(= CURRENT_SCHEMA_VERSION)。
+    const v = check.prepare(`SELECT value FROM memory_meta WHERE key='schema_version'`).get();
+    expect(Number(v?.['value'])).toBe(CURRENT_SCHEMA_VERSION);
+    // 历史行补默认:open_thread=0、closed_at NULL;无 open_thread IS NULL 残留(全部 backfill)。
+    const yi = check.prepare(`SELECT open_thread, closed_at FROM memories WHERE normalized_text='v4记忆乙'`).get();
+    expect(Number(yi?.['open_thread'])).toBe(0);
+    expect(yi?.['closed_at']).toBeNull();
+    const nullCount = check.prepare(`SELECT COUNT(*) AS c FROM memories WHERE open_thread IS NULL`).get();
+    expect(Number(nullCount?.['c'])).toBe(0);
+    check.close();
+  });
+
+  it('未闭合话题持久化:标记 → close → 重开后状态保留(§7#2)', () => {
+    const path = newPath();
+    const a = new SqliteMemoryStore({ path });
+    a.addMemory({ text: '面试待跟进', createdAtMs: 1, openThread: true });
+    a.addMemory({ text: '体检待跟进', createdAtMs: 2, openThread: true });
+    const tijian = a.recall('体检')[0]!;
+    a.closeThread(tijian.id); // 闭合体检
+    a.close();
+
+    const b = new SqliteMemoryStore({ path });
+    // 重开后:面试仍未闭合、体检已闭合(状态持久化)。
+    expect(b.openThreads(10).map((r) => r.text)).toEqual(['面试待跟进']);
+    expect(b.recall('体检')[0]?.openThread).toBe(false);
+    b.close();
+  });
+
   it('全新库初始化即 seed 主用户花名册(承 §5.3b)', () => {
     const path = newPath();
     const store = new SqliteMemoryStore({ path });
