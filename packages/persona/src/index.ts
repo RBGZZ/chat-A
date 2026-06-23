@@ -12,5 +12,6 @@ export * from './engine';
 export * from './card-loader';
 export * from './seed-memories';
 export * from './posture';
+export * from './self-notions';
 export * from './stance';
 export * from './config-loader';

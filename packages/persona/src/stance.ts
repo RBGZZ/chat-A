@@ -1,6 +1,8 @@
 import type { LlmProvider } from '@chat-a/providers';
 import { tolerantJsonParse } from '@chat-a/providers';
 import type { SelfNotion, StanceContext, StanceDetector, StanceResult } from './types';
+import { SELF_NOTION_STRENGTH_FLOOR } from './defaults';
+import { effectiveStrength } from './self-notions';
 
 /**
  * 分歧检测(§7#3 会反对)。确定性默认实现只判"话题相关、她有立场",不臆测语义同异;
@@ -11,6 +13,12 @@ import type { SelfNotion, StanceContext, StanceDetector, StanceResult } from './
 export const STANCE_FLOOR = 0.2;
 /** 单轮最多带出的观点条数(避免 prompt 噪声)。 */
 export const STANCE_MAX_NOTIONS = 2;
+/**
+ * 低强度立场的额外压制门槛(§7#3 强度演化):assertiveness ≥ 此值时,即便立场弱也照常表达。
+ * 低于此值且立场**显式**弱(strength < strengthFloor)→ 压制该条(更趋沉默)。
+ * 缺省强度立场(=基线,高于 strengthFloor)不受此影响 → 现有行为不变。外置,无 magic number。
+ */
+export const STANCE_LOW_STRENGTH_ASSERT = 0.6;
 
 /** 轻量归一(persona 自带,不引 memory 运行时依赖):小写化 + 去首尾空白。中文 includes 直接生效。 */
 function normalize(s: string): string {
@@ -32,19 +40,38 @@ export interface DefaultStanceDetectorOptions {
   readonly floor?: number;
   /** 单轮最多观点数(默认 STANCE_MAX_NOTIONS)。 */
   readonly maxNotions?: number;
+  /**
+   * 立场强度压制门槛(§7#3 演化,默认 SELF_NOTION_STRENGTH_FLOOR)。
+   * **显式**强度低于此值的立场,在 assertiveness < STANCE_LOW_STRENGTH_ASSERT 时被压制(更趋沉默)。
+   * 缺省强度立场按基线处理(高于此门槛)→ 不受影响,现有命中行为不变。
+   */
+  readonly strengthFloor?: number;
+  /** 低强度压制只在 assertiveness 低于此档时生效(默认 STANCE_LOW_STRENGTH_ASSERT)。 */
+  readonly lowStrengthAssert?: number;
 }
 
 /**
  * 确定性分歧检测:对 self_notions 做话题关键词命中。assertiveness < floor → 沉默(空)。
  * 否则返回命中观点(按命中数降序,截断 maxNotions)。同步逻辑,异步签名仅为接缝统一。
+ * 强度演化(§7#3):**显式**弱立场在较低 assertiveness 下被额外压制;缺省强度立场行为不变。
  */
 export class DefaultStanceDetector implements StanceDetector {
   readonly #floor: number;
   readonly #maxNotions: number;
+  readonly #strengthFloor: number;
+  readonly #lowStrengthAssert: number;
 
   constructor(opts: DefaultStanceDetectorOptions = {}) {
     this.#floor = opts.floor ?? STANCE_FLOOR;
     this.#maxNotions = opts.maxNotions ?? STANCE_MAX_NOTIONS;
+    this.#strengthFloor = opts.strengthFloor ?? SELF_NOTION_STRENGTH_FLOOR;
+    this.#lowStrengthAssert = opts.lowStrengthAssert ?? STANCE_LOW_STRENGTH_ASSERT;
+  }
+
+  /** 强度压制:assertiveness 不够高时,过滤掉**显式**弱立场(缺省强度=基线,不被过滤)。 */
+  #passesStrength(notion: SelfNotion, assertiveness: number): boolean {
+    if (assertiveness >= this.#lowStrengthAssert) return true; // 够强势 → 弱立场也照说。
+    return effectiveStrength(notion) >= this.#strengthFloor;
   }
 
   async detect(ctx: StanceContext): Promise<StanceResult> {
@@ -53,6 +80,7 @@ export class DefaultStanceDetector implements StanceDetector {
     const scored = ctx.selfNotions
       .map((notion) => ({ notion, hits: hitCount(userNorm, notion) }))
       .filter((x) => x.hits > 0)
+      .filter((x) => this.#passesStrength(x.notion, ctx.assertiveness))
       .sort((a, b) => b.hits - a.hits)
       .slice(0, this.#maxNotions)
       .map((x) => x.notion);

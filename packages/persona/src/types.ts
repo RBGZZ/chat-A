@@ -100,10 +100,75 @@ export interface OceanEvolver {
 /**
  * Agent 自己的一个观点/信念/好恶(§7#3 反对依据):
  * topic=可匹配的话题线索(关键词),position=她在该话题上的立场文本。
+ *
+ * 强度演化(§7#3 演化,纯加法):
+ * - strength=立场强度 [0,1];缺省=未标注,按基线 SELF_NOTION_BASE_STRENGTH 处理(行为等价当前)。
+ * - affirmCount=被确立/强化的次数;缺省=0。
+ * 旧种子/旧快照无这两字段照常工作(向后兼容,§6.1 迁移纪律)。
  */
 export interface SelfNotion {
   readonly topic: readonly string[];
   readonly position: string;
+  readonly strength?: number;
+  readonly affirmCount?: number;
+}
+
+/** 单条立场的一次强度增量请求(§7#3 演化):topicKey 定位立场,delta 为正向增量(只增不减)。 */
+export interface SelfNotionStrengthDelta {
+  /** 立场定位键(topic 首关键词归一,见 topicKeyOf)。 */
+  readonly topicKey: string;
+  /** 正向强度增量(实际应用前会被钳到 [0, maxStrengthDeltaPerStep])。 */
+  readonly delta: number;
+}
+
+/**
+ * 一次 self_notion 强度演化的版本快照(§6.1 history,可回溯/可回滚)。
+ * before=旧 strength(回滚目标),after=新 strength,delta=实际应用(已钳制)的增量。
+ */
+export interface SelfNotionSnapshot {
+  readonly turn: number;
+  /** ISO 时间戳(可回溯)。 */
+  readonly at: string;
+  /** 哪条立场(topic 首关键词为键)。 */
+  readonly topicKey: string;
+  readonly before: number;
+  readonly after: number;
+  readonly delta: number;
+}
+
+/**
+ * self_notions 持久化状态(§6.1 schema 带版本 + 迁移)。独立于 PersonaSnapshot(OCEAN/PAD)。
+ * history 为向后兼容的加法:旧状态无此字段,读回视作空。
+ */
+export interface SelfNotionsState {
+  /** schema 版本(当前 SELF_NOTIONS_SCHEMA_VERSION)。 */
+  readonly version: number;
+  /** 演化后的立场集(含强度)。 */
+  readonly notions: readonly SelfNotion[];
+  /** 强度演化版本快照序列(可选;缺省=尚无演化)。 */
+  readonly history?: readonly SelfNotionSnapshot[];
+}
+
+/** self_notion 强度演化的输入(§7#3):本轮用户输入 + 当前立场 + 触发轮次。 */
+export interface SelfNotionEvolveContext {
+  readonly userText: string;
+  readonly notions: readonly SelfNotion[];
+  readonly turn: number;
+}
+
+/**
+ * self_notion 强度演化接缝(§3.1/§7#3):据本轮对话判定"确立/强化"了哪些立场。
+ * 异步以容纳 LLM 实现;返回 null/空 = 本次不演化(信号不足/失败降级)。
+ * **无确定性默认实现**:确定性猜"立场被确立"不可信,默认行为是"不注入即不演化"。
+ */
+export interface SelfNotionEvolver {
+  evolve(ctx: SelfNotionEvolveContext): Promise<readonly SelfNotionStrengthDelta[] | null>;
+}
+
+/** self_notions 状态持久化接缝(独立于 PersonaStore)。 */
+export interface SelfNotionStore {
+  load(): SelfNotionsState | null;
+  save(state: SelfNotionsState): void;
 }
 
 /** 用户自定义人格种子(§6.2):身份/背景文本 + OCEAN + 旋钮 + 自我观点。 */
