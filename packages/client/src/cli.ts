@@ -2,7 +2,7 @@ import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import { stdin, stdout, env, argv } from 'node:process';
 import { Conversation, LightVoiceBus, ToolCallingStrategy } from '@chat-a/runtime';
-import { buildDefaultRegistry } from '@chat-a/interaction';
+import { buildDefaultRegistry, createMemoryFactLookup } from '@chat-a/interaction';
 import { createLlm, loadLlmConfig, createEmbedder, loadEmbedderConfig } from '@chat-a/providers';
 import { initTelemetry, createDecisionTraceSinkFromEnv } from '@chat-a/observability';
 import { createMemoryStoreFromEnv, LlmMemoryExtractor, LlmReflector, NoopReflector } from '@chat-a/memory';
@@ -50,7 +50,13 @@ async function main(): Promise<void> {
   const selfNotionEvolver = notionEvolveMode === 'llm' ? new LlmSelfNotionEvolver({ provider: llm }) : undefined;
   // 回合策略(§3.3/§12.2 Agent loop,默认单趟):CHAT_A_STRATEGY=tools 启用本地动作工具循环
   // (Provider 不支持工具/空注册表时自动降级回单趟)。
-  const actionRegistry = buildDefaultRegistry();
+  // recall_fact 接真 memory 检索(§12.2 事实查询接缝):把 mem.store 适配成同步 FactLookup
+  // 注入 buildDefaultRegistry——命中走真 recall,空/出错优雅降级为"想不起"(§3.2,不崩不哑)。
+  // topN 行为即配置:CHAT_A_RECALL_FACT_TOP_N 覆盖(非法/缺省回落适配器默认),不写 magic number。
+  const recallTopNRaw = Number.parseInt(env['CHAT_A_RECALL_FACT_TOP_N'] ?? '', 10);
+  const recallTopN = Number.isInteger(recallTopNRaw) && recallTopNRaw > 0 ? recallTopNRaw : undefined;
+  const factLookup = createMemoryFactLookup(mem.store, recallTopN !== undefined ? { topN: recallTopN } : {});
+  const actionRegistry = buildDefaultRegistry({ factLookup });
   const useTools = (env['CHAT_A_STRATEGY'] ?? 'single').toLowerCase() === 'tools';
   const strategy = useTools ? new ToolCallingStrategy({ registry: actionRegistry }) : undefined;
   // 会话沉淀(§5/§6.1 Reflection,默认关):CHAT_A_REFLECTION=llm 用 LLM 在会话结束蒸馏高层记忆+第一人称自传。
