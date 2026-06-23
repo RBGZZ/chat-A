@@ -221,6 +221,75 @@ describe('SqliteMemoryStore 持久化 / 迁移 / 降级', () => {
     check.close();
   });
 
+  it('v6→v7 迁移:存量记忆按信号归类(pinned→core / 其余→semantic),零丢失、幂等(§5.9 缺口④/§3.2)', () => {
+    const path = newPath();
+    // 造一个 v6 库:memories 带 v6 全列(含 open_thread/closed_at,无 memory_kind)+ people + 联想网表 + schema_version=6。
+    const v6 = new DatabaseSync(path);
+    v6.exec(`CREATE TABLE memory_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+    v6.exec(`CREATE TABLE memories(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, normalized_text TEXT NOT NULL UNIQUE,
+      kind TEXT, created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+      hits INTEGER NOT NULL DEFAULT 1, source_session TEXT, subject TEXT, person_id TEXT,
+      importance REAL, access_count INTEGER, last_accessed INTEGER, pinned INTEGER, emotion_snapshot TEXT,
+      open_thread INTEGER, closed_at INTEGER);`);
+    v6.exec(`CREATE TABLE kv_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+    v6.exec(`CREATE TABLE people(
+      person_id TEXT PRIMARY KEY, name TEXT NOT NULL, is_primary INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL, added_by TEXT NOT NULL, relationship_state TEXT, voiceprint_ref TEXT);`);
+    v6.exec(`CREATE TABLE memory_entities(memory_id INTEGER NOT NULL, entity_key TEXT NOT NULL, PRIMARY KEY(memory_id, entity_key));`);
+    v6.exec(`CREATE TABLE memory_edges(a INTEGER NOT NULL, b INTEGER NOT NULL, weight INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(a, b));`);
+    v6.prepare(`INSERT INTO people(person_id, name, is_primary, status, added_by) VALUES('primary','主人',1,'primary','user')`).run();
+    // 普通(非 pinned)旧记忆 → 应归 semantic;pinned 旧记忆 → 应归 core。
+    v6.prepare(`INSERT INTO memories(text, normalized_text, created_at, last_seen_at, subject, person_id, importance, access_count, last_accessed, pinned, open_thread)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run('普通旧记忆', '普通旧记忆', 1, 1, 'person', 'primary', 0.5, 0, 1, 0, 0);
+    v6.prepare(`INSERT INTO memories(text, normalized_text, created_at, last_seen_at, subject, person_id, importance, access_count, last_accessed, pinned, open_thread)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run('核心旧记忆', '核心旧记忆', 2, 2, 'person', 'primary', 0.5, 0, 2, 1, 0);
+    v6.prepare(`INSERT INTO memory_meta(key, value) VALUES('schema_version', '6')`).run();
+    v6.close();
+
+    const store = new SqliteMemoryStore({ path });
+    // 零丢失:两条存量记忆仍可召回。
+    expect(store.recall('普通旧记忆').map((r) => r.text)).toEqual(['普通旧记忆']);
+    // backfill 归类:非 pinned → semantic;pinned → core。
+    expect(store.recall('普通旧记忆')[0]?.memoryKind).toBe('semantic');
+    const core = store.recall('核心旧记忆')[0];
+    expect(core?.memoryKind).toBe('core');
+    expect(core?.pinned).toBe(true);
+    store.close();
+
+    const check = new DatabaseSync(path);
+    // schema 升至 v7(= CURRENT_SCHEMA_VERSION)。
+    const v = check.prepare(`SELECT value FROM memory_meta WHERE key='schema_version'`).get();
+    expect(Number(v?.['value'])).toBe(CURRENT_SCHEMA_VERSION);
+    // 无 memory_kind IS NULL 残留(全部 backfill)。
+    const nullCount = check.prepare(`SELECT COUNT(*) AS c FROM memories WHERE memory_kind IS NULL`).get();
+    expect(Number(nullCount?.['c'])).toBe(0);
+    // 落库归类正确。
+    const pu = check.prepare(`SELECT memory_kind FROM memories WHERE normalized_text='普通旧记忆'`).get();
+    expect(pu?.['memory_kind']).toBe('semantic');
+    const he = check.prepare(`SELECT memory_kind FROM memories WHERE normalized_text='核心旧记忆'`).get();
+    expect(he?.['memory_kind']).toBe('core');
+    check.close();
+
+    // 幂等:同库再开一次(已是 v7)不重复迁移、不改归类、不报错。
+    const reopen = new SqliteMemoryStore({ path });
+    expect(reopen.recall('核心旧记忆')[0]?.memoryKind).toBe('core');
+    expect(reopen.recall('普通旧记忆')[0]?.memoryKind).toBe('semantic');
+    reopen.close();
+  });
+
+  it('memoryKind 跨重启持久化:写入 → close → 重开仍保留分层(§5.9 缺口④)', () => {
+    const path = newPath();
+    const a = new SqliteMemoryStore({ path });
+    a.addMemory({ text: '用户对花生过敏', createdAtMs: 1, memoryKind: 'core' });
+    a.addMemory({ text: '用户喜欢咖啡', createdAtMs: 2, memoryKind: 'semantic' });
+    a.close();
+    const b = new SqliteMemoryStore({ path });
+    expect(b.recall('花生')[0]?.memoryKind).toBe('core');
+    expect(b.recall('咖啡')[0]?.memoryKind).toBe('semantic');
+    b.close();
+  });
+
   it('未闭合话题持久化:标记 → close → 重开后状态保留(§7#2)', () => {
     const path = newPath();
     const a = new SqliteMemoryStore({ path });

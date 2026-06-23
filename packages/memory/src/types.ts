@@ -32,6 +32,18 @@ export interface StoredMessage {
 export type MemorySubject = 'person' | 'agent' | 'shared';
 
 /**
+ * 记忆的情景/语义分层(承 §5.1 / §5.9 缺口④):区分人类记忆的两种本质:
+ * - **episodic**(情景记忆,叙事):"哪天发生了什么 / 某次对话事件",带时间叙事性。
+ * - **semantic**(语义记忆,蒸馏事实):从经历里蒸馏出的稳定事实/偏好(如"用户喜欢咖啡")。
+ * - **core**(核心档,承 §5.4):用户名字/过敏、Agent 根本设定等——**永不衰减、永远优先注入**;
+ *   与既有 `pinned`(免衰减)对齐:写入 `core` 即视作 pinned(免衰),`pinned` 概念被 `core` 涵盖复用。
+ *
+ * 区别于自由字符串 `kind`(任意来源标签,如 'extracted'):本字段是**受约束的认知分层**,
+ * 用于召回分路/配额与衰减豁免(§5.9 缺口④)。
+ */
+export type MemoryKind = 'episodic' | 'semantic' | 'core';
+
+/**
  * 人物花名册条目(承 §5.3b):以人为中心建模,始终有一个主用户,
  * 结构支持未来"认识多人 / 用户组 / Agent 自主纳入成员"——P1 只 seed 主用户,
  * 其余字段就位但多为默认/空,免未来长期记忆迁移(§3.2)。
@@ -56,6 +68,12 @@ export interface MemoryInput {
   readonly text: string;
   /** 记忆种类(自由字符串,P1 不强约束)。 */
   readonly kind?: string;
+  /**
+   * 情景/语义分层(承 §5.1 / §5.9 缺口④);省略默认 episodic(原始记忆多为叙事,语义蒸馏属离线巩固)。
+   * 来源:抽取/沉淀层或调用方传入;**不在热路径调 LLM 判类**(承 §5.8)。
+   * 写入 `core` 即视作 pinned(免衰减),与既有 `pinned` 概念对齐复用。
+   */
+  readonly memoryKind?: MemoryKind;
   readonly sourceSession?: string;
   /** 省略则由实现取"现在"(注入时钟便于确定性测试,§3.2)。 */
   readonly createdAtMs?: number;
@@ -91,6 +109,12 @@ export interface MemoryRecord {
   readonly id: number;
   readonly text: string;
   readonly kind: string | undefined;
+  /**
+   * 情景/语义分层(承 §5.1 / §5.9 缺口④):episodic(叙事)/ semantic(蒸馏事实)/ core(核心档)。
+   * **纯加法可选**:两实现 recall / openThreads 返回时恒填充;声明可选只为让现有消费者
+   * (构造 MemoryRecord 字面量者)无需级联改动(向后兼容)。运行期返回必有值。
+   */
+  readonly memoryKind?: MemoryKind;
   readonly createdAtMs: number;
   readonly lastSeenAtMs: number;
   readonly hits: number;
@@ -138,6 +162,18 @@ export interface RecallWithContext {
   readonly mergedContext: readonly ChatMessage[];
 }
 
+/**
+ * 召回时按 kind 分路的可选入参(承 §5.9 缺口④;纯加法,省略 = 不限制、全 kind 混合召回)。
+ * 两实现共用同一语义(零漂移)。
+ */
+export interface RecallKindOptions {
+  /**
+   * 只召回这些分层(如 `['semantic','core']` 只要稳定事实/核心)。省略 = 不过滤(全 kind)。
+   * 空数组等同省略(不过滤),避免"传空 = 全丢"的脆弱语义。
+   */
+  readonly kinds?: readonly MemoryKind[];
+}
+
 /** `recallWithContext` 的可选入参(纯加法;省略全用配置默认,签名向后兼容)。 */
 export interface RecallContextOptions {
   /** 召回返回上限;省略用配置 `recallLimit`(同 `recall`)。 */
@@ -146,6 +182,8 @@ export interface RecallContextOptions {
   readonly pad?: Pad;
   /** 前后各取条数 N;省略用配置 `contextWindowSize`。 */
   readonly windowSize?: number;
+  /** 按 kind 分路(承 §5.9 缺口④);省略 = 全 kind 混合召回。 */
+  readonly kindOptions?: RecallKindOptions;
 }
 
 /**
@@ -169,8 +207,15 @@ export interface MemoryStore {
    * 关键词召回(P1 关键词级;语义/向量属 P2)。
    * 排序用混合归一得分(关键词归一 + 记忆强度 + 可选情感共振,§5.5)。
    * `pad` 为**可选**:传入则启用情感共振重排,缺省不启用(签名向后兼容,默认行为不变)。
+   * `kindOptions` 为**可选**(承 §5.9 缺口④):传入则按情景/语义分层过滤候选,缺省不过滤
+   * (全 kind 混合召回,默认行为不变)。kind 间的**权重调制**始终生效(配置 `memoryKindWeights`)。
    */
-  recall(query: string, limit?: number, pad?: Pad): readonly MemoryRecord[];
+  recall(
+    query: string,
+    limit?: number,
+    pad?: Pad,
+    kindOptions?: RecallKindOptions,
+  ): readonly MemoryRecord[];
   /**
    * 带上下文窗口的召回(承 §5.5「上下文窗口拼接」):在 `recall` 命中基础上,
    * 把每条命中按**时间戳就近**锚回 `messages` 时序,取前后各 N 条相邻消息拼成连贯片段,

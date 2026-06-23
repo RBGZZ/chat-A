@@ -563,6 +563,105 @@ export function runMemoryStoreContract(name: string, make: MakeStore): void {
       s.close();
     });
 
+    // —— 情景/语义显式分层(承 §5.1 / §5.9 缺口④;episodic / semantic / core;golden 两实现一致)——
+
+    it('写入缺省分层为 episodic(原始记忆多为叙事,§5.9 缺口④)', () => {
+      const s = make();
+      s.addMemory({ text: '今天去公园散步' }); // 不指定 memoryKind
+      expect(s.recall('公园')[0]?.memoryKind).toBe('episodic');
+      s.close();
+    });
+
+    it('写入带 memoryKind 正确落库并随召回返回(§5.9 缺口④)', () => {
+      const s = make();
+      s.addMemory({ text: '用户喜欢喝咖啡', memoryKind: 'semantic' });
+      s.addMemory({ text: '某天聊到了猫', memoryKind: 'episodic' });
+      s.addMemory({ text: '用户对花生过敏', memoryKind: 'core' });
+      expect(s.recall('咖啡')[0]?.memoryKind).toBe('semantic');
+      expect(s.recall('猫')[0]?.memoryKind).toBe('episodic');
+      expect(s.recall('花生')[0]?.memoryKind).toBe('core');
+      s.close();
+    });
+
+    it('core 分层即视作 pinned:永不衰减(承 §5.4 / §5.9 缺口④)', () => {
+      let nowMs = 0;
+      const s = make({ now: () => nowMs });
+      nowMs = 1;
+      // core 旧记忆:即使极旧也不衰减(decay=1),且 pinned 被涵盖为 true。
+      s.addMemory({ text: '过敏原 花生', createdAtMs: 1, memoryKind: 'core' });
+      nowMs = 100 * DAY;
+      const rec = s.recall('过敏原')[0];
+      expect(rec?.memoryKind).toBe('core');
+      // core ⟹ pinned(免衰减,承 §5.4)。
+      expect(rec?.pinned).toBe(true);
+      s.close();
+    });
+
+    it('core 优先注入:同信号下 core 因 kind 权重排在 episodic 前(§5.9 缺口④)', () => {
+      let nowMs = 5 * DAY;
+      const s = make({ now: () => nowMs });
+      // 同一时刻、同 importance、同关键词命中 → 信号融合分相同;靠 kind 权重区分(core>episodic)。
+      s.addMemory({ text: '叙事 事项甲', createdAtMs: 5 * DAY, memoryKind: 'episodic' });
+      s.addMemory({ text: '核心 事项乙', createdAtMs: 5 * DAY, memoryKind: 'core' });
+      const r = s.recall('事项', 2).map((x) => x.text);
+      // core 权重更高 → 排前(优先注入语义,承 §5.4)。
+      expect(r[0]).toBe('核心 事项乙');
+      s.close();
+    });
+
+    it('按 kind 分路:只要语义事实(过滤 episodic)(§5.9 缺口④)', () => {
+      const s = make();
+      s.addMemory({ text: '稳定偏好 咖啡', memoryKind: 'semantic' });
+      s.addMemory({ text: '某次喝了 咖啡', memoryKind: 'episodic' });
+      // 只召回 semantic:叙事事件被排除。
+      const onlySemantic = s.recall('咖啡', 10, undefined, { kinds: ['semantic'] }).map((x) => x.text);
+      expect(onlySemantic).toEqual(['稳定偏好 咖啡']);
+      // 不传 kindOptions:全 kind 混合召回(两条都在)。
+      const all = s.recall('咖啡', 10).map((x) => x.text).sort();
+      expect(all).toEqual(['某次喝了 咖啡', '稳定偏好 咖啡']);
+      s.close();
+    });
+
+    it('按 kind 分路:情景优先可由 kinds 过滤实现(§5.9 缺口④)', () => {
+      const s = make();
+      s.addMemory({ text: '叙事 雪天 事件', memoryKind: 'episodic' });
+      s.addMemory({ text: '事实 雪天 偏好', memoryKind: 'semantic' });
+      const onlyEpisodic = s.recall('雪天', 10, undefined, { kinds: ['episodic'] }).map((x) => x.text);
+      expect(onlyEpisodic).toEqual(['叙事 雪天 事件']);
+      s.close();
+    });
+
+    it('空 kinds 数组等同不过滤(全 kind),不脆弱地全丢(§5.9 缺口④)', () => {
+      const s = make();
+      s.addMemory({ text: '语义 苹果', memoryKind: 'semantic' });
+      s.addMemory({ text: '情景 苹果', memoryKind: 'episodic' });
+      const r = s.recall('苹果', 10, undefined, { kinds: [] }).map((x) => x.text).sort();
+      expect(r).toEqual(['情景 苹果', '语义 苹果']);
+      s.close();
+    });
+
+    it('kind 分路过滤也作用于联想带入的旁支(分路一致,§5.9 缺口④)', () => {
+      const s = make();
+      // 两条共享 token "项目" 会建联想边;一条 episodic 一条 semantic。
+      s.addMemory({ text: '项目 启动会', memoryKind: 'episodic' });
+      s.addMemory({ text: '项目 长期目标', memoryKind: 'semantic' });
+      // 查"启动会"直接命中 episodic;联想会带入 semantic 旁支,但 kinds=['episodic'] 应把它过滤掉。
+      const r = s.recall('启动会', 10, undefined, { kinds: ['episodic'] }).map((x) => x.text);
+      expect(r).toContain('项目 启动会');
+      expect(r).not.toContain('项目 长期目标');
+      s.close();
+    });
+
+    it('kind 权重调制不破坏候选池规则:低 importance 命中仍入池(§5.9 缺口④/§5.5)', () => {
+      const s = make();
+      // episodic + 极低 importance:kind 权重>0 → 乘性调制后仍非零 → 不被门控丢弃。
+      s.addMemory({ text: '冷门 小事', memoryKind: 'episodic', importance: 0.01 });
+      const r = s.recall('冷门');
+      expect(r.length).toBe(1);
+      expect(r[0]?.memoryKind).toBe('episodic');
+      s.close();
+    });
+
     it('maxHops=0 关闭联想扩散:退化为纯一阶召回(向后兼容,§5.9 缺口①)', () => {
       const s = make();
       // 配置关闭扩散:共享 person 的旁支记忆不应被带入。
