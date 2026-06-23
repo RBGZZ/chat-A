@@ -77,12 +77,17 @@ export class PersonaEngine {
     return this.#snapshot;
   }
 
-  /** 读当前心情渲染的情绪 + tone(纯,不改状态;回合前用)。 */
-  tone(): ToneView {
+  /**
+   * 读当前心情渲染的情绪 + tone(纯,不改状态;回合前用)。
+   * `closeness`(§2.4 关系亲密度,可选)由编排层读取后透传;省略时 tone 行为不变(向后兼容)。
+   * exactOptional 安全:用条件展开仅在提供时附带 closeness 实参,绝不显式传 undefined。
+   */
+  tone(closeness?: number): ToneView {
     const dials = this.#seed.dials;
+    const closeArgs: [number] | [] = closeness !== undefined ? [closeness] : [];
     return {
       emotion: padToEmotion(this.#snapshot.pad),
-      toneFragment: renderToneFragment(this.#snapshot.pad, dials),
+      toneFragment: renderToneFragment(this.#snapshot.pad, dials, ...closeArgs),
       pad: this.#snapshot.pad,
       posture: resolveNegativePosture(this.#snapshot.pad, dials),
     };
