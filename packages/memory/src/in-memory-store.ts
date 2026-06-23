@@ -15,9 +15,10 @@ import {
   anchorIndex,
   decayFactor,
   emotionResonance,
-  keywordScore,
+  entityKeys,
+  hopDecay,
   makePrimaryPerson,
-  mixedRecallScore,
+  normalizeAndFuse,
   recallScore,
   reinforceImportance,
   resolveAttribution,
@@ -25,7 +26,7 @@ import {
   tokenize,
   windowRange,
   type MemoryConfig,
-  type RecallSignal,
+  type RawRecallSignals,
 } from './config';
 
 interface MutableRecord {
@@ -70,6 +71,12 @@ export class InMemoryMemoryStore implements MemoryStore {
   readonly #state = new Map<string, string>();
   /** 人物花名册(镜像 SQLite people 表语义,承 §5.3b)。 */
   readonly #people = new Map<string, Person>();
+  /** 实体键 → 拥有该键的记忆 id 集合(镜像 SQLite memory_entities,承 §5.9 缺口①)。 */
+  readonly #entityIndex = new Map<string, Set<number>>();
+  /** 无向邻接边:`min:max` → 权重(镜像 SQLite memory_edges,承 §5.9 缺口①)。 */
+  readonly #edgeWeight = new Map<string, number>();
+  /** 记忆 id → 邻居 id 集合(扩散遍历用;镜像 SQLite 双向索引)。 */
+  readonly #adjacency = new Map<number, Set<number>>();
   readonly #cfg: MemoryConfig;
   readonly #now: () => number;
   #seq = 0;
@@ -113,8 +120,9 @@ export class InMemoryMemoryStore implements MemoryStore {
     }
     // 归属规则与 SQLite 共用单一权威 helper(承 §5.3 / §5.3b),避免两后端漂移。
     const { subject, personId } = resolveAttribution(rec, this.#cfg);
+    const id = ++this.#seq;
     this.#memories.set(normalized, {
-      id: ++this.#seq,
+      id,
       text: rec.text,
       normalized,
       kind: rec.kind,
@@ -132,6 +140,71 @@ export class InMemoryMemoryStore implements MemoryStore {
       openThread: rec.openThread === true,
       closedAtMs: undefined,
     });
+    // 联想扩散地基(承 §5.9 缺口①):建实体索引 + 与共享实体的旧记忆增建无向邻接边。
+    this.#linkEntitiesAndEdges(id, rec.text, personId);
+  }
+
+  /**
+   * 建实体索引 + 邻接边(承 §5.9 缺口①):与 SQLite linkEntitiesAndEdges 同一权威规则(零漂移)。
+   * 共享实体(非主用户的 person_id + 规范化 token)的记忆对之间,边权按共享键数累加。
+   */
+  #linkEntitiesAndEdges(memoryId: number, text: string, personId: string | undefined): void {
+    const keys = entityKeys(text, personId, this.#cfg.normalize, this.#cfg.primaryPersonId);
+    for (const key of keys) {
+      let owners = this.#entityIndex.get(key);
+      if (owners === undefined) {
+        owners = new Set<number>();
+        this.#entityIndex.set(key, owners);
+      }
+      // 对已挂该键的旧记忆逐一增建/增强无向边(自反跳过)。
+      for (const other of owners) {
+        if (other === memoryId) continue;
+        const a = Math.min(memoryId, other);
+        const b = Math.max(memoryId, other);
+        const edgeKey = `${a}:${b}`;
+        this.#edgeWeight.set(edgeKey, (this.#edgeWeight.get(edgeKey) ?? 0) + 1);
+        this.#addAdjacency(a, b);
+        this.#addAdjacency(b, a);
+      }
+      owners.add(memoryId);
+    }
+  }
+
+  #addAdjacency(from: number, to: number): void {
+    let set = this.#adjacency.get(from);
+    if (set === undefined) {
+      set = new Set<number>();
+      this.#adjacency.set(from, set);
+    }
+    set.add(to);
+  }
+
+  /**
+   * 沿邻接图扩散(承 §5.9 缺口①):从一阶命中 id 出发 1..maxHops 跳 BFS,
+   * 返回每个被联想到的额外记忆 id → 其最小跳数(BFS 先到即最小)。一阶种子(hop=0)不计入。
+   * 与 SQLite #spread 同一权威遍历语义(两实现零漂移)。
+   */
+  #spread(seedIds: readonly number[], maxHops: number): Map<number, number> {
+    const hopOf = new Map<number, number>();
+    if (maxHops <= 0 || seedIds.length === 0) return hopOf;
+    const seed = new Set(seedIds);
+    let frontier: number[] = [...seedIds];
+    for (let hop = 1; hop <= maxHops; hop++) {
+      const next: number[] = [];
+      for (const id of frontier) {
+        const neighbors = this.#adjacency.get(id);
+        if (neighbors === undefined) continue;
+        for (const other of neighbors) {
+          if (seed.has(other)) continue;
+          if (hopOf.has(other)) continue;
+          hopOf.set(other, hop);
+          next.push(other);
+        }
+      }
+      frontier = next;
+      if (frontier.length === 0) break;
+    }
+    return hopOf;
   }
 
   recall(
@@ -142,28 +215,66 @@ export class InMemoryMemoryStore implements MemoryStore {
     const tokens = tokenize(query, this.#cfg.normalize);
     if (tokens.length === 0) return [];
     const now = this.#now();
-    // 候选过滤:逐 token 命中(includes);命中去重 token 数作关键词原始分 raw(与 SQLite 同规则,零漂移)。
     // 不按主语过滤:一次跨 person+agent+shared 召回(§5.3 末条),与 SQLite 行为一致。
-    const scored: { r: MutableRecord; score: number }[] = [];
-    for (const r of this.#memories.values()) {
-      const raw = tokens.reduce((n, t) => (r.normalized.includes(t) ? n + 1 : n), 0);
-      if (raw === 0) continue; // 关键词无命中 → 不进候选池。
-      // 混合归一得分(承 §5.5):关键词归一 + 记忆强度(importance×decay)+ 可选情感共振;
-      // 全部经 config.ts 单一权威公式,自适应分母 + 零信号门控,与 SQLite 零漂移。
-      // 衰减/强度用强化前的值算,保证本次返回排序确定(强化只影响后续召回)。
-      const signals: RecallSignal[] = [
-        { present: true, value: keywordScore(raw, tokens.length, this.#cfg) },
-        {
-          present: true,
-          value: recallScore(r.importance, decayFactor(r.lastSeenAtMs, now, r.pinned, this.#cfg)),
+    // 候选过滤:逐 token 命中(includes);命中去重 token 数作关键词原始命中数 raw(与 SQLite 同规则,零漂移)。
+    // 按 id 索引记忆,便于联想扩散按 id 取回(与 SQLite 一致)。
+    const byId = new Map<number, MutableRecord>();
+    for (const r of this.#memories.values()) byId.set(r.id, r);
+
+    // —— 一阶候选(关键词命中)+ 原始信号(承 §5.5 / §5.9 缺口③)——
+    const candById = new Map<number, { r: MutableRecord; raw: RawRecallSignals }>();
+    for (const r of byId.values()) {
+      const rawHits = tokens.reduce((n, t) => (r.normalized.includes(t) ? n + 1 : n), 0);
+      if (rawHits === 0) continue; // 关键词无命中 → 不进一阶候选池。
+      candById.set(r.id, {
+        r,
+        raw: {
+          keyword: { present: true, value: rawHits },
+          strength: {
+            present: true,
+            value: recallScore(r.importance, decayFactor(r.lastSeenAtMs, now, r.pinned, this.#cfg)),
+          },
+          emotion:
+            pad !== undefined
+              ? { present: true, value: emotionResonance(pad) }
+              : { present: false, value: 0 },
+          // 一阶命中不带联想分(它们是种子,不是被联想到的,§5.9 缺口①)。
+          association: { present: false, value: 0 },
         },
-      ];
-      // 情感共振仅当调用方传入 PAD 时在场(默认不启用,§5.5);记忆侧 emotion 本期缺省按中性。
-      if (pad !== undefined) signals.push({ present: true, value: emotionResonance(pad) });
-      const score = mixedRecallScore(signals);
-      if (score <= 0) continue; // 零信号门控:全部在场信号为 0 才丢(只对零信号生效,§5.5)。
-      scored.push({ r, score });
+      });
     }
+
+    // —— 联想扩散(承 §5.9 缺口①):从一阶命中沿邻接图 1..maxHops 跳带入额外候选 ——
+    const hopOf = this.#spread([...candById.keys()], this.#cfg.associationMaxHops);
+    for (const [id, hop] of hopOf) {
+      if (candById.has(id)) continue; // 已是一阶命中,不重复。
+      const r = byId.get(id);
+      if (r === undefined) continue;
+      const rawHits = tokens.reduce((n, t) => (r.normalized.includes(t) ? n + 1 : n), 0);
+      candById.set(id, {
+        r,
+        raw: {
+          keyword: rawHits > 0 ? { present: true, value: rawHits } : { present: false, value: 0 },
+          strength: {
+            present: true,
+            value: recallScore(r.importance, decayFactor(r.lastSeenAtMs, now, r.pinned, this.#cfg)),
+          },
+          emotion:
+            pad !== undefined
+              ? { present: true, value: emotionResonance(pad) }
+              : { present: false, value: 0 },
+          // 联想分按跳数衰减(hop=1→decay、hop=2→decay²;承 §5.9 缺口①)。
+          association: { present: true, value: hopDecay(hop, this.#cfg.associationHopDecay) },
+        },
+      });
+    }
+
+    // —— 缺口③:候选集尺度 min-max 归一 + 可配权重融合(单一权威公式,与 SQLite 零漂移)——
+    const cands = [...candById.values()];
+    const fused = normalizeAndFuse(cands.map((c) => c.raw), this.#cfg.recallSignalWeights);
+    const scored = cands
+      .map((c, i) => ({ r: c.r, score: fused[i]! }))
+      .filter((s) => s.score > 0); // 零信号门控只丢全零(任一路在场即进池,不学 mem0 硬丢,§5.5)。
     scored.sort((a, b) => b.score - a.score || b.r.hits - a.r.hits || b.r.id - a.r.id);
     const top = scored.slice(0, limit).map((s) => s.r);
     // 检索即强化:只对实际返回的 top-N 升 access_count/importance、更新 last_accessed(被想起→记得牢,§5.5)。

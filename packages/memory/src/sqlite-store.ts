@@ -16,9 +16,10 @@ import {
   anchorIndex,
   decayFactor,
   emotionResonance,
-  keywordScore,
+  entityKeys,
+  hopDecay,
   makePrimaryPerson,
-  mixedRecallScore,
+  normalizeAndFuse,
   recallScore,
   reinforceImportance,
   resolveAttribution,
@@ -26,11 +27,11 @@ import {
   tokenize,
   windowRange,
   type MemoryConfig,
-  type RecallSignal,
+  type RawRecallSignals,
 } from './config';
 
 /** 当前代码支持的记忆库 schema 版本。每次破坏性/累加性变更 +1 并新增一条迁移。 */
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 /**
  * 迁移步骤上下文:主用户花名册条目 + 记忆重要性初值经此注入(承 §3.2 行为即配置),
@@ -126,7 +127,99 @@ const MIGRATIONS: Record<number, (db: DatabaseSync, ctx: MigrationContext) => vo
     // backfill 历史行:旧记忆视作"非未了事";closed_at 容 NULL 即"未闭合",无需显式写。零数据丢失(§3.2)。
     db.prepare(`UPDATE memories SET open_thread = 0 WHERE open_thread IS NULL`).run();
   },
+  6(db, ctx) {
+    // 联想扩散的轻量实体邻接(承 §5.9 缺口①):A-MEM 式记忆关联网,端侧纯 SQLite 即可扛。
+    // 1) 记忆→实体键索引(实体键= 'p:'+person_id 或 't:'+规范化 token,见 config.entityKeys)。
+    //    用于"按共享实体找邻居";建索引保证邻接查询有序高效(端侧性能,§5.9)。
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS memory_entities(
+        memory_id INTEGER NOT NULL,
+        entity_key TEXT NOT NULL,
+        PRIMARY KEY(memory_id, entity_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_entities_key ON memory_entities(entity_key);
+    `);
+    // 2) 无向邻接边(规范化为 a<b 防双向重复;weight=共享实体累计计数,越关联越重)。
+    //    两端各建索引以支持"给定一端找全部邻居"(扩散遍历,§5.9)。
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS memory_edges(
+        a INTEGER NOT NULL,
+        b INTEGER NOT NULL,
+        weight INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY(a, b)
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_edges_a ON memory_edges(a);
+      CREATE INDEX IF NOT EXISTS idx_memory_edges_b ON memory_edges(b);
+    `);
+    // backfill 存量记忆:为已有记忆补建实体索引 + 邻接边(零丢失地把旧库纳入联想网,§3.2)。
+    // 注意:本迁移在 BEGIN 事务内执行(见 #migrate),与 schema_version 写入同一原子提交。
+    const rows = db
+      .prepare(`SELECT id, text, person_id FROM memories ORDER BY id ASC`)
+      .all() as { id: number; text: string; person_id: string | null }[];
+    for (const r of rows) {
+      const personId = r.person_id === null ? undefined : r.person_id;
+      // 注:迁移内无法访问实例 normalize;迁移用与默认一致的规范化(旧库 token 化只为建网,容差可接受)。
+      linkEntitiesAndEdges(
+        db,
+        asNumber(r.id),
+        asString(r.text),
+        personId,
+        defaultMigrationNormalize,
+        ctx.primaryPerson.personId,
+      );
+    }
+  },
 };
+
+/**
+ * 迁移期实体抽取用的规范化(承 §5.9 缺口①):与 config.defaultNormalize 同规则。
+ * 迁移步骤是静态函数、拿不到实例配置;存量回填只为建联想网,与默认规则一致即可(无漂移风险)。
+ */
+function defaultMigrationNormalize(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+/**
+ * 写入一条记忆的实体索引,并与已有共享实体的记忆建立/增强无向邻接边(承 §5.9 缺口①)。
+ * 单一权威建边规则(SQLite 侧):
+ * - 实体键 = config.entityKeys(person_id + 规范化 token);
+ * - 对每个实体键,找出其它已挂该键的记忆,逐一把边权 +1(共享实体越多边越重);
+ * - 边规范化为 (min,max) 防无向重复;自反(自己)跳过。
+ * 在 addMemory 的写事务内调用(与 INSERT memories 同一原子提交,承 §3.2)。
+ */
+function linkEntitiesAndEdges(
+  db: DatabaseSync,
+  memoryId: number,
+  text: string,
+  personId: string | undefined,
+  normalize: (t: string) => string,
+  primaryPersonId: string,
+): void {
+  const keys = entityKeys(text, personId, normalize, primaryPersonId);
+  if (keys.length === 0) return;
+  const insEntity = db.prepare(
+    `INSERT INTO memory_entities(memory_id, entity_key) VALUES(?, ?) ON CONFLICT DO NOTHING`,
+  );
+  const findNeighbors = db.prepare(
+    `SELECT DISTINCT memory_id FROM memory_entities WHERE entity_key = ? AND memory_id <> ?`,
+  );
+  const upsertEdge = db.prepare(
+    `INSERT INTO memory_edges(a, b, weight) VALUES(?, ?, 1)
+     ON CONFLICT(a, b) DO UPDATE SET weight = weight + 1`,
+  );
+  // 跨实体键累计:同一对记忆若共享多个键,边权按共享键数累加(在循环里多次 +1)。
+  for (const key of keys) {
+    const neighbors = findNeighbors.all(key, memoryId) as { memory_id: number }[];
+    for (const nb of neighbors) {
+      const other = asNumber(nb.memory_id);
+      if (other === memoryId) continue;
+      const a = Math.min(memoryId, other);
+      const b = Math.max(memoryId, other);
+      upsertEdge.run(a, b); // 新边 weight=1;已存在则 ON CONFLICT weight+1(共享键越多越重)。
+    }
+    insEntity.run(memoryId, key);
+  }
+}
 
 export interface SqliteMemoryStoreOptions {
   /** DB 文件路径;':memory:' 为内存库(测试用)。 */
@@ -264,29 +357,130 @@ export class SqliteMemoryStore implements MemoryStore {
     // 未闭合话题标记(承 §7#2):缺省 0(非未了事);closed_at 写 NULL(尚未闭合)。
     const openThread = rec.openThread === true ? 1 : 0;
     try {
-      this.#db
-        .prepare(
-          `INSERT INTO memories(text, normalized_text, kind, created_at, last_seen_at, hits, source_session, subject, person_id, importance, access_count, last_accessed, pinned, open_thread, closed_at)
-           VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, ?, ?, ?, NULL)
-           ON CONFLICT(normalized_text) DO UPDATE SET hits = hits + 1, last_seen_at = excluded.last_seen_at`,
-        )
-        .run(
+      // 去重:已存在等价文本则只增计数/刷新近因,不重复建联想边(防 dedup 反复增重,§5.9 缺口①)。
+      const existing = this.#db
+        .prepare(`SELECT id FROM memories WHERE normalized_text = ?`)
+        .get(normalized);
+      if (existing !== undefined) {
+        this.#db
+          .prepare(`UPDATE memories SET hits = hits + 1, last_seen_at = ? WHERE id = ?`)
+          .run(at, asNumber(existing['id']));
+        return;
+      }
+      // 写新记忆 + 在同一事务内建实体索引/邻接边(原子:记忆与其联想网一起落库,§3.2)。
+      this.#db.exec('BEGIN');
+      try {
+        const info = this.#db
+          .prepare(
+            `INSERT INTO memories(text, normalized_text, kind, created_at, last_seen_at, hits, source_session, subject, person_id, importance, access_count, last_accessed, pinned, open_thread, closed_at)
+             VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, ?, ?, ?, NULL)`,
+          )
+          .run(
+            rec.text,
+            normalized,
+            rec.kind ?? null,
+            at,
+            at,
+            rec.sourceSession ?? null,
+            subject,
+            personId ?? null,
+            importance,
+            at,
+            pinned,
+            openThread,
+          );
+        const memoryId = asNumber(info.lastInsertRowid);
+        // 联想扩散地基(承 §5.9 缺口①):建实体索引 + 与共享实体的旧记忆增建无向邻接边。
+        linkEntitiesAndEdges(
+          this.#db,
+          memoryId,
           rec.text,
-          normalized,
-          rec.kind ?? null,
-          at,
-          at,
-          rec.sourceSession ?? null,
-          subject,
-          personId ?? null,
-          importance,
-          at,
-          pinned,
-          openThread,
+          personId,
+          this.#cfg.normalize,
+          this.#cfg.primaryPersonId,
         );
+        this.#db.exec('COMMIT');
+      } catch (err) {
+        this.#db.exec('ROLLBACK');
+        throw err;
+      }
     } catch (err) {
       this.#onError(err, 'addMemory');
     }
+  }
+
+  /**
+   * 沿邻接图扩散(承 §5.9 缺口①):从一阶命中记忆 id 出发做 1..maxHops 跳广度遍历,
+   * 返回每个被联想到的额外记忆 id → 其最小跳数(供按跳数衰减算联想分)。
+   * 一阶命中本身(hop=0)不计入返回(它们已在候选池)。无边表/读失败优雅降级为空(§3.2)。
+   */
+  #spread(seedIds: readonly number[], maxHops: number): Map<number, number> {
+    const hopOf = new Map<number, number>();
+    if (maxHops <= 0 || seedIds.length === 0) return hopOf;
+    try {
+      const seed = new Set(seedIds);
+      const neighborStmt = this.#db.prepare(
+        // 无向:给定一端 id,取另一端(a=? 取 b;b=? 取 a)。
+        `SELECT b AS other FROM memory_edges WHERE a = ?
+         UNION
+         SELECT a AS other FROM memory_edges WHERE b = ?`,
+      );
+      let frontier: number[] = [...seedIds];
+      for (let hop = 1; hop <= maxHops; hop++) {
+        const next: number[] = [];
+        for (const id of frontier) {
+          const rows = neighborStmt.all(id, id) as { other: number }[];
+          for (const row of rows) {
+            const other = asNumber(row.other);
+            if (seed.has(other)) continue; // 一阶命中不算联想候选。
+            if (hopOf.has(other)) continue; // 已记录更小跳数(BFS 先到即最小)。
+            hopOf.set(other, hop);
+            next.push(other);
+          }
+        }
+        frontier = next;
+        if (frontier.length === 0) break;
+      }
+    } catch (err) {
+      this.#onError(err, 'spread');
+      return new Map();
+    }
+    return hopOf;
+  }
+
+  /** 把一行 memories 记录映射为 MemoryRecord(读列兜底单一权威,recall/扩散候选共用,零漂移)。 */
+  #rowToRecord(r: Record<string, unknown>): MemoryRecord {
+    const lastSeenAtMs = asNumber(r['last_seen_at']);
+    const importance =
+      r['importance'] === null || r['importance'] === undefined
+        ? this.#cfg.initialImportance
+        : asNumber(r['importance']);
+    const pinned = asNumber(r['pinned'] ?? 0) === 1;
+    // 未闭合话题(承 §7#2):open_thread=1 且 closed_at 为空才算"当前未闭合";旧库 NULL 兜底为 false。
+    const openThread =
+      asNumber(r['open_thread'] ?? 0) === 1 &&
+      (r['closed_at'] === null || r['closed_at'] === undefined);
+    return {
+      id: asNumber(r['id']),
+      text: asString(r['text']),
+      kind: r['kind'] === null || r['kind'] === undefined ? undefined : asString(r['kind']),
+      createdAtMs: asNumber(r['created_at']),
+      lastSeenAtMs,
+      hits: asNumber(r['hits']),
+      // subject 列在 v3 迁移后必有值;为稳健仍对 NULL 兜底为 'person'。
+      subject: (r['subject'] === null || r['subject'] === undefined
+        ? 'person'
+        : asString(r['subject'])) as MemorySubject,
+      personId:
+        r['person_id'] === null || r['person_id'] === undefined
+          ? undefined
+          : asString(r['person_id']),
+      importance,
+      accessCount:
+        r['access_count'] === null || r['access_count'] === undefined ? 0 : asNumber(r['access_count']),
+      pinned,
+      openThread,
+    };
   }
 
   recall(
@@ -300,71 +494,101 @@ export class SqliteMemoryStore implements MemoryStore {
       // 不按主语过滤:一次覆盖 person+agent+shared,让上层同时拿到自述/事实/共同经历,防自相矛盾(§5.3 末条)。
       // SQL 只做 LIKE 候选过滤;归一/混合/排序在 JS 层用 config.ts 单一权威公式算(两后端零漂移,§5.5/§3.2)。
       // 取回 normalized_text 以在 JS 层用与 InMemory 同一规则复算关键词命中数(不依赖 SQL 端计数,免两套)。
+      const cols = `id, text, normalized_text, kind, created_at, last_seen_at, hits, subject, person_id,
+                    importance, access_count, last_accessed, pinned, open_thread, closed_at`;
       const where = tokens.map(() => `normalized_text LIKE ?`).join(' OR ');
       const params = tokens.map((t) => `%${t}%`);
-      const rows = this.#db
-        .prepare(
-          `SELECT id, text, normalized_text, kind, created_at, last_seen_at, hits, subject, person_id,
-                  importance, access_count, last_accessed, pinned, open_thread, closed_at
-           FROM memories
-           WHERE ${where}`,
-        )
-        .all(...params);
+      const firstRows = this.#db
+        .prepare(`SELECT ${cols} FROM memories WHERE ${where}`)
+        .all(...params) as Record<string, unknown>[];
       const now = this.#now();
-      // 读列兜底:旧库残留 NULL 时给安全默认(importance→初值、access_count→0、pinned→false、last_accessed→last_seen)。
-      const candidates: { record: MemoryRecord; score: number }[] = [];
-      for (const r of rows) {
-        const lastSeenAtMs = asNumber(r['last_seen_at']);
-        const importance =
-          r['importance'] === null || r['importance'] === undefined
-            ? this.#cfg.initialImportance
-            : asNumber(r['importance']);
-        const pinned = asNumber(r['pinned'] ?? 0) === 1;
-        // 未闭合话题(承 §7#2):open_thread=1 且 closed_at 为空才算"当前未闭合";旧库 NULL 兜底为 false。
-        const openThread =
-          asNumber(r['open_thread'] ?? 0) === 1 &&
-          (r['closed_at'] === null || r['closed_at'] === undefined);
-        const record: MemoryRecord = {
-          id: asNumber(r['id']),
-          text: asString(r['text']),
-          kind: r['kind'] === null || r['kind'] === undefined ? undefined : asString(r['kind']),
-          createdAtMs: asNumber(r['created_at']),
-          lastSeenAtMs,
-          hits: asNumber(r['hits']),
-          // subject 列在 v3 迁移后必有值;为稳健仍对 NULL 兜底为 'person'。
-          subject: (r['subject'] === null || r['subject'] === undefined
-            ? 'person'
-            : asString(r['subject'])) as MemorySubject,
-          personId:
-            r['person_id'] === null || r['person_id'] === undefined
-              ? undefined
-              : asString(r['person_id']),
-          importance,
-          accessCount: r['access_count'] === null || r['access_count'] === undefined ? 0 : asNumber(r['access_count']),
-          pinned,
-          openThread,
-        };
-        // 关键词原始分:命中查询 token 去重数(与 InMemory 同 normalized includes 规则,零漂移)。
+
+      // —— 一阶候选(关键词命中)——
+      // 每条候选的「关键词原始命中数 raw」与「记忆强度」入缺口③ 归一融合;关键词命中即在场(任一路在场即进池)。
+      type Cand = {
+        record: MemoryRecord;
+        raw: RawRecallSignals;
+      };
+      const candById = new Map<number, Cand>();
+      for (const r of firstRows) {
+        const record = this.#rowToRecord(r);
         const normalized = asString(r['normalized_text']);
-        const raw = tokens.reduce((n, t) => (normalized.includes(t) ? n + 1 : n), 0);
-        // 混合归一得分(承 §5.5):关键词归一 + 记忆强度(importance×decay)+ 可选情感共振;
-        // 衰减/强度用强化前的值算,保证本次返回排序确定(强化只影响后续召回,§5.5 决策 3)。
-        const signals: RecallSignal[] = [
-          { present: true, value: keywordScore(raw, tokens.length, this.#cfg) },
-          { present: true, value: recallScore(importance, decayFactor(lastSeenAtMs, now, pinned, this.#cfg)) },
-        ];
-        // 情感共振仅当调用方传入 PAD 时在场(默认不启用,§5.5);记忆侧 emotion 本期缺省按中性。
-        if (pad !== undefined) signals.push({ present: true, value: emotionResonance(pad) });
-        const score = mixedRecallScore(signals);
-        if (score <= 0) continue; // 零信号门控:全部在场信号为 0 才丢(只对零信号生效,§5.5)。
-        candidates.push({ record, score });
+        const rawHits = tokens.reduce((n, t) => (normalized.includes(t) ? n + 1 : n), 0);
+        candById.set(record.id, {
+          record,
+          raw: {
+            keyword: { present: true, value: rawHits },
+            strength: {
+              present: true,
+              value: recallScore(
+                record.importance ?? this.#cfg.initialImportance,
+                decayFactor(record.lastSeenAtMs, now, record.pinned === true, this.#cfg),
+              ),
+            },
+            emotion:
+              pad !== undefined
+                ? { present: true, value: emotionResonance(pad) }
+                : { present: false, value: 0 },
+            // 一阶命中不带联想分(它们是种子,不是被联想到的,§5.9 缺口①)。
+            association: { present: false, value: 0 },
+          },
+        });
       }
-      // 混合得分降序;同分按 hits / id 兜底,排序完全确定(与 InMemory 一致)。
-      candidates.sort(
-        (a, b) =>
-          b.score - a.score || b.record.hits - a.record.hits || b.record.id - a.record.id,
+
+      // —— 联想扩散(承 §5.9 缺口①):从一阶命中沿邻接图 1..maxHops 跳带入额外候选 ——
+      const seedIds = [...candById.keys()];
+      const hopOf = this.#spread(seedIds, this.#cfg.associationMaxHops);
+      if (hopOf.size > 0) {
+        // 批量取回联想候选记忆行(避免逐条查询;按 id 升序确定)。
+        const ids = [...hopOf.keys()];
+        const placeholders = ids.map(() => '?').join(', ');
+        const assocRows = this.#db
+          .prepare(`SELECT ${cols} FROM memories WHERE id IN (${placeholders})`)
+          .all(...ids) as Record<string, unknown>[];
+        for (const r of assocRows) {
+          const record = this.#rowToRecord(r);
+          if (candById.has(record.id)) continue; // 已是一阶命中,不重复。
+          const hop = hopOf.get(record.id)!;
+          const normalized = asString(r['normalized_text']);
+          // 联想候选也算其自身关键词命中(可能 0):0 命中则关键词路缺席(不硬丢,靠联想/强度入池)。
+          const rawHits = tokens.reduce((n, t) => (normalized.includes(t) ? n + 1 : n), 0);
+          candById.set(record.id, {
+            record,
+            raw: {
+              keyword: rawHits > 0 ? { present: true, value: rawHits } : { present: false, value: 0 },
+              strength: {
+                present: true,
+                value: recallScore(
+                  record.importance ?? this.#cfg.initialImportance,
+                  decayFactor(record.lastSeenAtMs, now, record.pinned === true, this.#cfg),
+                ),
+              },
+              emotion:
+                pad !== undefined
+                  ? { present: true, value: emotionResonance(pad) }
+                  : { present: false, value: 0 },
+              // 联想分按跳数衰减(hop=1→decay、hop=2→decay²;承 §5.9 缺口①)。
+              association: {
+                present: true,
+                value: hopDecay(hop, this.#cfg.associationHopDecay),
+              },
+            },
+          });
+        }
+      }
+
+      // —— 缺口③:候选集尺度 min-max 归一 + 可配权重融合(单一权威公式)——
+      const cands = [...candById.values()];
+      const fused = normalizeAndFuse(
+        cands.map((c) => c.raw),
+        this.#cfg.recallSignalWeights,
       );
-      const top = candidates.slice(0, limit).map((c) => c.record);
+      const scored = cands.map((c, i) => ({ record: c.record, score: fused[i]! }));
+      // 零信号门控只丢全零(承 §5.5:任一路在场即进池,不学 mem0 硬丢)。
+      const kept = scored.filter((s) => s.score > 0);
+      // 融合得分降序;同分按 hits / id 兜底,排序完全确定(与 InMemory 一致)。
+      kept.sort((a, b) => b.score - a.score || b.record.hits - a.record.hits || b.record.id - a.record.id);
+      const top = kept.slice(0, limit).map((c) => c.record);
       // 检索即强化:只对实际返回的 top-N 升 access_count/importance、更新 last_accessed(被想起→记得牢,§5.5)。
       this.#reinforce(top, now);
       return top;

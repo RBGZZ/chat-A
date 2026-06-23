@@ -50,7 +50,36 @@ export interface MemoryConfig {
    * 默认 5(对齐 findings §4③「命中后额外取前后各 5 条」);无 magic number,可经 per-call 覆盖。
    */
   readonly contextWindowSize: number;
+  /**
+   * 多信号 min-max 归一融合的各路权重(承 §5.9 缺口③):候选集内把各路信号各自 min-max 归一到
+   * [0,1] 后,按本权重加权融合,保持**单一权威公式**。默认等权(全 1)。某路信号缺席(无候选在场)
+   * 时该路退出融合、不计入权重和(自适应,不被不存在的信号稀释,承 §5.5)。
+   * 权重值非负;键对齐 `RecallSignalKind`。行为即配置(§3.2),无 magic number。
+   */
+  readonly recallSignalWeights: RecallSignalWeights;
+  /**
+   * 联想扩散最大跳数(承 §5.9 缺口①):召回一阶命中后沿实体邻接图扩展的跳数(1–2 跳最像人)。
+   * 默认 2;设 0 关闭扩散(退化为纯一阶召回,向后兼容)。行为即配置(§3.2)。
+   */
+  readonly associationMaxHops: number;
+  /**
+   * 联想扩散每跳衰减系数(承 §5.9 缺口①):关联候选的「联想分」按 `decay^hop` 随跳数衰减。
+   * 默认 0.5(每跳减半);落在 (0,1]。行为即配置(§3.2),无 magic number。
+   */
+  readonly associationHopDecay: number;
 }
+
+/**
+ * 混合召回的各路信号种类(承 §5.5 / §5.9 缺口③):min-max 归一融合的单一权威键集。
+ * - `keyword`:关键词命中(无界原始命中数,候选集内 min-max 归一)。
+ * - `strength`:记忆强度 `importance × decay`(承 §5.5)。
+ * - `emotion`:情感共振(PAD 匹配,承 §5.5;仅调用方传 PAD 时在场)。
+ * - `association`:联想扩散分(承 §5.9 缺口①;按跳数衰减,仅扩散命中在场)。
+ */
+export type RecallSignalKind = 'keyword' | 'strength' | 'emotion' | 'association';
+
+/** 各路信号权重(承 §5.9 缺口③);默认等权。值非负。 */
+export type RecallSignalWeights = Readonly<Record<RecallSignalKind, number>>;
 
 /** 默认规范化:去首尾空白、小写、空白折叠。去重与召回共用此规则。 */
 export function defaultNormalize(text: string): string {
@@ -74,6 +103,11 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
   keywordMidpointFraction: 0.5,
   // §5.5 上下文窗口前后各 N 条(行为即配置,§3.2):默认 5(对齐 findings §4③)。
   contextWindowSize: 5,
+  // §5.9 缺口③ 多信号 min-max 归一融合权重(行为即配置,§3.2):默认等权(全 1)。
+  recallSignalWeights: { keyword: 1, strength: 1, emotion: 1, association: 1 },
+  // §5.9 缺口① 联想扩散(行为即配置,§3.2):默认 2 跳、每跳 ×0.5 衰减(1–2 跳最像人)。
+  associationMaxHops: 2,
+  associationHopDecay: 0.5,
 };
 
 /** 合并用户覆盖与默认值。 */
@@ -211,6 +245,120 @@ export function mixedRecallScore(signals: readonly RecallSignal[]): number {
   }
   if (count === 0) return 0;
   return Math.min(sum / count, 1);
+}
+
+// —— §5.9 缺口③:候选集尺度的多信号 min-max 归一 + 可配权重融合(单一权威公式)——
+// 把各路信号(关键词/强度/情感/联想)各自在「当前这批候选」内 min-max 归一到 [0,1] 使量纲可比,
+// 再按可配权重加权融合,保持单一权威公式。两 store 调用同一套,杜绝两后端漂移(§3.2)。
+
+/**
+ * 一条候选在各路信号上的「原始值」(归一前;承 §5.9 缺口③)。
+ * 每路 `present=false` 表示该候选此路缺席(不参与该路 min/max、归一后该路退出其融合)。
+ * 与 §5.5 关键规则一致:**任一路在场即可把该候选拉进候选池**,归一只改"如何混合可比"。
+ */
+export interface RawRecallSignals {
+  readonly keyword: RecallSignal;
+  readonly strength: RecallSignal;
+  readonly emotion: RecallSignal;
+  readonly association: RecallSignal;
+}
+
+/** 信号种类的稳定遍历序(融合确定性;与 RecallSignalKind 对齐)。 */
+const SIGNAL_KINDS: readonly RecallSignalKind[] = ['keyword', 'strength', 'emotion', 'association'];
+
+/**
+ * 候选集内单路 min-max 归一(承 §5.9 缺口③):把该路所有「在场」候选值线性映射到 [0,1]。
+ * - 退化边界(单候选 / 全相等 / max==min):不除零,该路所有在场候选归一为 1(同等贡献,不失真)。
+ * - 缺席候选(present=false)归一值无意义(融合时按权重 0 跳过),这里返回 0 占位。
+ * 仅在「候选集」这一尺度做(对当前这批求 min/max),契合"召回候选集内可比"(§5.9)。
+ */
+function minMaxNormalizeColumn(values: readonly RecallSignal[]): number[] {
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (const s of values) {
+    if (!s.present) continue;
+    if (s.value < min) min = s.value;
+    if (s.value > max) max = s.value;
+  }
+  // 无任何在场候选:整列退出融合(返回全 0,融合侧按 present 跳过)。
+  if (min === Number.POSITIVE_INFINITY) return values.map(() => 0);
+  const span = max - min;
+  return values.map((s) => {
+    if (!s.present) return 0;
+    // 退化(全相等/单候选):span=0 → 归一为 1,避免除零且让该路等量贡献(不无端压成 0)。
+    return span === 0 ? 1 : (s.value - min) / span;
+  });
+}
+
+/**
+ * 多信号 min-max 归一 + 可配权重融合(单一权威融合式,承 §5.9 缺口③):
+ * 1) 对候选集逐路 min-max 归一(同尺度可比);
+ * 2) 每条候选按「该候选在场的路」做加权平均 `Σ(w·norm) / Σw`(只计在场路的权重,自适应分母,承 §5.5)。
+ *
+ * **保留 §5.5 关键规则**:不硬门控丢低分项——任一路在场即在候选池;归一不改"谁能进候选"。
+ * 边界:某候选所有路皆缺席 / 在场路权重全 0 → 该候选融合分为 0(调用方可据零信号门控)。
+ * 返回数组与入参候选一一对应(同序),供调用方排序。
+ */
+export function normalizeAndFuse(
+  candidates: readonly RawRecallSignals[],
+  weights: RecallSignalWeights,
+): number[] {
+  const n = candidates.length;
+  if (n === 0) return [];
+  // 逐路抽列 → 候选集尺度 min-max 归一(缺口③ 在候选集尺度做)。
+  const normalized: Record<RecallSignalKind, number[]> = {
+    keyword: minMaxNormalizeColumn(candidates.map((c) => c.keyword)),
+    strength: minMaxNormalizeColumn(candidates.map((c) => c.strength)),
+    emotion: minMaxNormalizeColumn(candidates.map((c) => c.emotion)),
+    association: minMaxNormalizeColumn(candidates.map((c) => c.association)),
+  };
+  const out: number[] = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    let weightedSum = 0;
+    let weightTotal = 0;
+    for (const kind of SIGNAL_KINDS) {
+      if (!candidates[i]![kind].present) continue; // 缺席路不计入分子分母(自适应,§5.5)。
+      const w = weights[kind];
+      if (w <= 0) continue; // 权重 0 视作不参与(行为即配置可关某路)。
+      weightedSum += w * normalized[kind][i]!;
+      weightTotal += w;
+    }
+    out[i] = weightTotal === 0 ? 0 : weightedSum / weightTotal;
+  }
+  return out;
+}
+
+// —— §5.9 缺口①:联想扩散的纯函数地基(实体/共现 token 抽取 + 跳数衰减;单一权威)——
+// 两 store 用同一套规则在写入时建/增邻接边、召回时按跳数衰减算联想分,杜绝两后端漂移(§3.2)。
+
+/**
+ * 抽取一条记忆用于建邻接边的「实体键」(承 §5.9 缺口①):
+ * - person_id(若有,且**非主用户**):特定人物(访客/成员)是最强的关联枢纽——
+ *   "关于同一个人的事"互相勾连(§5.3b 花名册)。**主用户被排除**:几乎所有记忆都共享主用户,
+ *   若纳入会把全图连成一团、联想退化为噪声(违背 §5.9"联想是有意义的网状勾连")。
+ * - 规范化后的关键词 token:同一条记忆里共现的词建立无向共现边(空白分词;CJK 整串即一键)。
+ * 单一权威规则,两 store 共用;键带类型前缀避免 person_id 与 token 撞名。
+ * `primaryPersonId` 传入以便排除;不传则不排除任何人(仅供无主用户语境的纯函数测试)。
+ */
+export function entityKeys(
+  text: string,
+  personId: string | undefined,
+  normalize: (t: string) => string,
+  primaryPersonId?: string,
+): string[] {
+  const keys = new Set<string>();
+  if (personId !== undefined && personId !== primaryPersonId) keys.add(`p:${personId}`);
+  for (const t of tokenize(text, normalize)) keys.add(`t:${t}`);
+  return [...keys];
+}
+
+/**
+ * 联想跳数衰减(承 §5.9 缺口①):一阶命中视作 hop=0,沿邻接边每跳 ×decay。
+ * hop=1 → decay、hop=2 → decay²……落在 (0,1];供"联想分"那一路用。
+ */
+export function hopDecay(hop: number, decay: number): number {
+  if (hop <= 0) return 1;
+  return decay ** hop;
 }
 
 // —— 情感共振:PAD/Russell 扇区常量矩阵(O(1) 查表,承 §5.5)——
