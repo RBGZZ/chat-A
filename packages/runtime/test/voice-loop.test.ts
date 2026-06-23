@@ -10,7 +10,7 @@ import {
 } from '@chat-a/protocol';
 import { StubVadDetector, TurnDetector, StubEouModel } from '@chat-a/voice-detect';
 import { FakeStt, FakeTts } from '@chat-a/providers';
-import type { SttResult, SttProvider } from '@chat-a/providers';
+import type { SttResult, SttProvider, TtsProvider, TtsOptions, PcmChunk } from '@chat-a/providers';
 import { LightVoiceBus } from '../src/bus';
 import { VoiceLoop } from '../src/voice-loop';
 import type { VoiceLoopDeps } from '../src/voice-loop';
@@ -282,6 +282,71 @@ describe('runtime/VoiceLoop', () => {
     release();
     await flush();
     expect(loop.state).toBe('listening');
+  });
+
+  it('④ 真取消(TTS)：barge-in 打断时本回合 tts.synthesize 收到的 signal 变 aborted', async () => {
+    const mem = fakeMemory();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    // 记录所收 signal 的 fake TTS：synthesize(text, opts?, signal?) 捕获 signal,
+    // 每 chunk 前自检 signal?.aborted 干净结束(类比 FakeLlm.stream 的自检停产)。
+    let capturedTtsSignal: AbortSignal | undefined;
+    let ttsAbortedFired = false;
+    const recordingTts: TtsProvider = {
+      id: 'recording-tts',
+      capabilities: { languages: ['*'], sampleRate: SAMPLE_RATE_HZ, streaming: true },
+      async *synthesize(_text: string, _opts?: TtsOptions, signal?: AbortSignal): AsyncIterable<PcmChunk> {
+        capturedTtsSignal = signal;
+        signal?.addEventListener('abort', () => {
+          ttsAbortedFired = true;
+        });
+        // 吐两块,每块前自检 aborted;首块触发 thinking→speaking。
+        for (let i = 0; i < 2; i++) {
+          if (signal?.aborted === true) return; // 真取消:停止后续合成
+          yield { samples: new Int16Array(8), sampleRate: SAMPLE_RATE_HZ, channels: CHANNELS };
+        }
+      },
+    };
+    // send：捕获本回合 signal,卡住直到打断,以证 TTS 与 LLM 共用同一回合 signal。
+    let capturedSendSignal: AbortSignal | undefined;
+    const { deps, transport, bus } = makeDeps({
+      memory: { appendMessage: mem.appendMessage },
+      tts: recordingTts,
+      vad: new StubVadDetector([0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.9, 0.9]),
+      send: async (_t, onToken, signal?: AbortSignal) => {
+        capturedSendSignal = signal;
+        onToken('我正在说一句话。'); // 整句 → 触发 #speak → tts.synthesize 拿到 signal
+        await gate;
+        onToken('后面还没说完。');
+        return '我正在说一句话。后面还没说完。';
+      },
+    });
+    recorders(transport, bus);
+    const loop = new VoiceLoop(deps);
+    loop.start();
+
+    await driveSpeechThenSilence(loop, transport);
+    await flush();
+    expect(loop.state).toBe('speaking');
+    // TTS 拿到了一个未取消的 signal,且与 send 侧是同一回合的同一实例
+    expect(capturedTtsSignal).toBeInstanceOf(AbortSignal);
+    expect(capturedTtsSignal?.aborted).toBe(false);
+    expect(capturedTtsSignal).toBe(capturedSendSignal); // TTS 与 LLM 共用同一回合 signal
+
+    // 打断
+    transport.sendAudio(micFrame(20_000));
+    transport.sendAudio(micFrame(20_010));
+    await flush();
+
+    // 真取消:本回合 TTS signal 已 aborted(底层合成会真停,不再后台跑完)
+    expect(capturedTtsSignal?.aborted).toBe(true);
+    expect(ttsAbortedFired).toBe(true);
+    expect(loop.state).toBe('listening');
+
+    release();
+    await flush();
   });
 
   it('③ 降级：STT 空文本 → 回 listening 不崩', async () => {

@@ -303,10 +303,15 @@ export class VoiceLoop {
     // 起想：onToken 凑句**串行**喂 #speak（保句序 + 便于在 send 完成后等全部出尽再收尾）。
     this.#replyAccum = '';
     const splitter = new SentenceSplitter();
+    // 本回合取消控制器（§3.2 真打断）：打断/停止时 abort 之，使底层 LLM 流 + 在途 TTS 合成真停（不再后台跑到完）。
+    const ac = new AbortController();
+    this.#currentAbort = ac;
     // 串行说话链:每句接在上一句之后,保证下行 tts:chunk 顺序与句序一致。
     let speakChain: Promise<void> = Promise.resolve();
+    // 透传本回合 ac.signal 到 #speak → tts.synthesize：打断/停止 abort() 后,在途 TTS 合成真停（§3.2）。
+    // onToken 凑句与 send 完成后的尾句 flush 共用此闭包,故一处带上 signal 即覆盖全部喂句。
     const enqueueSpeak = (sentence: string): void => {
-      speakChain = speakChain.then(() => this.#speak(sentence, gen));
+      speakChain = speakChain.then(() => this.#speak(sentence, gen, ac.signal));
     };
     const onToken = (tok: string): void => {
       if (gen !== this.#gen) return; // 作废：本回合已被打断/替换
@@ -314,9 +319,6 @@ export class VoiceLoop {
       for (const sentence of splitter.push(tok)) enqueueSpeak(sentence);
     };
 
-    // 本回合取消控制器（§3.2 真打断）：打断/停止时 abort 之，使底层 LLM 流真停（不再后台跑到完）。
-    const ac = new AbortController();
-    this.#currentAbort = ac;
     this.#currentTurn = this.#send(text, onToken, ac.signal)
       .then(async (full) => {
         if (gen !== this.#gen) return; // 已被打断：忽略输出（协作式放弃）
@@ -374,13 +376,16 @@ export class VoiceLoop {
   // ───────────────────────────── 说：TTS 下行 ─────────────────────────────
 
   /**
-   * 合成并下行一句：逐 chunk 自检 `gen === #gen`，通过则转 tts:chunk 帧 sendAudio。
-   * 首个下行 chunk 触发 tts:first_audio（thinking → speaking）。
+   * 合成并下行一句：把本回合 `signal` 传进 `synthesize`，使打断/停止 abort() 后**在途 TTS 合成真停**
+   * （§3.2 真打断，不再后台跑到完——对 WebSocket realtime TTS 尤为关键，省额度/释连接）；
+   * 逐 chunk 仍自检 `gen === #gen` 作为**双保险**（signal 停底层产出 + generation 作废已产出输出），
+   * 通过则转 tts:chunk 帧 sendAudio。首个下行 chunk 触发 tts:first_audio（thinking → speaking）。
+   * `signal` 可选、向后兼容：缺省时 `synthesize` 调用形状与现状等价。
    */
-  async #speak(sentence: string, gen: number): Promise<void> {
+  async #speak(sentence: string, gen: number, signal?: AbortSignal): Promise<void> {
     if (gen !== this.#gen) return; // 进入即自检（本回合已作废）
     try {
-      for await (const chunk of this.#tts.synthesize(sentence)) {
+      for await (const chunk of this.#tts.synthesize(sentence, undefined, signal)) {
         if (gen !== this.#gen) return; // 每 chunk 再自检：打断后旧 gen 帧不再下行
         // 首音频：thinking → speaking（仅在 thinking 态时迁移,幂等）
         if (this.#state === 'thinking') {
