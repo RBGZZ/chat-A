@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import type { ToolCall } from '@chat-a/protocol';
-import { ActionRegistry, buildDefaultRegistry, createCurrentTimeAction, type Action } from '../src/index';
+import {
+  ActionRegistry,
+  buildDefaultRegistry,
+  createCurrentTimeAction,
+  createDateDiffAction,
+  type Action,
+} from '../src/index';
 
 const call = (name: string, input: unknown = {}, id = 'c1'): ToolCall => ({ id, name, input });
 
@@ -68,11 +74,114 @@ describe('interaction/ActionRegistry 容错执行', () => {
 
   it('toolDefs 形态 + size(含全部内置动作)', () => {
     const reg = buildDefaultRegistry();
-    expect(reg.size).toBe(4);
+    expect(reg.size).toBe(5);
     const names = reg.toolDefs().map((d) => d.name);
     expect(names).toEqual(
-      expect.arrayContaining(['current_time', 'calculate', 'set_reminder', 'unit_convert']),
+      expect.arrayContaining(['current_time', 'calculate', 'set_reminder', 'unit_convert', 'date_diff']),
     );
     expect(reg.toolDefs()[0]?.inputSchema).toBeDefined();
+  });
+});
+
+describe('interaction/date_diff(确定性日期相差)', () => {
+  it('正例:相差天数', async () => {
+    const reg = new ActionRegistry().register(createDateDiffAction());
+    const res = await reg.execute(call('date_diff', { from: '2026-06-20', to: '2026-06-23' }));
+    expect(res.isError).toBeUndefined();
+    expect(res.content).toContain('3 天');
+  });
+
+  it('负差:to 早于 from', async () => {
+    const res = await createDateDiffAction().perform({ from: '2026-06-23', to: '2026-06-20' });
+    expect(res.isError).toBeUndefined();
+    expect(res.content).toContain('-3 天');
+  });
+
+  it('反例:不可解析日期 → isError 不抛', async () => {
+    const res = await createDateDiffAction().perform({ from: 'not-a-date', to: '2026-06-23' });
+    expect(res.isError).toBe(true);
+  });
+
+  it('date_diff 不声明 capability(纯计算)', () => {
+    expect(createDateDiffAction().capability).toBeUndefined();
+  });
+});
+
+// 仅用于能力门测试:声明 audio 能力的动作。
+const audioAction: Action = {
+  name: 'play_sound',
+  description: '播放声音',
+  inputSchema: { type: 'object', properties: {}, required: [] },
+  capability: 'audio',
+  perform: () => Promise.resolve({ content: 'beep' }),
+};
+
+describe('interaction/ActionRegistry 能力门(§12.2)', () => {
+  it('缺省(无能力集)= 全部可用:toolDefs 含需能力动作', () => {
+    const reg = new ActionRegistry().register(createDateDiffAction()).register(audioAction);
+    const names = reg.toolDefs().map((d) => d.name);
+    expect(names).toEqual(expect.arrayContaining(['date_diff', 'play_sound']));
+  });
+
+  it('缺省下需能力动作正常执行(向后兼容)', async () => {
+    const reg = new ActionRegistry().register(audioAction);
+    const res = await reg.execute(call('play_sound', {}, 'a1'));
+    expect(res).toEqual({ toolCallId: 'a1', content: 'beep' });
+  });
+
+  it('配能力集 {time}:toolDefs 隐藏未授权动作', () => {
+    const reg = new ActionRegistry(new Set(['time']))
+      .register(createDateDiffAction()) // 无 capability → 始终授权
+      .register(audioAction); // 需 audio → 未授权
+    const names = reg.toolDefs().map((d) => d.name);
+    expect(names).toContain('date_diff');
+    expect(names).not.toContain('play_sound');
+  });
+
+  it('未授权动作 execute → isError 不抛、不调 perform、toolCallId 对齐', async () => {
+    let performed = false;
+    const spyAudio: Action = {
+      ...audioAction,
+      perform: () => {
+        performed = true;
+        return Promise.resolve({ content: 'beep' });
+      },
+    };
+    const reg = new ActionRegistry(new Set(['time'])).register(spyAudio);
+    const res = await reg.execute(call('play_sound', {}, 'p1'));
+    expect(res.isError).toBe(true);
+    expect(res.toolCallId).toBe('p1');
+    expect(res.content).toContain('audio'); // 错误说明含缺失能力,可追溯
+    expect(performed).toBe(false); // perform 未被调用
+  });
+
+  it('授权动作(能力在集内)正常执行', async () => {
+    const reg = new ActionRegistry(new Set(['audio'])).register(audioAction);
+    const res = await reg.execute(call('play_sound', {}, 'ok1'));
+    expect(res).toEqual({ toolCallId: 'ok1', content: 'beep' });
+  });
+
+  it('空能力集:仅无 capability 的动作可用', () => {
+    const reg = new ActionRegistry(new Set<string>())
+      .register(createDateDiffAction())
+      .register(audioAction);
+    const names = reg.toolDefs().map((d) => d.name);
+    expect(names).toEqual(['date_diff']);
+  });
+
+  it('withCapabilities 更新能力集 → 过滤随之变化', async () => {
+    const reg = new ActionRegistry(new Set(['time'])).register(audioAction);
+    expect(reg.toolDefs().map((d) => d.name)).not.toContain('play_sound');
+    reg.withCapabilities(new Set(['audio']));
+    expect(reg.toolDefs().map((d) => d.name)).toContain('play_sound');
+    const res = await reg.execute(call('play_sound', {}, 'w1'));
+    expect(res).toEqual({ toolCallId: 'w1', content: 'beep' });
+  });
+
+  it('未知工具仍优先于未授权判定(可区分错误)', async () => {
+    const reg = new ActionRegistry(new Set(['time']));
+    const res = await reg.execute(call('ghost', {}, 'g1'));
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain('未知工具');
   });
 });

@@ -3,6 +3,7 @@ import { createCurrentTimeAction } from './actions/current-time';
 import { createCalculateAction } from './actions/calculate';
 import { createSetReminderAction, InMemoryReminderStore, type ReminderStore } from './actions/set-reminder';
 import { createUnitConvertAction } from './actions/unit-convert';
+import { createDateDiffAction } from './actions/date-diff';
 
 export * from './types';
 export * from './registry';
@@ -10,6 +11,7 @@ export * from './actions/current-time';
 export * from './actions/calculate';
 export * from './actions/set-reminder';
 export * from './actions/unit-convert';
+export * from './actions/date-diff';
 
 /**
  * 装配内置本地动作的默认注册表(§12.2)。均纯本地、无外部进程。
@@ -25,5 +27,6 @@ export function buildDefaultRegistry(
   registry.register(createCalculateAction());
   registry.register(createSetReminderAction(reminderStore));
   registry.register(createUnitConvertAction());
+  registry.register(createDateDiffAction());
   return registry;
 }
