@@ -57,6 +57,16 @@ export interface MemoryInput {
    * 人物归属(承 §5.3b);person/shared 省略默认主用户,agent 主语忽略此字段(写 NULL)。
    */
   readonly personId?: string;
+  /**
+   * 重要性初值(承 §5.5);省略用配置 `initialImportance`。落在 [0,1]。
+   * 检索即强化会在召回命中时升高它。
+   */
+  readonly importance?: number;
+  /**
+   * 是否核心记忆(承 §5);pinned 免于时间衰减(永不淡去)。省略默认 false。
+   * P1 不开放常规写入路径设置,主要供核心标注/巩固用。
+   */
+  readonly pinned?: boolean;
 }
 
 /** 召回返回的记忆条目。 */
@@ -71,6 +81,16 @@ export interface MemoryRecord {
   readonly subject: MemorySubject;
   /** 人物归属(承 §5.3b);agent 主语为 undefined(不指向任何人)。 */
   readonly personId: string | undefined;
+  /**
+   * 重要性(承 §5.5);融合排序 `score = importance × decay` 的一项,检索即强化随命中升高。
+   * **纯加法可选**:两实现召回时恒填充;声明为可选只为让现有消费者(构造 MemoryRecord 字面量者)
+   * 无需级联改动(向后兼容,严格约束:不改 cognition/runtime)。运行期 recall 返回必有值。
+   */
+  readonly importance?: number;
+  /** 累计被召回返回(被想起)的次数(承 §5.5 检索即强化);纯加法可选,recall 返回必有值。 */
+  readonly accessCount?: number;
+  /** 是否核心记忆(承 §5);true 则免于时间衰减。纯加法可选,recall 返回必有值。 */
+  readonly pinned?: boolean;
 }
 
 /**

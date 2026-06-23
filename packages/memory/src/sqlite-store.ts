@@ -9,7 +9,10 @@ import type {
   StoredMessage,
 } from './types';
 import {
+  decayFactor,
   makePrimaryPerson,
+  recallScore,
+  reinforceImportance,
   resolveAttribution,
   resolveMemoryConfig,
   tokenize,
@@ -17,14 +20,16 @@ import {
 } from './config';
 
 /** 当前代码支持的记忆库 schema 版本。每次破坏性/累加性变更 +1 并新增一条迁移。 */
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 /**
- * 迁移步骤上下文:主用户花名册条目经此注入(承 §3.2 行为即配置),
- * 杜绝把主用户身份/不变式硬编码进迁移 SQL(决策 5);Person 由 makePrimaryPerson 单一构造。
+ * 迁移步骤上下文:主用户花名册条目 + 记忆重要性初值经此注入(承 §3.2 行为即配置),
+ * 杜绝把身份/初值硬编码进迁移 SQL(决策 5);Person 由 makePrimaryPerson 单一构造。
  */
 interface MigrationContext {
   readonly primaryPerson: Person;
+  /** 评分列 backfill 的重要性初值(承 §5.5;经配置注入,不硬编码进 SQL)。 */
+  readonly initialImportance: number;
 }
 
 /**
@@ -89,6 +94,20 @@ const MIGRATIONS: Record<number, (db: DatabaseSync, ctx: MigrationContext) => vo
       p.personId,
     );
   },
+  4(db, ctx) {
+    // 记忆评分列(承 §5.5):importance / access_count / last_accessed + 预留 pinned / emotion_snapshot。
+    // ALTER ADD COLUMN 无列级 IF NOT EXISTS,幂等性靠 v4 只在 schema_version<4 跑一次(同 v3 手法)。
+    db.exec(`ALTER TABLE memories ADD COLUMN importance REAL;`);
+    db.exec(`ALTER TABLE memories ADD COLUMN access_count INTEGER;`);
+    db.exec(`ALTER TABLE memories ADD COLUMN last_accessed INTEGER;`);
+    db.exec(`ALTER TABLE memories ADD COLUMN pinned INTEGER;`); // 预留:核心记忆免衰(承 §5)。
+    db.exec(`ALTER TABLE memories ADD COLUMN emotion_snapshot TEXT;`); // 预留:P2 情感共振。
+    // backfill 历史行:重要性给配置初值、访问计数 0、非 pinned;零数据丢失(§3.2)。
+    // last_accessed / emotion_snapshot 容 NULL,读取侧兜底(last_accessed→last_seen_at)。
+    db.prepare(
+      `UPDATE memories SET importance = ?, access_count = 0, pinned = 0 WHERE importance IS NULL`,
+    ).run(ctx.initialImportance);
+  },
 };
 
 export interface SqliteMemoryStoreOptions {
@@ -146,7 +165,10 @@ export class SqliteMemoryStore implements MemoryStore {
     if (current === CURRENT_SCHEMA_VERSION) return;
 
     // 主用户花名册条目经配置解析后传入 MIGRATIONS(§3.2 行为即配置;决策 5)。
-    const ctx: MigrationContext = { primaryPerson: makePrimaryPerson(this.#cfg) };
+    const ctx: MigrationContext = {
+      primaryPerson: makePrimaryPerson(this.#cfg),
+      initialImportance: this.#cfg.initialImportance,
+    };
     this.#db.exec('BEGIN');
     try {
       for (let v = current + 1; v <= CURRENT_SCHEMA_VERSION; v++) {
@@ -218,14 +240,29 @@ export class SqliteMemoryStore implements MemoryStore {
     const at = rec.createdAtMs ?? this.#now();
     // 归属规则与 InMemory 共用单一权威 helper(承 §5.3 / §5.3b);SQLite 列接受 NULL,故 `?? null`。
     const { subject, personId } = resolveAttribution(rec, this.#cfg);
+    // 评分列初值(承 §5.5):importance 缺省配置初值、access_count=0、last_accessed=创建时、pinned 缺省 0。
+    const importance = rec.importance ?? this.#cfg.initialImportance;
+    const pinned = rec.pinned === true ? 1 : 0;
     try {
       this.#db
         .prepare(
-          `INSERT INTO memories(text, normalized_text, kind, created_at, last_seen_at, hits, source_session, subject, person_id)
-           VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?)
+          `INSERT INTO memories(text, normalized_text, kind, created_at, last_seen_at, hits, source_session, subject, person_id, importance, access_count, last_accessed, pinned)
+           VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, ?, ?)
            ON CONFLICT(normalized_text) DO UPDATE SET hits = hits + 1, last_seen_at = excluded.last_seen_at`,
         )
-        .run(rec.text, normalized, rec.kind ?? null, at, at, rec.sourceSession ?? null, subject, personId ?? null);
+        .run(
+          rec.text,
+          normalized,
+          rec.kind ?? null,
+          at,
+          at,
+          rec.sourceSession ?? null,
+          subject,
+          personId ?? null,
+          importance,
+          at,
+          pinned,
+        );
     } catch (err) {
       this.#onError(err, 'addMemory');
     }
@@ -236,33 +273,81 @@ export class SqliteMemoryStore implements MemoryStore {
     if (tokens.length === 0) return [];
     try {
       // 不按主语过滤:一次覆盖 person+agent+shared,让上层同时拿到自述/事实/共同经历,防自相矛盾(§5.3 末条)。
+      // SQL 只做 LIKE 候选过滤;融合得分排序在 JS 层用 config.ts 单一权威公式算(两后端零漂移,§5.5/§3.2)。
       const where = tokens.map(() => `normalized_text LIKE ?`).join(' OR ');
       const params = tokens.map((t) => `%${t}%`);
       const rows = this.#db
         .prepare(
-          `SELECT id, text, kind, created_at, last_seen_at, hits, subject, person_id FROM memories
-           WHERE ${where}
-           ORDER BY last_seen_at DESC, hits DESC, id DESC
-           LIMIT ?`,
+          `SELECT id, text, kind, created_at, last_seen_at, hits, subject, person_id,
+                  importance, access_count, last_accessed, pinned
+           FROM memories
+           WHERE ${where}`,
         )
-        .all(...params, limit);
-      return rows.map((r) => ({
-        id: asNumber(r['id']),
-        text: asString(r['text']),
-        kind: r['kind'] === null || r['kind'] === undefined ? undefined : asString(r['kind']),
-        createdAtMs: asNumber(r['created_at']),
-        lastSeenAtMs: asNumber(r['last_seen_at']),
-        hits: asNumber(r['hits']),
-        // subject 列在 v3 迁移后必有值;为稳健仍对 NULL 兜底为 'person'。
-        subject: (r['subject'] === null || r['subject'] === undefined
-          ? 'person'
-          : asString(r['subject'])) as MemorySubject,
-        personId:
-          r['person_id'] === null || r['person_id'] === undefined ? undefined : asString(r['person_id']),
-      }));
+        .all(...params);
+      const now = this.#now();
+      // 读列兜底:旧库残留 NULL 时给安全默认(importance→初值、access_count→0、pinned→false、last_accessed→last_seen)。
+      const candidates = rows.map((r) => {
+        const lastSeenAtMs = asNumber(r['last_seen_at']);
+        const importance =
+          r['importance'] === null || r['importance'] === undefined
+            ? this.#cfg.initialImportance
+            : asNumber(r['importance']);
+        const pinned = asNumber(r['pinned'] ?? 0) === 1;
+        const record: MemoryRecord = {
+          id: asNumber(r['id']),
+          text: asString(r['text']),
+          kind: r['kind'] === null || r['kind'] === undefined ? undefined : asString(r['kind']),
+          createdAtMs: asNumber(r['created_at']),
+          lastSeenAtMs,
+          hits: asNumber(r['hits']),
+          // subject 列在 v3 迁移后必有值;为稳健仍对 NULL 兜底为 'person'。
+          subject: (r['subject'] === null || r['subject'] === undefined
+            ? 'person'
+            : asString(r['subject'])) as MemorySubject,
+          personId:
+            r['person_id'] === null || r['person_id'] === undefined
+              ? undefined
+              : asString(r['person_id']),
+          importance,
+          accessCount: r['access_count'] === null || r['access_count'] === undefined ? 0 : asNumber(r['access_count']),
+          pinned,
+        };
+        // 衰减/得分用强化前的值算,保证本次返回排序确定(强化只影响后续召回,§5.5 决策 3)。
+        const score = recallScore(importance, decayFactor(lastSeenAtMs, now, pinned, this.#cfg));
+        return { record, score };
+      });
+      // 融合得分降序;同分按 hits / id 兜底,排序完全确定(与 InMemory 一致)。
+      candidates.sort(
+        (a, b) =>
+          b.score - a.score || b.record.hits - a.record.hits || b.record.id - a.record.id,
+      );
+      const top = candidates.slice(0, limit).map((c) => c.record);
+      // 检索即强化:只对实际返回的 top-N 升 access_count/importance、更新 last_accessed(被想起→记得牢,§5.5)。
+      this.#reinforce(top, now);
+      return top;
     } catch (err) {
       this.#onError(err, 'recall');
       return [];
+    }
+  }
+
+  /**
+   * 检索即强化(承 §5.5):对返回的命中行升 access_count、按单一权威公式升 importance、更新 last_accessed。
+   * 排序+截断之后施加,失败优雅降级不抛(§3.2),不拖垮召回返回。
+   */
+  #reinforce(records: readonly MemoryRecord[], now: number): void {
+    if (records.length === 0) return;
+    try {
+      const stmt = this.#db.prepare(
+        `UPDATE memories SET access_count = access_count + 1, importance = ?, last_accessed = ? WHERE id = ?`,
+      );
+      for (const r of records) {
+        // importance 在 recall 映射时恒填充;`?? 初值` 仅满足可选类型,运行期不会触发。
+        const base = r.importance ?? this.#cfg.initialImportance;
+        stmt.run(reinforceImportance(base, this.#cfg), now, r.id);
+      }
+    } catch (err) {
+      this.#onError(err, 'reinforce');
     }
   }
 
