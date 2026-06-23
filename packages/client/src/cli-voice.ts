@@ -5,8 +5,10 @@
  *   - 设备:`CHAT_A_AUDIO_DEVICE=node` 用 {@link NodeAudioDevice}(动态加载原生库,装不上→明确报错并回落);
  *           缺省/`fake` 用 {@link FakeAudioDevice}(无原生依赖,可在任何环境跑;采集空,主要供冒烟)。
  *   - STT/TTS:`createStt(loadSttConfig(env))` / `createTts(loadTtsConfig(env))`(缺省 Fake)。
- *   - VAD/TurnDetector:voice-detect 目前仅有确定性桩(真 Silero / Smart-Turn v3 ONNX 是后续切片);
- *     此处用桩占位以便闭环装配 + typecheck,真模型接入后**零改 VoiceLoop**(实现同接口即换)。
+ *   - VAD/TurnDetector:按 `CHAT_A_VAD` 选真/桩——`silero`(/`real`/`sherpa`)注入真
+ *     {@link SileroVadDetector} + {@link SmartTurnEouModel}(经 sherpa session 工厂动态加载真推理端口);
+ *     缺省/其它/`stub` 用确定性桩。真路径加载/构造失败 → **打印明确中文提示并回落桩**
+ *     (沿用真设备回落范式,绝不崩);真模型接入后**零改 VoiceLoop**(实现同接口即换)。
  *   - send 注入 `conversation.send.bind(conversation)`(零改 Conversation,§VoiceLoop 设计)。
  *
  * 文字模式默认不变;`--voice` 或 `CHAT_A_VOICE=1` 才进本模式(见 cli.ts 分发)。
@@ -14,11 +16,19 @@
 import { stdout, env as procEnv } from 'node:process';
 import { createStt, loadSttConfig, createTts, loadTtsConfig } from '@chat-a/providers';
 import type { MemoryStore } from '@chat-a/memory';
-import { StubVadDetector, TurnDetector, StubEouModel } from '@chat-a/voice-detect';
+import {
+  StubVadDetector,
+  TurnDetector,
+  StubEouModel,
+  SileroVadDetector,
+  SmartTurnEouModel,
+  type VadDetector,
+} from '@chat-a/voice-detect';
 import type { LightVoiceBus } from '@chat-a/runtime';
 import type { AudioDevice } from './audio/audio-device';
 import { FakeAudioDevice } from './audio/fake-audio-device';
 import { NodeAudioDevice } from './audio/node-audio-device';
+import { createSherpaVadSession, createSherpaEouSession } from './audio/sherpa-vad-session';
 import { runVoiceLoop } from './audio/voice-runner';
 
 /** 语音模式所需的、由 cli.ts 已装配好的依赖(复用文字链路的 convo/memory/bus/session)。 */
@@ -36,9 +46,62 @@ export interface VoiceModeDeps {
 
 /** 语音模式运行句柄:停 = 收尾(停采集/loop/设备)。 */
 export interface VoiceModeHandle {
-  /** 设备/STT/TTS 的可读标识(状态行用)。 */
-  readonly info: { readonly device: string; readonly stt: string; readonly tts: string };
+  /** 设备/STT/TTS/VAD/EOU 的可读标识(状态行用;vad/eou 反映回落后的实际实现)。 */
+  readonly info: {
+    readonly device: string;
+    readonly stt: string;
+    readonly tts: string;
+    readonly vad: string;
+    readonly eou: string;
+  };
   stop(): void;
+}
+
+/** 端点检测装配结果:VAD + TurnDetector + 实际生效的实现标识(真/桩,供状态行)。 */
+interface Detectors {
+  readonly vad: VadDetector;
+  readonly turnDetector: TurnDetector;
+  /** 实际生效的 VAD 实现标识(回落后)。 */
+  readonly vadKind: string;
+  /** 实际生效的 EOU 实现标识(回落后)。 */
+  readonly eouKind: string;
+}
+
+/** 桩端点检测:与历史行为逐字一致的「恒有声 + 高 EOU」占位序列。 */
+function createStubDetectors(): Detectors {
+  return {
+    vad: new StubVadDetector([0.9]),
+    turnDetector: new TurnDetector(new StubEouModel([0.9])),
+    vadKind: 'stub',
+    eouKind: 'stub',
+  };
+}
+
+/**
+ * 按 env 选端点检测实现(承本切片目标):
+ *   - `CHAT_A_VAD=silero`(/`real`/`sherpa`)→ 真 {@link SileroVadDetector} + {@link SmartTurnEouModel}
+ *     (经 sherpa session 工厂动态加载真推理端口;模块名可经 `CHAT_A_SHERPA_MODULE` 覆盖)。
+ *   - 缺省/空/其它/`stub` → 确定性桩(CI/冒烟默认,文字模式与现状逐字不变)。
+ * 真路径动态加载/构造**任一步抛错** → 打印明确中文提示并**回落桩**,绝不崩(§3.2,沿用真设备回落范式)。
+ */
+async function createDetectors(env: NodeJS.ProcessEnv): Promise<Detectors> {
+  const mode = (env['CHAT_A_VAD'] ?? 'stub').toLowerCase();
+  const wantReal = mode === 'silero' || mode === 'real' || mode === 'sherpa';
+  if (!wantReal) return createStubDetectors();
+
+  try {
+    // 真路径:动态加载 sherpa 同步推理端口,注入既有真适配器(零改 VoiceLoop)。
+    const vadSession = await createSherpaVadSession({ env });
+    const eouSession = await createSherpaEouSession({ env });
+    const vad = new SileroVadDetector({ session: vadSession });
+    const turnDetector = new TurnDetector(new SmartTurnEouModel({ session: eouSession }));
+    return { vad, turnDetector, vadKind: 'silero', eouKind: 'silero' };
+  } catch (err) {
+    stdout.write(
+      `[语音] 真 VAD/EOU(sherpa)初始化失败,已回落确定性桩:${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return createStubDetectors();
+  }
 }
 
 /**
@@ -86,17 +149,15 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
     real = false;
   }
 
-  // VAD / TurnDetector:目前仅桩(真 Silero / Smart-Turn v3 是后续切片)。
-  // 桩用「恒有声 + 高 EOU 概率」的占位序列:真设备接入后须换真模型,此处仅保证装配/类型闭环。
-  const vad = new StubVadDetector([0.9]);
-  const turnDetector = new TurnDetector(new StubEouModel([0.9]));
+  // VAD / TurnDetector:按 CHAT_A_VAD 选真/桩;真路径加载/构造失败回落桩(明确提示,绝不崩)。
+  const detectors = await createDetectors(env);
 
   const handle = runVoiceLoop({
     device,
     bus: deps.bus,
     loopDeps: {
-      vad,
-      turnDetector,
+      vad: detectors.vad,
+      turnDetector: detectors.turnDetector,
       stt,
       tts,
       send: deps.send,
@@ -110,6 +171,8 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
       device: `${device.id}${real ? '' : ' (占位/无真采集)'}`,
       stt: sttCfg.kind,
       tts: ttsCfg.kind,
+      vad: detectors.vadKind,
+      eou: detectors.eouKind,
     },
     stop: () => handle.stop(),
   };
