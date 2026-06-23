@@ -278,6 +278,68 @@ describe('SqliteMemoryStore 持久化 / 迁移 / 降级', () => {
     reopen.close();
   });
 
+  it('v7→v8 迁移:加 embedding/embedding_dim 列,旧行 embedding 为 NULL 合法、零丢失、幂等(§5.6/§3.2)', () => {
+    const path = newPath();
+    // 造一个 v7 库:memories 带 v7 全列(含 memory_kind,无 embedding 列)+ people + 联想网表 + schema_version=7。
+    const v7 = new DatabaseSync(path);
+    v7.exec(`CREATE TABLE memory_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+    v7.exec(`CREATE TABLE memories(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, normalized_text TEXT NOT NULL UNIQUE,
+      kind TEXT, created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+      hits INTEGER NOT NULL DEFAULT 1, source_session TEXT, subject TEXT, person_id TEXT,
+      importance REAL, access_count INTEGER, last_accessed INTEGER, pinned INTEGER, emotion_snapshot TEXT,
+      open_thread INTEGER, closed_at INTEGER, memory_kind TEXT);`);
+    v7.exec(`CREATE TABLE kv_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+    v7.exec(`CREATE TABLE people(
+      person_id TEXT PRIMARY KEY, name TEXT NOT NULL, is_primary INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL, added_by TEXT NOT NULL, relationship_state TEXT, voiceprint_ref TEXT);`);
+    v7.exec(`CREATE TABLE memory_entities(memory_id INTEGER NOT NULL, entity_key TEXT NOT NULL, PRIMARY KEY(memory_id, entity_key));`);
+    v7.exec(`CREATE TABLE memory_edges(a INTEGER NOT NULL, b INTEGER NOT NULL, weight INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(a, b));`);
+    v7.prepare(`INSERT INTO people(person_id, name, is_primary, status, added_by) VALUES('primary','主人',1,'primary','user')`).run();
+    v7.prepare(`INSERT INTO memories(text, normalized_text, created_at, last_seen_at, subject, person_id, importance, access_count, last_accessed, pinned, open_thread, memory_kind)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run('v7记忆甲', 'v7记忆甲', 1, 1, 'person', 'primary', 0.5, 0, 1, 0, 0, 'semantic');
+    v7.prepare(`INSERT INTO memory_meta(key, value) VALUES('schema_version', '7')`).run();
+    v7.close();
+
+    const store = new SqliteMemoryStore({ path });
+    // 零丢失:存量记忆仍可召回。
+    expect(store.recall('v7记忆甲').map((r) => r.text)).toEqual(['v7记忆甲']);
+    // 旧行 embedding 为 NULL → 进待嵌列表(合法,供后台补嵌)。
+    expect(store.memoriesNeedingEmbedding(10).map((p) => p.text)).toEqual(['v7记忆甲']);
+    // 旧行无 embedding → 向量召回不返回它(尚未嵌入)。
+    expect(store.recallByVector([1, 0, 0], 10)).toEqual([]);
+    store.close();
+
+    const check = new DatabaseSync(path);
+    // schema 升至 v8(= CURRENT_SCHEMA_VERSION)。
+    const v = check.prepare(`SELECT value FROM memory_meta WHERE key='schema_version'`).get();
+    expect(Number(v?.['value'])).toBe(CURRENT_SCHEMA_VERSION);
+    // 列已加且旧行为 NULL。
+    const row = check.prepare(`SELECT embedding, embedding_dim FROM memories WHERE normalized_text='v7记忆甲'`).get();
+    expect(row?.['embedding']).toBeNull();
+    expect(row?.['embedding_dim']).toBeNull();
+    check.close();
+
+    // 幂等:同库再开一次(已是 v8)不重复迁移、不报错、数据不变。
+    const reopen = new SqliteMemoryStore({ path });
+    expect(reopen.recall('v7记忆甲').map((r) => r.text)).toEqual(['v7记忆甲']);
+    reopen.close();
+  });
+
+  it('embedding 跨重启持久化:setEmbedding → close → 重开后 recallByVector 仍命中(§5.6)', () => {
+    const path = newPath();
+    const a = new SqliteMemoryStore({ path });
+    const id = a.addMemory({ text: '可向量召回的记忆', createdAtMs: 1 });
+    a.setEmbedding(id, [1, 0, 0]);
+    a.close();
+    const b = new SqliteMemoryStore({ path });
+    // 重开后 BLOB 向量仍在,cosine 命中。
+    expect(b.recallByVector([1, 0, 0], 10).map((r) => r.text)).toEqual(['可向量召回的记忆']);
+    // 已嵌入 → 退出待嵌列表。
+    expect(b.memoriesNeedingEmbedding(10)).toEqual([]);
+    b.close();
+  });
+
   it('memoryKind 跨重启持久化:写入 → close → 重开仍保留分层(§5.9 缺口④)', () => {
     const path = newPath();
     const a = new SqliteMemoryStore({ path });

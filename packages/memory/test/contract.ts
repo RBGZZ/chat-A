@@ -673,5 +673,117 @@ export function runMemoryStoreContract(name: string, make: MakeStore): void {
       expect(texts).toContain('乙 共享键 旁支');
       s.close();
     });
+
+    // —— 向量存取 + 同步混合召回(承 §5.6 接缝 7 / §5.5 末「🔴 非阻塞召回」/ §5.9 RRF;两实现零漂移)——
+
+    it('addMemory 返回 id:新建返回新 id、去重命中返回被强化的同一条 id(承 §5.6)', () => {
+      const s = make();
+      const id1 = s.addMemory({ text: '我叫小明' });
+      expect(id1).toBeGreaterThan(0);
+      const id2 = s.addMemory({ text: '我爱猫' });
+      expect(id2).toBeGreaterThan(0);
+      expect(id2).not.toBe(id1);
+      // 去重命中:等价文本返回既有那条 id(不新建)。
+      const idDup = s.addMemory({ text: '我叫小明' });
+      expect(idDup).toBe(id1);
+      // 空文本不写,返回 -1(优雅降级)。
+      expect(s.addMemory({ text: '   ' })).toBe(-1);
+      s.close();
+    });
+
+    it('setEmbedding + recallByVector:按 cosine 排序,维度不符跳过、不存在 id 幂等不抛(承 §5.6)', () => {
+      const s = make();
+      const idA = s.addMemory({ text: '记忆A' });
+      const idB = s.addMemory({ text: '记忆B' });
+      const idC = s.addMemory({ text: '记忆C' });
+      // 三条 3 维向量:A 与查询最近、B 次之、C 最远。
+      s.setEmbedding(idA, [1, 0, 0]);
+      s.setEmbedding(idB, [0.8, 0.6, 0]);
+      s.setEmbedding(idC, [0, 1, 0]);
+      // 维度不符(2 维)应被 KNN 跳过,不抛。
+      const idD = s.addMemory({ text: '记忆D' });
+      s.setEmbedding(idD, [1, 0]);
+      // 不存在 id 幂等不抛。
+      expect(() => s.setEmbedding(999_999, [1, 0, 0])).not.toThrow();
+      const r = s.recallByVector([1, 0, 0], 10).map((x) => x.text);
+      // A 最相似排首;D(2 维)被跳过不出现。
+      expect(r[0]).toBe('记忆A');
+      expect(r).toContain('记忆B');
+      expect(r).toContain('记忆C');
+      expect(r).not.toContain('记忆D');
+      // cosine 排序:A 在 B 前、B 在 C 前。
+      expect(r.indexOf('记忆A')).toBeLessThan(r.indexOf('记忆B'));
+      expect(r.indexOf('记忆B')).toBeLessThan(r.indexOf('记忆C'));
+      s.close();
+    });
+
+    it('recallByVector 无 embedding 的记忆不参与(尚未嵌入)(承 §5.6)', () => {
+      const s = make();
+      const idA = s.addMemory({ text: '已嵌入' });
+      s.addMemory({ text: '未嵌入' });
+      s.setEmbedding(idA, [1, 0, 0]);
+      const r = s.recallByVector([1, 0, 0], 10).map((x) => x.text);
+      expect(r).toEqual(['已嵌入']);
+      s.close();
+    });
+
+    it('memoriesNeedingEmbedding 只返回未嵌入项,按 id 升序、受上限约束(承 §5.6)', () => {
+      const s = make();
+      const idA = s.addMemory({ text: '甲' });
+      const idB = s.addMemory({ text: '乙' });
+      s.addMemory({ text: '丙' });
+      // 嵌入甲 → 甲退出待嵌列表。
+      s.setEmbedding(idA, [1, 0, 0]);
+      const pending = s.memoriesNeedingEmbedding(10);
+      expect(pending.map((p) => p.text)).toEqual(['乙', '丙']);
+      expect(pending[0]?.id).toBe(idB);
+      // 受上限约束。
+      expect(s.memoriesNeedingEmbedding(1).map((p) => p.text)).toEqual(['乙']);
+      s.close();
+    });
+
+    it('recallHybrid 无 queryVector == recall(逐字一致,关键词快路径下限,承 §5.5 末)', () => {
+      let nowMs = 5 * 86_400_000;
+      const s = make({ now: () => nowMs });
+      s.addMemory({ text: '要紧的事', createdAtMs: 5 * 86_400_000, importance: 0.9 });
+      s.addMemory({ text: '琐碎的事', createdAtMs: 5 * 86_400_000, importance: 0.1 });
+      // 两次独立调用应得同一命中序(都走关键词快路径)。
+      const viaRecall = s.recall('事', 5).map((r) => r.text);
+      const viaHybrid = s.recallHybrid('事', { limit: 5 }).map((r) => r.text);
+      expect(viaHybrid).toEqual(viaRecall);
+      s.close();
+    });
+
+    it('recallHybrid 带 queryVector(weighted 融合):向量近但关键词不命中的记忆也能进结果(承用户拍板/Nexus)', () => {
+      const s = make();
+      // "咖啡"关键词命中第一条;第二条不含查询词,但向量与查询最近 → weighted 融合应带入。
+      const idKw = s.addMemory({ text: '我喜欢喝咖啡' });
+      const idVec = s.addMemory({ text: '关于狗的事' });
+      s.setEmbedding(idKw, [0, 1, 0]); // 与查询向量不近。
+      s.setEmbedding(idVec, [1, 0, 0]); // 与查询向量最近。
+      const r = s.recallHybrid('咖啡', { queryVector: [1, 0, 0], limit: 10 }).map((x) => x.text);
+      // 关键词单路命中的"咖啡"在;向量近但关键词不命中的"狗"也被带入(不硬门控丢项)。
+      expect(r).toContain('我喜欢喝咖啡');
+      expect(r).toContain('关于狗的事');
+      s.close();
+    });
+
+    it('recallHybrid:关键词单路命中(无 embedding)仍入候选池(任一路在场即进池,承 §5.5)', () => {
+      const s = make();
+      // 该记忆无 embedding(向量路缺席),但关键词命中 → 仍应入结果。
+      s.addMemory({ text: '只有关键词的猫' });
+      const r = s.recallHybrid('猫', { queryVector: [1, 0, 0], limit: 10 }).map((x) => x.text);
+      expect(r).toContain('只有关键词的猫');
+      s.close();
+    });
+
+    it('recallHybrid:向量维度不符的记忆在向量路被跳过(不抛)(承 §5.6)', () => {
+      const s = make();
+      const id = s.addMemory({ text: '维度不符的记忆' });
+      s.setEmbedding(id, [1, 0]); // 2 维,与 3 维查询不符。
+      // 不抛;该记忆既无关键词命中也无有效向量 → 不在结果(但调用本身安全)。
+      expect(() => s.recallHybrid('查询', { queryVector: [1, 0, 0], limit: 10 })).not.toThrow();
+      s.close();
+    });
   });
 }

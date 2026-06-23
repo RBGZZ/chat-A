@@ -7,7 +7,9 @@ import type {
   MemorySubject,
   Pad,
   Person,
+  RecallByVectorOptions,
   RecallContextOptions,
+  RecallHybridOptions,
   RecallKindOptions,
   RecallWithContext,
   RecalledMemory,
@@ -15,6 +17,7 @@ import type {
 } from './types';
 import {
   anchorIndex,
+  cosineSimilarity,
   decayFactor,
   emotionResonance,
   entityKeys,
@@ -23,6 +26,7 @@ import {
   memoryKindWeight,
   normalizeAndFuse,
   recallScore,
+  reciprocalRankFusion,
   reinforceImportance,
   resolveAttribution,
   resolveMemoryConfig,
@@ -31,6 +35,7 @@ import {
   windowRange,
   type MemoryConfig,
   type RawRecallSignals,
+  type RecallSignalWeights,
 } from './config';
 
 interface MutableRecord {
@@ -59,7 +64,18 @@ interface MutableRecord {
   openThread: boolean;
   /** 闭合时间戳(承 §7#2);undefined=尚未闭合。镜像 SQLite closed_at 语义。 */
   closedAtMs: number | undefined;
+  /**
+   * 记忆向量(承 §5.6 接缝 7):调用方经 setEmbedding 传入的 number[];undefined=尚未嵌入(镜像 SQLite embedding NULL)。
+   * 镜像"不透明存储"语义:in-memory 直接存数组(无需 BLOB 编解码),KNN 时按长度=dim 比对。
+   */
+  embedding: number[] | undefined;
 }
+
+/** 一条召回候选:可变记忆 + 其归一前多路原始信号(recall/recallHybrid 共用,承 §5.9 缺口③)。 */
+type Cand = {
+  readonly r: MutableRecord;
+  readonly raw: RawRecallSignals;
+};
 
 export interface InMemoryMemoryStoreOptions {
   readonly config?: Partial<MemoryConfig>;
@@ -74,6 +90,8 @@ export interface InMemoryMemoryStoreOptions {
 export class InMemoryMemoryStore implements MemoryStore {
   readonly #messages: StoredMessage[] = [];
   readonly #memories = new Map<string, MutableRecord>();
+  /** id → 记忆(镜像 SQLite 主键索引;供 setEmbedding 按 id 定位,承 §5.6)。 */
+  readonly #byIdIndex = new Map<number, MutableRecord>();
   readonly #state = new Map<string, string>();
   /** 人物花名册(镜像 SQLite people 表语义,承 §5.3b)。 */
   readonly #people = new Map<string, Person>();
@@ -114,22 +132,23 @@ export class InMemoryMemoryStore implements MemoryStore {
     return own.slice(start).map((m) => ({ role: m.role, content: m.content }));
   }
 
-  addMemory(rec: MemoryInput): void {
+  addMemory(rec: MemoryInput): number {
     const normalized = this.#cfg.normalize(rec.text);
-    if (normalized.length === 0) return;
+    if (normalized.length === 0) return -1;
     const at = rec.createdAtMs ?? this.#now();
     const existing = this.#memories.get(normalized);
     if (existing !== undefined) {
       existing.hits += 1;
       existing.lastSeenAtMs = at;
-      return;
+      // 去重命中:返回被强化的那条 id(承 §5.6;镜像 SQLite 语义,补嵌复用既有向量)。
+      return existing.id;
     }
     // 归属规则与 SQLite 共用单一权威 helper(承 §5.3 / §5.3b),避免两后端漂移。
     const { subject, personId } = resolveAttribution(rec, this.#cfg);
     // 情景/语义分层(承 §5.9 缺口④):缺省 episodic;core ⟹ pinned(永不衰减,承 §5.4)。与 SQLite 共用单一权威。
     const { memoryKind, pinned } = resolveMemoryKind(rec, this.#cfg);
     const id = ++this.#seq;
-    this.#memories.set(normalized, {
+    const record: MutableRecord = {
       id,
       text: rec.text,
       normalized,
@@ -148,9 +167,15 @@ export class InMemoryMemoryStore implements MemoryStore {
       // 未闭合话题(承 §7#2):缺省非未了事、未闭合(镜像 SQLite open_thread=0 / closed_at=NULL)。
       openThread: rec.openThread === true,
       closedAtMs: undefined,
-    });
+      // 向量缺省 undefined(尚未嵌入,镜像 SQLite embedding NULL,承 §5.6)。
+      embedding: undefined,
+    };
+    this.#memories.set(normalized, record);
+    this.#byIdIndex.set(id, record);
     // 联想扩散地基(承 §5.9 缺口①):建实体索引 + 与共享实体的旧记忆增建无向邻接边。
     this.#linkEntitiesAndEdges(id, rec.text, personId);
+    // 返回新建记忆 id(承 §5.6:供编排层随后 setEmbedding 补嵌)。
+    return id;
   }
 
   /**
@@ -232,77 +257,55 @@ export class InMemoryMemoryStore implements MemoryStore {
         : undefined;
     // 不按主语过滤:一次跨 person+agent+shared 召回(§5.3 末条),与 SQLite 行为一致。
     // 候选过滤:逐 token 命中(includes);命中去重 token 数作关键词原始命中数 raw(与 SQLite 同规则,零漂移)。
-    // 按 id 索引记忆,便于联想扩散按 id 取回(与 SQLite 一致)。
-    const byId = new Map<number, MutableRecord>();
-    for (const r of this.#memories.values()) byId.set(r.id, r);
 
     // —— 一阶候选(关键词命中)+ 原始信号(承 §5.5 / §5.9 缺口③)——
-    const candById = new Map<number, { r: MutableRecord; raw: RawRecallSignals }>();
-    for (const r of byId.values()) {
+    const candById = new Map<number, Cand>();
+    for (const r of this.#memories.values()) {
       // 按 kind 分路(承 §5.9 缺口④):不在过滤集内的候选跳过(也不当扩散种子);与 SQLite 一致。
       if (kindFilter !== undefined && !kindFilter.has(r.memoryKind)) continue;
       const rawHits = tokens.reduce((n, t) => (r.normalized.includes(t) ? n + 1 : n), 0);
       if (rawHits === 0) continue; // 关键词无命中 → 不进一阶候选池。
+      // 一阶命中关键词必在场;情感按 pad;强度恒在场;无联想/向量分(种子)。复用 #baseSignals 与 SQLite 零漂移。
       candById.set(r.id, {
         r,
-        raw: {
-          keyword: { present: true, value: rawHits },
-          strength: {
-            present: true,
-            value: recallScore(r.importance, decayFactor(r.lastSeenAtMs, now, r.pinned, this.#cfg)),
-          },
-          emotion:
-            pad !== undefined
-              ? { present: true, value: emotionResonance(pad) }
-              : { present: false, value: 0 },
-          // 一阶命中不带联想分(它们是种子,不是被联想到的,§5.9 缺口①)。
-          association: { present: false, value: 0 },
-        },
+        raw: this.#baseSignals(r, now, pad, { keyword: { present: true, value: rawHits } }),
       });
     }
 
-    // —— 联想扩散(承 §5.9 缺口①):从一阶命中沿邻接图 1..maxHops 跳带入额外候选 ——
-    const hopOf = this.#spread([...candById.keys()], this.#cfg.associationMaxHops);
-    for (const [id, hop] of hopOf) {
-      if (candById.has(id)) continue; // 已是一阶命中,不重复。
-      const r = byId.get(id);
-      if (r === undefined) continue;
-      // 按 kind 分路(承 §5.9 缺口④):联想带入的旁支若不在过滤集内也跳过(分路一致);与 SQLite 一致。
-      if (kindFilter !== undefined && !kindFilter.has(r.memoryKind)) continue;
-      const rawHits = tokens.reduce((n, t) => (r.normalized.includes(t) ? n + 1 : n), 0);
-      candById.set(id, {
-        r,
-        raw: {
-          keyword: rawHits > 0 ? { present: true, value: rawHits } : { present: false, value: 0 },
-          strength: {
-            present: true,
-            value: recallScore(r.importance, decayFactor(r.lastSeenAtMs, now, r.pinned, this.#cfg)),
-          },
-          emotion:
-            pad !== undefined
-              ? { present: true, value: emotionResonance(pad) }
-              : { present: false, value: 0 },
-          // 联想分按跳数衰减(hop=1→decay、hop=2→decay²;承 §5.9 缺口①)。
-          association: { present: true, value: hopDecay(hop, this.#cfg.associationHopDecay) },
-        },
-      });
-    }
+    // —— 联想扩散 + 归一融合 + kind 调制 + 排序 + 检索即强化(承 §5.9 缺口①③④ / §5.5)——
+    // 复用单一权威 finalize 流程(与 recallHybrid 共用,不另起第二套打分;与 SQLite 零漂移)。
+    return this.#finalizeCandidates(candById, tokens, kindFilter, pad, now, limit);
+  }
 
-    // —— 缺口③:候选集尺度 min-max 归一 + 可配权重融合(单一权威公式,与 SQLite 零漂移)——
-    const cands = [...candById.values()];
-    const fused = normalizeAndFuse(cands.map((c) => c.raw), this.#cfg.recallSignalWeights);
-    // kind 权重调制(承 §5.9 缺口④):融合分 × 该候选 kind 权重(core>semantic>episodic 可配);与 SQLite 一致。
-    // 乘性调制不改变"谁能进池"(零仍零、非零仍非零),仅给分层不同分量(承 §5.5)。
-    const scored = cands
-      .map((c, i) => ({
-        r: c.r,
-        score: fused[i]! * memoryKindWeight(c.r.memoryKind, this.#cfg.memoryKindWeights),
-      }))
-      .filter((s) => s.score > 0); // 零信号门控只丢全零(任一路在场即进池,不学 mem0 硬丢,§5.5)。
-    scored.sort((a, b) => b.score - a.score || b.r.hits - a.r.hits || b.r.id - a.r.id);
-    const top = scored.slice(0, limit).map((s) => s.r);
-    // 检索即强化:只对实际返回的 top-N 升 access_count/importance、更新 last_accessed(被想起→记得牢,§5.5)。
-    const out = top.map((r) => ({
+  /**
+   * 构造一条候选的原始多路信号(单一权威,承 §5.5 / §5.9 缺口③;与 SQLite #baseSignals 零漂移):
+   * 强度恒在场、情感按 pad 在场;关键词/联想/向量路由调用方以 `overrides` 注入(缺省缺席)。
+   */
+  #baseSignals(
+    r: MutableRecord,
+    now: number,
+    pad: Pad | undefined,
+    overrides: Partial<RawRecallSignals>,
+  ): RawRecallSignals {
+    return {
+      keyword: { present: false, value: 0 },
+      strength: {
+        present: true,
+        value: recallScore(r.importance, decayFactor(r.lastSeenAtMs, now, r.pinned, this.#cfg)),
+      },
+      emotion:
+        pad !== undefined
+          ? { present: true, value: emotionResonance(pad) }
+          : { present: false, value: 0 },
+      association: { present: false, value: 0 },
+      vector: { present: false, value: 0 },
+      ...overrides,
+    };
+  }
+
+  /** 把可变记忆映射为召回返回记录(检索即强化前的快照值,承决策 3:本次返回用旧值)。 */
+  #toRecord(r: MutableRecord): MemoryRecord {
+    return {
       id: r.id,
       text: r.text,
       kind: r.kind,
@@ -317,7 +320,56 @@ export class InMemoryMemoryStore implements MemoryStore {
       pinned: r.pinned,
       // 当前未闭合 = 标记 openThread 且尚未闭合(承 §7#2;与 SQLite open_thread=1 AND closed_at IS NULL 同义)。
       openThread: r.openThread && r.closedAtMs === undefined,
-    }));
+    };
+  }
+
+  /**
+   * 候选池收尾(单一权威,承 §5.9 缺口①③④ / §5.5;recall 与 recallHybrid 共用,不另起第二套打分;
+   * 与 SQLite #finalizeCandidates 零漂移):联想扩散 → 归一融合 → kind 调制 → 门控/排序/截断 → 检索即强化。
+   */
+  #finalizeCandidates(
+    candById: Map<number, Cand>,
+    tokens: readonly string[],
+    kindFilter: Set<MemoryKind> | undefined,
+    pad: Pad | undefined,
+    now: number,
+    limit: number,
+    weights: RecallSignalWeights = this.#cfg.recallSignalWeights,
+  ): readonly MemoryRecord[] {
+    // —— 联想扩散(承 §5.9 缺口①):从已入池候选沿邻接图 1..maxHops 跳带入额外候选 ——
+    const hopOf = this.#spread([...candById.keys()], this.#cfg.associationMaxHops);
+    for (const [id, hop] of hopOf) {
+      if (candById.has(id)) continue; // 已是一阶/向量命中,不重复。
+      const r = this.#byIdIndex.get(id);
+      if (r === undefined) continue;
+      // 按 kind 分路(承 §5.9 缺口④):联想带入的旁支若不在过滤集内也跳过(分路一致);与 SQLite 一致。
+      if (kindFilter !== undefined && !kindFilter.has(r.memoryKind)) continue;
+      const rawHits = tokens.reduce((n, t) => (r.normalized.includes(t) ? n + 1 : n), 0);
+      candById.set(id, {
+        r,
+        raw: this.#baseSignals(r, now, pad, {
+          keyword: rawHits > 0 ? { present: true, value: rawHits } : { present: false, value: 0 },
+          // 联想分按跳数衰减(hop=1→decay、hop=2→decay²;承 §5.9 缺口①)。
+          association: { present: true, value: hopDecay(hop, this.#cfg.associationHopDecay) },
+        }),
+      });
+    }
+
+    // —— 缺口③:候选集尺度 min-max 归一 + 可配权重融合(单一权威公式,与 SQLite 零漂移)——
+    const cands = [...candById.values()];
+    const fused = normalizeAndFuse(cands.map((c) => c.raw), weights);
+    // kind 权重调制(承 §5.9 缺口④):融合分 × 该候选 kind 权重(core>semantic>episodic 可配);与 SQLite 一致。
+    // 乘性调制不改变"谁能进池"(零仍零、非零仍非零),仅给分层不同分量(承 §5.5)。
+    const scored = cands
+      .map((c, i) => ({
+        r: c.r,
+        score: fused[i]! * memoryKindWeight(c.r.memoryKind, this.#cfg.memoryKindWeights),
+      }))
+      .filter((s) => s.score > 0); // 零信号门控只丢全零(任一路在场即进池,不学 mem0 硬丢,§5.5)。
+    scored.sort((a, b) => b.score - a.score || b.r.hits - a.r.hits || b.r.id - a.r.id);
+    const top = scored.slice(0, limit).map((s) => s.r);
+    // 检索即强化:只对实际返回的 top-N 升 access_count/importance、更新 last_accessed(被想起→记得牢,§5.5)。
+    const out = top.map((r) => this.#toRecord(r));
     for (const r of top) {
       r.accessCount += 1;
       r.importance = reinforceImportance(r.importance, this.#cfg);
@@ -397,6 +449,165 @@ export class InMemoryMemoryStore implements MemoryStore {
         return;
       }
     }
+  }
+
+  setEmbedding(id: number, vector: readonly number[]): void {
+    if (vector.length === 0) return; // 空向量不写(保持未嵌入状态,镜像 SQLite)。
+    const r = this.#byIdIndex.get(id);
+    if (r === undefined) return; // 不存在 id 幂等不抛(承 §5.6)。
+    // 不透明存储语义:存副本(防外部数组后续被改;dim = 长度)。
+    r.embedding = [...vector];
+  }
+
+  /**
+   * 同步向量 KNN 内核(承 §5.6 接缝 7;与 SQLite #vectorKnn 零漂移):对有 embedding 的记忆做暴力 cosine,
+   * **维度不一致跳过(不抛)**,候选封顶 `vectorKnnCandidateCap`,按相似度降序(同分 id 兜底)。
+   */
+  #vectorKnn(
+    vector: readonly number[],
+    kindOptions: RecallKindOptions | undefined,
+    cap: number = this.#cfg.vectorKnnCandidateCap,
+  ): { r: MutableRecord; sim: number }[] {
+    if (vector.length === 0) return [];
+    const kindFilter =
+      kindOptions?.kinds !== undefined && kindOptions.kinds.length > 0
+        ? new Set<MemoryKind>(kindOptions.kinds)
+        : undefined;
+    // 候选封顶:按近因优先(last_seen 降序、id 兜底)取前 cap 个有 embedding 的记忆(与 SQLite ORDER BY 一致)。
+    // weighted 混合召回传更大 cap 做"融合前 over-fetch"(融合后再按 vectorKnnCandidateCap 收口)。
+    const withEmb = [...this.#memories.values()].filter((r) => r.embedding !== undefined);
+    withEmb.sort((a, b) => b.lastSeenAtMs - a.lastSeenAtMs || b.id - a.id);
+    const capped = withEmb.slice(0, cap);
+    const out: { r: MutableRecord; sim: number }[] = [];
+    for (const r of capped) {
+      if (kindFilter !== undefined && !kindFilter.has(r.memoryKind)) continue;
+      const emb = r.embedding!;
+      if (emb.length !== vector.length) continue; // 维度不一致跳过(不抛,承硬约束)。
+      out.push({ r, sim: cosineSimilarity(vector, emb) });
+    }
+    out.sort((a, b) => b.sim - a.sim || b.r.id - a.r.id);
+    return out;
+  }
+
+  recallByVector(
+    vector: readonly number[],
+    limit: number = this.#cfg.recallLimit,
+    opts: RecallByVectorOptions = {},
+  ): readonly MemoryRecord[] {
+    return this.#vectorKnn(vector, opts.kindOptions)
+      .slice(0, limit)
+      .map((c) => this.#toRecord(c.r));
+  }
+
+  recallHybrid(query: string, opts: RecallHybridOptions = {}): readonly MemoryRecord[] {
+    const limit = opts.limit ?? this.#cfg.recallLimit;
+    // 无 queryVector → 关键词快路径,逐字复用 recall(承 §5.5 末「🔴 非阻塞召回」快路径下限)。
+    if (opts.queryVector === undefined || opts.queryVector.length === 0) {
+      return this.recall(query, limit, opts.pad, opts.kindOptions);
+    }
+    const tokens = tokenize(query, this.#cfg.normalize);
+    const kindFilter =
+      opts.kindOptions?.kinds !== undefined && opts.kindOptions.kinds.length > 0
+        ? new Set<MemoryKind>(opts.kindOptions.kinds)
+        : undefined;
+    const now = this.#now();
+    const pad = opts.pad;
+
+    // —— 关键词路:候选 + 原始命中数(融合前 over-fetch,不预截断)——
+    const keywordHitById = new Map<number, number>();
+    if (tokens.length > 0) {
+      for (const r of this.#memories.values()) {
+        if (kindFilter !== undefined && !kindFilter.has(r.memoryKind)) continue;
+        const rawHits = tokens.reduce((n, t) => (r.normalized.includes(t) ? n + 1 : n), 0);
+        if (rawHits === 0) continue;
+        keywordHitById.set(r.id, rawHits);
+      }
+    }
+
+    // —— 向量路:KNN(cosine 降序;维度不符已跳过)。融合前 over-fetch:cap 放大,融合后才收口 ——
+    const overFetchCap =
+      this.#cfg.fusionMode === 'weighted'
+        ? Number.MAX_SAFE_INTEGER
+        : this.#cfg.vectorKnnCandidateCap;
+    const vectorHits = this.#vectorKnn(opts.queryVector, opts.kindOptions, overFetchCap);
+    const simById = new Map<number, number>();
+    for (const v of vectorHits) simById.set(v.r.id, v.sim);
+
+    // —— 候选池:关键词路 ∪ 向量路并集都入池(任一路在场即进池,承 §5.5;不硬门控丢项)——
+    const candById = new Map<number, Cand>();
+    const allIds = new Set<number>([...keywordHitById.keys(), ...simById.keys()]);
+
+    if (this.#cfg.fusionMode === 'rrf') {
+      // —— 备选:RRF 按名次融合(承 §5.9;默认不走)——
+      const keywordRanked = [...keywordHitById.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+        .map(([id]) => id);
+      const vectorRanked = vectorHits.map((v) => v.r.id);
+      const rrf = reciprocalRankFusion([keywordRanked, vectorRanked], this.#cfg.rrfK);
+      const rrfMax = 2 / (this.#cfg.rrfK + 1);
+      for (const id of allIds) {
+        const r = this.#byIdIndex.get(id);
+        if (r === undefined) continue;
+        const rawHits = keywordHitById.get(id) ?? 0;
+        const rrfScore = rrf.get(id) ?? 0;
+        candById.set(id, {
+          r,
+          raw: this.#baseSignals(r, now, pad, {
+            keyword: rawHits > 0 ? { present: true, value: rawHits } : { present: false, value: 0 },
+            vector: { present: true, value: rrfMax > 0 ? Math.min(rrfScore / rrfMax, 1) : 0 },
+          }),
+        });
+      }
+      return this.#finalizeCandidates(candById, tokens, kindFilter, pad, now, limit);
+    }
+
+    // —— 默认 weighted:向量相似度当又一路 min-max 归一信号,折进既有加性归一(参考 Nexus 范式)——
+    for (const id of allIds) {
+      const r = this.#byIdIndex.get(id);
+      if (r === undefined) continue;
+      const rawHits = keywordHitById.get(id) ?? 0;
+      const sim = simById.get(id);
+      candById.set(id, {
+        r,
+        raw: this.#baseSignals(r, now, pad, {
+          keyword: rawHits > 0 ? { present: true, value: rawHits } : { present: false, value: 0 },
+          // 向量路:原始相似度入场(min-max 归一与加权融合在 normalizeAndFuse 用 hybridSignalWeights 做)。
+          vector: sim !== undefined ? { present: true, value: sim } : { present: false, value: 0 },
+        }),
+      });
+    }
+    // 融合前 over-fetch、融合后才按 vectorKnnCandidateCap 收口(承用户拍板);weighted 用向量偏重权重。
+    const capped = this.#capCandidates(candById, this.#cfg.vectorKnnCandidateCap);
+    return this.#finalizeCandidates(capped, tokens, kindFilter, pad, now, limit, this.#cfg.hybridSignalWeights);
+  }
+
+  /**
+   * 候选池收口(承用户拍板「融合后才按 vectorKnnCandidateCap 封顶」;与 SQLite #capCandidates 零漂移):
+   * 按候选自身向量/关键词强度粗排取前 cap,限后续工作集规模;精排仍由 #finalizeCandidates 归一融合决定。
+   */
+  #capCandidates(candById: Map<number, Cand>, cap: number): Map<number, Cand> {
+    if (candById.size <= cap) return candById;
+    const ranked = [...candById.values()].sort((a, b) => {
+      const av = a.raw.vector.present ? a.raw.vector.value : 0;
+      const bv = b.raw.vector.present ? b.raw.vector.value : 0;
+      const ak = a.raw.keyword.present ? a.raw.keyword.value : 0;
+      const bk = b.raw.keyword.present ? b.raw.keyword.value : 0;
+      return bv - av || bk - ak || a.r.id - b.r.id;
+    });
+    const out = new Map<number, Cand>();
+    for (const c of ranked.slice(0, cap)) out.set(c.r.id, c);
+    return out;
+  }
+
+  memoriesNeedingEmbedding(
+    limit: number = this.#cfg.recallLimit,
+  ): readonly { readonly id: number; readonly text: string }[] {
+    // embedding 为 undefined 即尚未嵌入(承 §5.6);按 id 升序(先写先补),受 limit 约束。
+    const pending = [...this.#memories.values()]
+      .filter((r) => r.embedding === undefined)
+      .sort((a, b) => a.id - b.id)
+      .slice(0, limit);
+    return pending.map((r) => ({ id: r.id, text: r.text }));
   }
 
   getState(key: string): string | undefined {

@@ -60,6 +60,13 @@ export interface MemoryConfig {
    */
   readonly recallSignalWeights: RecallSignalWeights;
   /**
+   * `recallHybrid` 在 `fusionMode:'weighted'` 下的各路融合权重(承用户拍板/Nexus 范式):
+   * 向量路偏重(默认 vec 0.6 / kw 0.4,情感/强度/联想各 1 不变),其余路沿用同一套 min-max 归一加性框架。
+   * 与 `recallSignalWeights`(纯关键词 `recall` 用,默认等权)分开,免改动快路径既有打分(向后兼容)。
+   * 行为即配置(§3.2),可调。
+   */
+  readonly hybridSignalWeights: RecallSignalWeights;
+  /**
    * 联想扩散最大跳数(承 §5.9 缺口①):召回一阶命中后沿实体邻接图扩展的跳数(1–2 跳最像人)。
    * 默认 2;设 0 关闭扩散(退化为纯一阶召回,向后兼容)。行为即配置(§3.2)。
    */
@@ -82,6 +89,26 @@ export interface MemoryConfig {
    * 权重非负;默认 core 最高、semantic 次之、episodic 基线(可调,承行为即配置 §3.2)。
    */
   readonly memoryKindWeights: MemoryKindWeights;
+  /**
+   * 向量 KNN 候选封顶(承 §5.5 末「🔴 非阻塞召回」/ §5.6 接缝 7):JS 暴力 cosine 是同步、占单线程,
+   * 1 万×1024 维 ~75ms 会拖住音频管线 → 候选集封顶,量小直接暴力,规模增长再切 worker/LanceDB。
+   * 默认 1000(端侧单用户量级足够,行为即配置 §3.2,无 magic number)。
+   */
+  readonly vectorKnnCandidateCap: number;
+  /**
+   * 混合召回"关键词 vs 向量"两路的融合模式(承 §5.5 / §5.9;用户拍板采用参考共识/Nexus 范式):
+   * - `'weighted'`(默认):向量相似度当作**又一路 min-max 归一信号**,折进既有加性归一打分
+   *   (与关键词/强度/情感/联想同一套加性框架,slice ③ 已落地)——无单独排名融合阶段。
+   * - `'rrf'`(备选):关键词路 + 向量路按名次做 RRF(k=`rrfK`)融合,再接既有归一/联想/kind。
+   * 行为即配置(§3.2),可切换;RRF 实现保留但默认不走。
+   */
+  readonly fusionMode: 'weighted' | 'rrf';
+  /**
+   * RRF(Reciprocal Rank Fusion)的常数 k(承 §5.9;仅 `fusionMode:'rrf'` 备选分支用):
+   * 融合分 `Σ 1/(k + rank)`(rank 从 1 起)。k 越大越削弱头部名次优势(更平滑)。
+   * 默认 60(信息检索界惯用值,轻且稳;行为即配置 §3.2,无 magic number)。
+   */
+  readonly rrfK: number;
 }
 
 /** 各分层的召回权重(承 §5.9 缺口④);值非负。 */
@@ -93,8 +120,10 @@ export type MemoryKindWeights = Readonly<Record<MemoryKind, number>>;
  * - `strength`:记忆强度 `importance × decay`(承 §5.5)。
  * - `emotion`:情感共振(PAD 匹配,承 §5.5;仅调用方传 PAD 时在场)。
  * - `association`:联想扩散分(承 §5.9 缺口①;按跳数衰减,仅扩散命中在场)。
+ * - `vector`:语义/相关性分(承 §5.5 / §5.9 RRF;仅 `recallHybrid` 带 queryVector 时在场,
+ *   值为关键词路与向量路的 **RRF 名次共识分**归一到 [0,1];快路径 `recall` 该路恒缺席,默认行为不变)。
  */
-export type RecallSignalKind = 'keyword' | 'strength' | 'emotion' | 'association';
+export type RecallSignalKind = 'keyword' | 'strength' | 'emotion' | 'association' | 'vector';
 
 /** 各路信号权重(承 §5.9 缺口③);默认等权。值非负。 */
 export type RecallSignalWeights = Readonly<Record<RecallSignalKind, number>>;
@@ -122,7 +151,10 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
   // §5.5 上下文窗口前后各 N 条(行为即配置,§3.2):默认 5(对齐 findings §4③)。
   contextWindowSize: 5,
   // §5.9 缺口③ 多信号 min-max 归一融合权重(行为即配置,§3.2):默认等权(全 1)。
-  recallSignalWeights: { keyword: 1, strength: 1, emotion: 1, association: 1 },
+  recallSignalWeights: { keyword: 1, strength: 1, emotion: 1, association: 1, vector: 1 },
+  // 混合召回 weighted 融合的向量偏重权重(参考 Nexus 范式;行为即配置 §3.2,可调):
+  // 向量路 0.6 / 关键词路 0.4(语义重于字面命中),情感/强度/联想各 1 不变。
+  hybridSignalWeights: { keyword: 0.4, strength: 1, emotion: 1, association: 1, vector: 0.6 },
   // §5.9 缺口① 联想扩散(行为即配置,§3.2):默认 2 跳、每跳 ×0.5 衰减(1–2 跳最像人)。
   associationMaxHops: 2,
   associationHopDecay: 0.5,
@@ -130,6 +162,12 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
   // 召回 kind 权重 core>semantic>episodic(核心档优先注入语义,稳定事实略重于零散叙事)。
   defaultMemoryKind: 'episodic',
   memoryKindWeights: { episodic: 1, semantic: 1.2, core: 1.5 },
+  // §5.5 末「🔴 非阻塞召回」/ §5.6 接缝 7 向量存取(行为即配置,§3.2):
+  // KNN 候选封顶 1000(端侧单用户量级,暴力 cosine 不卡事件循环);
+  // 融合默认 weighted(向量当又一路 min-max 归一信号,参考 Nexus 范式);RRF(k=60)留作可选备选。
+  vectorKnnCandidateCap: 1000,
+  fusionMode: 'weighted',
+  rrfK: 60,
 };
 
 /** 合并用户覆盖与默认值。 */
@@ -323,10 +361,18 @@ export interface RawRecallSignals {
   readonly strength: RecallSignal;
   readonly emotion: RecallSignal;
   readonly association: RecallSignal;
+  /** 语义/相关性路(承 §5.9 RRF;仅 recallHybrid 带 queryVector 时在场,快路径恒缺席,向后兼容)。 */
+  readonly vector: RecallSignal;
 }
 
 /** 信号种类的稳定遍历序(融合确定性;与 RecallSignalKind 对齐)。 */
-const SIGNAL_KINDS: readonly RecallSignalKind[] = ['keyword', 'strength', 'emotion', 'association'];
+const SIGNAL_KINDS: readonly RecallSignalKind[] = [
+  'keyword',
+  'strength',
+  'emotion',
+  'association',
+  'vector',
+];
 
 /**
  * 候选集内单路 min-max 归一(承 §5.9 缺口③):把该路所有「在场」候选值线性映射到 [0,1]。
@@ -373,6 +419,7 @@ export function normalizeAndFuse(
     strength: minMaxNormalizeColumn(candidates.map((c) => c.strength)),
     emotion: minMaxNormalizeColumn(candidates.map((c) => c.emotion)),
     association: minMaxNormalizeColumn(candidates.map((c) => c.association)),
+    vector: minMaxNormalizeColumn(candidates.map((c) => c.vector)),
   };
   const out: number[] = new Array(n).fill(0);
   for (let i = 0; i < n; i++) {
@@ -421,6 +468,74 @@ export function entityKeys(
 export function hopDecay(hop: number, decay: number): number {
   if (hop <= 0) return 1;
   return decay ** hop;
+}
+
+// —— §5.6 接缝 7 / §5.5 末:向量存取 + 同步混合召回的纯函数地基(单一权威,两 store 共用)——
+// 向量以 **Float32 BLOB 不透明存储**(承 §5.9 接缝预留⑤:换 embedder 后台 re-embed 写回同列,免 schema 迁移);
+// KNN 用 JS 暴力 cosine(不引 sqlite-vec 原生扩展);关键词路 + 向量路用 RRF 按名次融合。全部同步、纯函数。
+
+/**
+ * 把记忆向量编码为 Float32 字节(单一权威,承 §5.6 接缝 7 / §5.9 接缝预留⑤):
+ * 写入 BLOB 列前调用;**不透明存储**——memory 不解释向量语义,仅按 dim 存取。
+ * 返回底层 ArrayBuffer 的 Uint8Array 视图(供 SQLite 绑定 BLOB)。
+ */
+export function encodeEmbedding(vector: readonly number[]): Uint8Array {
+  const f32 = Float32Array.from(vector);
+  return new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength);
+}
+
+/**
+ * 把 BLOB 字节解回向量(单一权威,承 §5.6 接缝 7):读列时调用。
+ * 字节数须为 4 的倍数(Float32);非法/空字节返回空数组(读列兜底,调用方据 dim 不一致跳过)。
+ * 复制到对齐缓冲再读,规避底层 BLOB 缓冲非 4 字节对齐导致的 Float32Array 构造异常。
+ */
+export function decodeEmbedding(bytes: Uint8Array): number[] {
+  if (bytes.length === 0 || bytes.length % 4 !== 0) return [];
+  const copy = new Uint8Array(bytes.length);
+  copy.set(bytes);
+  return [...new Float32Array(copy.buffer)];
+}
+
+/**
+ * 余弦相似度(单一权威公式,承 §5.5 语义检索一路):`a·b / (‖a‖·‖b‖)`,落在 [-1,1]。
+ * 维度不一致或任一为零向量 → 返回 0(无意义比较视作不相似;调用方据此不入候选,不抛)。
+ */
+export function cosineSimilarity(a: readonly number[], b: readonly number[]): number {
+  if (a.length === 0 || a.length !== b.length) return 0;
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    dot += x * y;
+    na += x * x;
+    nb += y * y;
+  }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+/**
+ * RRF(Reciprocal Rank Fusion)按名次融合两路排名(单一权威,承 §5.9「RRF 仅作相关性一路线索」):
+ * - 入参为若干**已按各自相关性降序排好**的 id 名次列表(如关键词路、向量路);
+ * - 每个 id 的融合分 = `Σ 1/(k + rank)`(rank 从 1 起;某路未出现则该路不贡献,**不硬门控丢项**);
+ * - 返回 `id → rrfScore` 映射,供调用方把"关键词 vs 向量"两路的名次共识接入既有归一/联想/kind 调制。
+ * RRF 只融合"名次",不碰各路原始分量纲,天然把异构两路压到可比尺度(轻且稳,§5.9)。
+ */
+export function reciprocalRankFusion(
+  rankedLists: readonly (readonly number[])[],
+  k: number,
+): Map<number, number> {
+  const score = new Map<number, number>();
+  for (const list of rankedLists) {
+    for (let i = 0; i < list.length; i++) {
+      const id = list[i]!;
+      const rank = i + 1; // rank 从 1 起。
+      score.set(id, (score.get(id) ?? 0) + 1 / (k + rank));
+    }
+  }
+  return score;
 }
 
 // —— 情感共振:PAD/Russell 扇区常量矩阵(O(1) 查表,承 §5.5)——
