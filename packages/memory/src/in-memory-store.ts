@@ -8,7 +8,10 @@ import type {
   StoredMessage,
 } from './types';
 import {
+  decayFactor,
   makePrimaryPerson,
+  recallScore,
+  reinforceImportance,
   resolveAttribution,
   resolveMemoryConfig,
   tokenize,
@@ -27,6 +30,14 @@ interface MutableRecord {
   subject: MemorySubject;
   /** 人物归属(承 §5.3b);agent 主语为 undefined。 */
   personId: string | undefined;
+  /** 重要性(承 §5.5);检索即强化随命中升高。 */
+  importance: number;
+  /** 累计被召回返回(被想起)次数(承 §5.5)。 */
+  accessCount: number;
+  /** 最近一次被召回返回的时间(承 §5.5 检索即强化审计)。 */
+  lastAccessedAtMs: number;
+  /** 是否核心记忆(承 §5);true 则免于时间衰减。 */
+  pinned: boolean;
 }
 
 export interface InMemoryMemoryStoreOptions {
@@ -98,6 +109,11 @@ export class InMemoryMemoryStore implements MemoryStore {
       hits: 1,
       subject,
       personId,
+      // 评分列初值(承 §5.5):importance 缺省配置初值、access_count=0、last_accessed=创建时、pinned 缺省 false。
+      importance: rec.importance ?? this.#cfg.initialImportance,
+      accessCount: 0,
+      lastAccessedAtMs: at,
+      pinned: rec.pinned === true,
     });
   }
 
@@ -108,8 +124,17 @@ export class InMemoryMemoryStore implements MemoryStore {
     const hits = [...this.#memories.values()].filter((r) =>
       tokens.some((t) => r.normalized.includes(t)),
     );
-    hits.sort((a, b) => b.lastSeenAtMs - a.lastSeenAtMs || b.hits - a.hits || b.id - a.id);
-    return hits.slice(0, limit).map((r) => ({
+    const now = this.#now();
+    // 融合得分排序(承 §5.5):用 config.ts 单一权威公式算 score = importance × decay,与 SQLite 零漂移。
+    // 衰减用强化前的值算,保证本次返回排序确定(强化只影响后续召回)。
+    const scored = hits.map((r) => ({
+      r,
+      score: recallScore(r.importance, decayFactor(r.lastSeenAtMs, now, r.pinned, this.#cfg)),
+    }));
+    scored.sort((a, b) => b.score - a.score || b.r.hits - a.r.hits || b.r.id - a.r.id);
+    const top = scored.slice(0, limit).map((s) => s.r);
+    // 检索即强化:只对实际返回的 top-N 升 access_count/importance、更新 last_accessed(被想起→记得牢,§5.5)。
+    const out = top.map((r) => ({
       id: r.id,
       text: r.text,
       kind: r.kind,
@@ -118,7 +143,16 @@ export class InMemoryMemoryStore implements MemoryStore {
       hits: r.hits,
       subject: r.subject,
       personId: r.personId,
+      importance: r.importance,
+      accessCount: r.accessCount,
+      pinned: r.pinned,
     }));
+    for (const r of top) {
+      r.accessCount += 1;
+      r.importance = reinforceImportance(r.importance, this.#cfg);
+      r.lastAccessedAtMs = now;
+    }
+    return out;
   }
 
   getState(key: string): string | undefined {

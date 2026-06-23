@@ -19,6 +19,21 @@ export interface MemoryConfig {
   readonly primaryPersonId: string;
   /** 主用户名(承 §5.3b):seed 花名册时写入,未配置用内置默认。 */
   readonly primaryPersonName: string;
+  /**
+   * 时间衰减半衰期(天,承 §5.5):衰减 `0.5^(days/H)` 的 H。
+   * 行为即配置,无 magic number;默认 30 天(§5.5)。pinned 记忆免衰不受此影响。
+   */
+  readonly halfLifeDays: number;
+  /**
+   * 检索即强化系数 k(承 §5.5):命中升 importance `i += k·(1-i)`。
+   * 单调趋近 1 但不超过 1;默认 0.18(OpenMemory `sal+=0.18·(1-sal)`)。
+   */
+  readonly reinforceK: number;
+  /**
+   * 新记忆的重要性初值(承 §5.5 / §3.2):写入与旧库 backfill 都用它。
+   * 落在 [0,1];默认 0.5。
+   */
+  readonly initialImportance: number;
 }
 
 /** 默认规范化:去首尾空白、小写、空白折叠。去重与召回共用此规则。 */
@@ -34,6 +49,10 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
   normalize: defaultNormalize,
   primaryPersonId: 'primary',
   primaryPersonName: '主人',
+  // §5.5 单一权威衰减/强化参数:半衰期 30 天、强化系数 0.18、重要性初值 0.5(行为即配置,§3.2)。
+  halfLifeDays: 30,
+  reinforceK: 0.18,
+  initialImportance: 0.5,
 };
 
 /** 合并用户覆盖与默认值。 */
@@ -74,4 +93,44 @@ export function tokenize(query: string, normalize: (t: string) => string): strin
   const norm = normalize(query);
   if (norm.length === 0) return [];
   return norm.split(' ').filter((t) => t.length > 0);
+}
+
+// —— 衰减 / 重要性 / 检索即强化:单一权威公式(承 §5.5)——
+// SQLite 与 InMemory 两实现都调用这些纯函数,杜绝两后端各写一遍导致漂移(§3.2 单一权威公式)。
+
+/** 一天的毫秒数(衰减 days 换算的唯一来源,杜绝散落 magic number)。 */
+export const MS_PER_DAY = 86_400_000;
+
+/**
+ * 时间衰减因子(单一权威公式,承 §5.5):`0.5^(days/H)`,惰性实时算、不写回。
+ * pinned 记忆免衰(恒 1,承 §5 核心永不忘);days 取非负(时钟回拨/未来时间不致放大)。
+ */
+export function decayFactor(
+  lastSeenAtMs: number,
+  now: number,
+  pinned: boolean,
+  cfg: Pick<MemoryConfig, 'halfLifeDays'>,
+): number {
+  if (pinned) return 1;
+  const days = Math.max(0, (now - lastSeenAtMs) / MS_PER_DAY);
+  return 0.5 ** (days / cfg.halfLifeDays);
+}
+
+/**
+ * 检索即强化:`importance := importance + k·(1 - importance)`(单一权威公式,承 §5.5)。
+ * 单调趋近 1 但不超过 1(`1-importance` 随接近 1 衰减增量),天然封顶无需 clamp。
+ */
+export function reinforceImportance(
+  importance: number,
+  cfg: Pick<MemoryConfig, 'reinforceK'>,
+): number {
+  return importance + cfg.reinforceK * (1 - importance);
+}
+
+/**
+ * 召回融合得分(单一权威融合式,承 §5.5):`score = importance × decay`。
+ * P1 只含重要性 × 时间衰减;P2 接入向量/FTS/情感分时在此单点扩展,不另起第二套。
+ */
+export function recallScore(importance: number, decay: number): number {
+  return importance * decay;
 }

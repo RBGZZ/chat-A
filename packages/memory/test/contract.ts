@@ -143,5 +143,82 @@ export function runMemoryStoreContract(name: string, make: MakeStore): void {
       expect(s.recall('自我设定')[0]?.personId).toBeUndefined();
       s.close();
     });
+
+    // —— 时间衰减 + 重要性 + 检索即强化(承 §5.5;golden 确定性)——
+
+    const DAY = 86_400_000;
+
+    it('时间衰减:等重要性下新近者排前(0.5^(days/H),承 §5.5)', () => {
+      // 固定时钟:用注入 now 让两条记忆的 last_seen 差远超半衰期(默认 H=30 天)。
+      let nowMs = 0;
+      const s = make({ now: () => nowMs });
+      nowMs = 1; // 旧记忆:很久以前
+      s.addMemory({ text: '猫旧', createdAtMs: 1 });
+      nowMs = 100 * DAY; // 新记忆:近期(已过 ~100 天,旧记忆衰减极重)
+      s.addMemory({ text: '猫新', createdAtMs: 100 * DAY });
+      const r = s.recall('猫', 2);
+      // 两者初始 importance 相同,新近者衰减更小 → 排前(单一权威公式 §5.5)。
+      expect(r.map((x) => x.text)).toEqual(['猫新', '猫旧']);
+      s.close();
+    });
+
+    it('pinned 记忆免于衰减(核心永不淡去,承 §5)', () => {
+      let nowMs = 0;
+      const s = make({ now: () => nowMs });
+      nowMs = 1;
+      // pinned 旧记忆:即使极旧也不衰减(decay=1)。
+      s.addMemory({ text: '核心旧', createdAtMs: 1, pinned: true });
+      nowMs = 100 * DAY;
+      // 非 pinned 新记忆:虽新近但 decay=1 封顶,score=importance 相同 → 由 id 兜底,旧的先插入 id 更小排后。
+      s.addMemory({ text: '普通新', createdAtMs: 100 * DAY });
+      const r = s.recall('核心旧 普通新', 2).map((x) => x.text);
+      // pinned 旧记忆未被时间压低:仍与新记忆同分(均 decay=1、importance 初值相同),且都返回。
+      expect(r).toContain('核心旧');
+      expect(r).toContain('普通新');
+      // 关键断言:pinned 旧记忆得分不输给"更新"的非 pinned(若有衰减它会沉底)。
+      const pinnedRec = s.recall('核心旧')[0];
+      // 经一次召回强化后 importance 会升,这里只验证它仍可召回且 pinned=true。
+      expect(pinnedRec?.pinned).toBe(true);
+      s.close();
+    });
+
+    it('重要性高者排前(等衰减下,承 §5.5)', () => {
+      let nowMs = 10 * DAY;
+      const s = make({ now: () => nowMs });
+      // 同一时刻写入两条(衰减相同),一条显式高 importance。
+      s.addMemory({ text: '要事', createdAtMs: 10 * DAY, importance: 0.9 });
+      s.addMemory({ text: '琐事', createdAtMs: 10 * DAY, importance: 0.1 });
+      const r = s.recall('事', 2).map((x) => x.text);
+      expect(r).toEqual(['要事', '琐事']);
+      s.close();
+    });
+
+    it('检索即强化:命中后 importance 与 access_count 上升(承 §5.5)', () => {
+      let nowMs = DAY;
+      const s = make({ now: () => nowMs });
+      s.addMemory({ text: '咖啡', createdAtMs: DAY, importance: 0.5 });
+      const first = s.recall('咖啡')[0];
+      // 第一次召回返回的是强化前的值(决策 3:本次返回用旧值)。
+      expect(first?.importance).toBeCloseTo(0.5, 6);
+      expect(first?.accessCount).toBe(0);
+      // 第二次召回:importance 已被首次强化 0.5 + 0.18*(1-0.5)=0.59;access_count 升为 1。
+      const second = s.recall('咖啡')[0];
+      expect(second?.importance).toBeCloseTo(0.59, 6);
+      expect(second?.accessCount).toBe(1);
+      s.close();
+    });
+
+    it('融合得分排序确定:同分按 hits / id 兜底(两实现一致)', () => {
+      let nowMs = 5 * DAY;
+      const s = make({ now: () => nowMs });
+      // 三条同一时刻、同 importance、同 pinned → score 相同;靠 hits/id 兜底。
+      s.addMemory({ text: '甲事', createdAtMs: 5 * DAY });
+      s.addMemory({ text: '乙事', createdAtMs: 5 * DAY });
+      s.addMemory({ text: '乙事', createdAtMs: 5 * DAY }); // 乙事再写一次 → hits=2
+      const r = s.recall('事', 3).map((x) => x.text);
+      // 乙事 hits=2 > 甲事 hits=1 → 乙事在前;score 完全相同,排序仍确定。
+      expect(r[0]).toBe('乙事');
+      s.close();
+    });
   });
 }

@@ -138,6 +138,46 @@ describe('SqliteMemoryStore 持久化 / 迁移 / 降级', () => {
     check.close();
   });
 
+  it('v3→v4 迁移:存量记忆补默认评分列(importance/access_count/pinned),零丢失(§5.5/§3.2)', () => {
+    const path = newPath();
+    // 造一个 v3 库:memories(带 subject/person_id,无评分列)+ people + 两行存量记忆 + schema_version=3。
+    const v3 = new DatabaseSync(path);
+    v3.exec(`CREATE TABLE memory_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+    v3.exec(`CREATE TABLE memories(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, normalized_text TEXT NOT NULL UNIQUE,
+      kind TEXT, created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+      hits INTEGER NOT NULL DEFAULT 1, source_session TEXT, subject TEXT, person_id TEXT);`);
+    v3.exec(`CREATE TABLE kv_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+    v3.exec(`CREATE TABLE people(
+      person_id TEXT PRIMARY KEY, name TEXT NOT NULL, is_primary INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL, added_by TEXT NOT NULL, relationship_state TEXT, voiceprint_ref TEXT);`);
+    v3.prepare(`INSERT INTO people(person_id, name, is_primary, status, added_by) VALUES('primary','主人',1,'primary','user')`).run();
+    v3.prepare(`INSERT INTO memories(text, normalized_text, created_at, last_seen_at, subject, person_id) VALUES(?,?,?,?,?,?)`).run('v3记忆甲', 'v3记忆甲', 1, 1, 'person', 'primary');
+    v3.prepare(`INSERT INTO memories(text, normalized_text, created_at, last_seen_at, subject, person_id) VALUES(?,?,?,?,?,?)`).run('v3记忆乙', 'v3记忆乙', 2, 2, 'person', 'primary');
+    v3.prepare(`INSERT INTO memory_meta(key, value) VALUES('schema_version', '3')`).run();
+    v3.close();
+
+    // 用自定义初值打开(行为即配置,§3.2):验证 backfill 用注入初值而非硬编码。
+    const store = new SqliteMemoryStore({ path, config: { initialImportance: 0.42 } });
+    // 零丢失:两条存量记忆仍可召回。
+    expect(store.recall('v3记忆甲').map((r) => r.text)).toEqual(['v3记忆甲']);
+    store.close();
+
+    const check = new DatabaseSync(path);
+    // schema 升至 v4(= CURRENT_SCHEMA_VERSION)。
+    const v = check.prepare(`SELECT value FROM memory_meta WHERE key='schema_version'`).get();
+    expect(Number(v?.['value'])).toBe(CURRENT_SCHEMA_VERSION);
+    // 历史行补默认:importance=配置初值、access_count=0、pinned=0(注意:首次召回会强化一行,故查未被召回的乙)。
+    const yi = check.prepare(`SELECT importance, access_count, pinned, last_accessed FROM memories WHERE normalized_text='v3记忆乙'`).get();
+    expect(Number(yi?.['importance'])).toBeCloseTo(0.42, 6);
+    expect(Number(yi?.['access_count'])).toBe(0);
+    expect(Number(yi?.['pinned'])).toBe(0);
+    // 无 importance IS NULL 残留(全部 backfill)。
+    const nullCount = check.prepare(`SELECT COUNT(*) AS c FROM memories WHERE importance IS NULL`).get();
+    expect(Number(nullCount?.['c'])).toBe(0);
+    check.close();
+  });
+
   it('全新库初始化即 seed 主用户花名册(承 §5.3b)', () => {
     const path = newPath();
     const store = new SqliteMemoryStore({ path });
