@@ -95,6 +95,38 @@ describe('XIAOXUE_SEED.selfNotions: 默认种子自带非空观点,可被命中(
   });
 });
 
+describe('DefaultStanceDetector: 立场强度调制(§7#3 演化)', () => {
+  // 缺省强度立场(无 strength)按基线处理 → 命中行为与当前一致(复用现有断言意图)。
+  it('缺省强度立场:低 assertiveness 仍命中(不被压制,行为不变)', async () => {
+    const r = await new DefaultStanceDetector().detect({
+      userText: '我觉得速溶咖啡挺好喝的',
+      selfNotions: NOTIONS, // 无 strength
+      assertiveness: 0.3, // 高于 floor、低于 lowStrengthAssert
+    });
+    expect(r.notions).toHaveLength(1); // 缺省强度=基线>strengthFloor → 不压制
+  });
+
+  it('显式低强度立场:低 assertiveness → 被压制(更趋沉默)', async () => {
+    const weak: SelfNotion[] = [{ topic: ['咖啡'], position: '手冲值得。', strength: 0.1 }];
+    const r = await new DefaultStanceDetector().detect({
+      userText: '速溶咖啡更方便',
+      selfNotions: weak,
+      assertiveness: 0.3, // < STANCE_LOW_STRENGTH_ASSERT(0.6)
+    });
+    expect(r.notions).toHaveLength(0); // 弱立场被压制
+  });
+
+  it('显式低强度立场:高 assertiveness → 照常表达', async () => {
+    const weak: SelfNotion[] = [{ topic: ['咖啡'], position: '手冲值得。', strength: 0.1 }];
+    const r = await new DefaultStanceDetector().detect({
+      userText: '速溶咖啡更方便',
+      selfNotions: weak,
+      assertiveness: 0.9, // ≥ STANCE_LOW_STRENGTH_ASSERT → 弱立场也照说
+    });
+    expect(r.notions).toHaveLength(1);
+  });
+});
+
 describe('LlmStanceDetector: 下标命中 + 失败降级', () => {
   it('合规下标 JSON → 对应观点', async () => {
     const provider = new FakeLlm('fake', { complete: '命中:\n```json\n[0]\n```' });
