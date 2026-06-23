@@ -26,6 +26,8 @@ import {
   emotionResonance,
   encodeEmbedding,
   entityKeys,
+  jaccardSimilarity,
+  lshBandKeys,
   makePrimaryPerson,
   memoryKindWeight,
   normalizeAndFuse,
@@ -36,6 +38,7 @@ import {
   resolveAttribution,
   resolveMemoryConfig,
   resolveMemoryKind,
+  ShingleCache,
   tokenize,
   windowRange,
   type MemoryConfig,
@@ -300,19 +303,44 @@ export class SqliteMemoryStore implements MemoryStore {
   readonly #cfg: MemoryConfig;
   readonly #now: () => number;
   readonly #onError: (err: unknown, op: string) => void;
+  /**
+   * LSH 去重前置索引(承 §5.8 / §5.10 B2):band 键 → 落该桶记忆 id 集合 + id → shingle 集合。
+   * **纯内存派生索引**(派生自 normalized_text,不持久化、免 schema 迁移;承 §5.6 语义索引是可重建派生):
+   * 构造时扫描存量 normalized_text 重建,addMemory 新建时增量挂桶。与 InMemory 实现同一规则(零漂移)。
+   */
+  readonly #lshBuckets = new Map<string, Set<number>>();
+  readonly #shingleById = new Map<number, Set<string>>();
+  /** shingle/签名 LRU 缓存(承 §5.10 B2,Graphiti 式;与 InMemory 共用同一纯函数,零漂移)。 */
+  readonly #shingleCache: ShingleCache;
 
   constructor(opts: SqliteMemoryStoreOptions) {
     this.#cfg = resolveMemoryConfig(opts.config);
     this.#now = opts.now ?? Date.now;
     this.#onError = opts.onError ?? ((err, op) => console.error(`[memory] ${op} 失败`, err));
+    this.#shingleCache = new ShingleCache(this.#cfg);
     this.#db = new DatabaseSync(opts.path);
     try {
       this.#db.exec('PRAGMA journal_mode=WAL;');
       this.#migrate();
+      // 迁移后重建 LSH 去重索引(承 §5.10 B2):扫描存量记忆 normalized_text 挂桶,把旧库纳入查重网。
+      this.#rebuildLshIndex();
     } catch (err) {
       // 初始化失败(如 schema 版本过高)必须关句柄,否则 Windows 会一直锁住 DB 文件。
       this.#db.close();
       throw err;
+    }
+  }
+
+  /**
+   * 重建 LSH 去重索引(承 §5.8 / §5.10 B2):构造时扫描全部存量记忆的 `id, normalized_text`,
+   * 按 MinHash band 键挂桶 + 存 shingle 集合(派生索引,不持久化;承 §5.6 可重建)。按 id 升序确定。
+   */
+  #rebuildLshIndex(): void {
+    const rows = this.#db
+      .prepare(`SELECT id, normalized_text FROM memories ORDER BY id ASC`)
+      .all() as { id: number; normalized_text: string }[];
+    for (const r of rows) {
+      this.#registerLsh(asNumber(r.id), asString(r.normalized_text));
     }
   }
 
@@ -411,7 +439,8 @@ export class SqliteMemoryStore implements MemoryStore {
     // 未闭合话题标记(承 §7#2):缺省 0(非未了事);closed_at 写 NULL(尚未闭合)。
     const openThread = rec.openThread === true ? 1 : 0;
     try {
-      // 去重:已存在等价文本则只增计数/刷新近因,不重复建联想边(防 dedup 反复增重,§5.9 缺口①)。
+      // —— LSH 去重前置(承 §5.8 / §5.10 B2)——
+      // ① 精确匹配快路径:规范化文本完全相等 → 只增计数/刷新近因,不重复建联想边(防 dedup 反复增重,§5.9 缺口①)。
       const existing = this.#db
         .prepare(`SELECT id FROM memories WHERE normalized_text = ?`)
         .get(normalized);
@@ -422,6 +451,14 @@ export class SqliteMemoryStore implements MemoryStore {
           .run(at, existingId);
         // 去重命中:返回被强化的那条 id(承 §5.6;不新建,补嵌时复用既有向量列)。
         return existingId;
+      }
+      // ② MinHash/LSH 候选 → 精确 Jaccard 终判:near-dup(>阈值)同样只增计数/刷新近因、不新建(§5.8)。
+      const nearDupId = this.#findNearDuplicate(normalized);
+      if (nearDupId !== undefined) {
+        this.#db
+          .prepare(`UPDATE memories SET hits = hits + 1, last_seen_at = ? WHERE id = ?`)
+          .run(at, nearDupId);
+        return nearDupId;
       }
       // 写新记忆 + 在同一事务内建实体索引/邻接边(原子:记忆与其联想网一起落库,§3.2)。
       this.#db.exec('BEGIN');
@@ -457,6 +494,8 @@ export class SqliteMemoryStore implements MemoryStore {
           this.#cfg.primaryPersonId,
         );
         this.#db.exec('COMMIT');
+        // LSH 去重索引(承 §5.8 / §5.10 B2):commit 成功后把新记忆挂桶(派生内存索引,与库内一致)。
+        this.#registerLsh(memoryId, normalized);
         // 返回新建记忆 id(承 §5.6:供编排层随后 setEmbedding 补嵌)。
         return memoryId;
       } catch (err) {
@@ -468,6 +507,44 @@ export class SqliteMemoryStore implements MemoryStore {
     }
     // 写失败优雅降级:返回 -1(不抛,§3.2)。
     return -1;
+  }
+
+  /**
+   * LSH 近重复查找(承 §5.8 / §5.10 B2;与 InMemory #findNearDuplicate 同一权威语义,零漂移):
+   * 对新文本算 MinHash 签名 → 取 band 键 → 只在**同桶候选**里做**精确 Jaccard**,命中 `> lshJaccardThreshold`
+   * 即视为近重复,返回被强化的既有记忆 id(不新建)。无候选/无命中 → undefined。
+   * 候选按 id 升序遍历(确定性,最早写入优先);shingle/签名走 LRU 缓存(降本)。
+   */
+  #findNearDuplicate(normalized: string): number | undefined {
+    const { shingles: querySh, signature } = this.#shingleCache.get(normalized);
+    const candidateIds = new Set<number>();
+    for (const key of lshBandKeys(signature, this.#cfg.lshBands)) {
+      const bucket = this.#lshBuckets.get(key);
+      if (bucket === undefined) continue;
+      for (const id of bucket) candidateIds.add(id);
+    }
+    if (candidateIds.size === 0) return undefined;
+    const ordered = [...candidateIds].sort((a, b) => a - b);
+    for (const id of ordered) {
+      const candSh = this.#shingleById.get(id);
+      if (candSh === undefined) continue;
+      if (jaccardSimilarity(querySh, candSh) > this.#cfg.lshJaccardThreshold) return id;
+    }
+    return undefined;
+  }
+
+  /** 把记忆挂入 LSH 桶 + 存其 shingle 集合(承 §5.10 B2;与 InMemory #registerLsh 同一规则,零漂移)。 */
+  #registerLsh(memoryId: number, normalized: string): void {
+    const { shingles: sh, signature } = this.#shingleCache.get(normalized);
+    this.#shingleById.set(memoryId, sh);
+    for (const key of lshBandKeys(signature, this.#cfg.lshBands)) {
+      let bucket = this.#lshBuckets.get(key);
+      if (bucket === undefined) {
+        bucket = new Set<number>();
+        this.#lshBuckets.set(key, bucket);
+      }
+      bucket.add(memoryId);
+    }
   }
 
   /**

@@ -23,6 +23,8 @@ import {
   decayFactor,
   emotionResonance,
   entityKeys,
+  jaccardSimilarity,
+  lshBandKeys,
   makePrimaryPerson,
   memoryKindWeight,
   normalizeAndFuse,
@@ -33,6 +35,7 @@ import {
   resolveAttribution,
   resolveMemoryConfig,
   resolveMemoryKind,
+  ShingleCache,
   tokenize,
   windowRange,
   type MemoryConfig,
@@ -105,6 +108,16 @@ export class InMemoryMemoryStore implements MemoryStore {
   /** 记忆 id → 邻居 id 集合(扩散遍历用;镜像 SQLite 双向索引)。 */
   readonly #adjacency = new Map<number, Set<number>>();
   /**
+   * LSH 去重前置索引(承 §5.8 / §5.10 B2):band 键 → 落该桶的记忆 id 集合;
+   * 写入时按 MinHash 签名的各 band 键挂桶,查重时只在同桶候选里做精确 Jaccard(避免全表两两比)。
+   * 纯内存(与 SQLite 实现对齐:LSH 索引派生自 normalized_text,不持久化,重启重建)。
+   */
+  readonly #lshBuckets = new Map<string, Set<number>>();
+  /** 记忆 id → 其 shingle 集合(LSH 同桶候选做精确 Jaccard 终判时取用;承 §5.10 B2)。 */
+  readonly #shingleById = new Map<number, Set<string>>();
+  /** shingle/签名 LRU 缓存(承 §5.10 B2,Graphiti 式;避免对同一文本重复切 shingle/算 MinHash)。 */
+  readonly #shingleCache: ShingleCache;
+  /**
    * 关系亲密度状态:personId → `{closeness, updatedAtMs}`(镜像 SQLite people.relationship_state JSON,承 §6/§5.3b)。
    * 无条目 = 尚无互动记录(getCloseness 落到 initialCloseness);存数值快照,惰性衰减读时实时算、不写回。
    */
@@ -116,6 +129,8 @@ export class InMemoryMemoryStore implements MemoryStore {
   constructor(opts: InMemoryMemoryStoreOptions = {}) {
     this.#cfg = resolveMemoryConfig(opts.config);
     this.#now = opts.now ?? Date.now;
+    // shingle/签名 LRU 缓存(承 §5.10 B2;与 SQLite 实现共用同一纯函数,零漂移)。
+    this.#shingleCache = new ShingleCache(this.#cfg);
     // 构造即 seed 主用户(镜像 SQLite v3 迁移 seed,P1 恰好一个;承 §5.3b)。
     const primary = makePrimaryPerson(this.#cfg);
     this.#people.set(primary.personId, primary);
@@ -144,12 +159,21 @@ export class InMemoryMemoryStore implements MemoryStore {
     const normalized = this.#cfg.normalize(rec.text);
     if (normalized.length === 0) return -1;
     const at = rec.createdAtMs ?? this.#now();
+    // —— LSH 去重前置(承 §5.8 / §5.10 B2)——
+    // ① 精确匹配快路径:规范化文本完全相等 → 直接命中(最省;既有等价去重语义不变)。
     const existing = this.#memories.get(normalized);
     if (existing !== undefined) {
       existing.hits += 1;
       existing.lastSeenAtMs = at;
       // 去重命中:返回被强化的那条 id(承 §5.6;镜像 SQLite 语义,补嵌复用既有向量)。
       return existing.id;
+    }
+    // ② MinHash/LSH 候选 → 精确 Jaccard 终判:near-dup(>阈值)走既有"强化既有"语义、不新建(§5.8)。
+    const nearDup = this.#findNearDuplicate(normalized);
+    if (nearDup !== undefined) {
+      nearDup.hits += 1;
+      nearDup.lastSeenAtMs = at;
+      return nearDup.id;
     }
     // 归属规则与 SQLite 共用单一权威 helper(承 §5.3 / §5.3b),避免两后端漂移。
     const { subject, personId } = resolveAttribution(rec, this.#cfg);
@@ -182,8 +206,51 @@ export class InMemoryMemoryStore implements MemoryStore {
     this.#byIdIndex.set(id, record);
     // 联想扩散地基(承 §5.9 缺口①):建实体索引 + 与共享实体的旧记忆增建无向邻接边。
     this.#linkEntitiesAndEdges(id, rec.text, personId);
+    // LSH 去重索引(承 §5.8 / §5.10 B2):把新记忆按 MinHash band 键挂桶 + 存其 shingle 集合,供后续查重。
+    this.#registerLsh(id, normalized);
     // 返回新建记忆 id(承 §5.6:供编排层随后 setEmbedding 补嵌)。
     return id;
+  }
+
+  /**
+   * LSH 近重复查找(承 §5.8 / §5.10 B2;与 SQLite #findNearDuplicate 同一权威语义,零漂移):
+   * 对新文本算 MinHash 签名 → 取其 band 键 → 只在**同桶候选**里做**精确 Jaccard**,
+   * 命中 `> lshJaccardThreshold` 即视为近重复,返回被强化的既有记忆(不新建)。无候选/无命中 → undefined。
+   * 候选按 id 升序遍历(确定性);取首个超阈值者(同最早写入优先)。shingle/签名走 LRU 缓存(降本)。
+   */
+  #findNearDuplicate(normalized: string): MutableRecord | undefined {
+    const { shingles: querySh, signature } = this.#shingleCache.get(normalized);
+    const candidateIds = new Set<number>();
+    for (const key of lshBandKeys(signature, this.#cfg.lshBands)) {
+      const bucket = this.#lshBuckets.get(key);
+      if (bucket === undefined) continue;
+      for (const id of bucket) candidateIds.add(id);
+    }
+    if (candidateIds.size === 0) return undefined;
+    // 候选按 id 升序确定性遍历,精确 Jaccard 终判(MinHash 仅缩减候选,精度由精确式保证)。
+    const ordered = [...candidateIds].sort((a, b) => a - b);
+    for (const id of ordered) {
+      const candSh = this.#shingleById.get(id);
+      if (candSh === undefined) continue;
+      if (jaccardSimilarity(querySh, candSh) > this.#cfg.lshJaccardThreshold) {
+        return this.#byIdIndex.get(id);
+      }
+    }
+    return undefined;
+  }
+
+  /** 把记忆挂入 LSH 桶 + 存其 shingle 集合(承 §5.10 B2;与 SQLite 实现同一规则,零漂移)。 */
+  #registerLsh(memoryId: number, normalized: string): void {
+    const { shingles: sh, signature } = this.#shingleCache.get(normalized);
+    this.#shingleById.set(memoryId, sh);
+    for (const key of lshBandKeys(signature, this.#cfg.lshBands)) {
+      let bucket = this.#lshBuckets.get(key);
+      if (bucket === undefined) {
+        bucket = new Set<number>();
+        this.#lshBuckets.set(key, bucket);
+      }
+      bucket.add(memoryId);
+    }
   }
 
   /**

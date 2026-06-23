@@ -154,6 +154,35 @@ export interface MemoryConfig {
    * 核心关系可设正下限避免长期缺席归零。默认 0(陌生可降至 0;行为即配置,§3.2)。
    */
   readonly closenessFloor: number;
+  /**
+   * LSH 去重前置:shingle 的 k-gram 大小(承 §5.8 / §5.10 B2,Graphiti 式 3-gram):
+   * 规范化文本切成 k 个相邻字符的子串集合(字符级,CJK 无空白也稳健);文本短于 k 时整串即一个 shingle。
+   * 默认 3(Graphiti 惯用 3-gram)。取正整数。行为即配置(§3.2),无 magic number。
+   */
+  readonly lshShingleSize: number;
+  /**
+   * LSH 去重前置:MinHash 签名长度(哈希函数个数,承 §5.10 B2):签名越长 Jaccard 估计越准、分桶越细,
+   * 但计算越重。默认 64(端侧单用户量级足够精度且轻)。取正整数。行为即配置(§3.2)。
+   */
+  readonly lshNumHashes: number;
+  /**
+   * LSH 去重前置:LSH 分桶的 band 数(承 §5.10 B2):签名按 band 切片,同一 band 完全相等即落同桶
+   * → 只在同桶里找近重复候选(避免全表两两比)。band 越多召回越宽(候选更多、漏判更少),
+   * 越少越严。须整除 `lshNumHashes`(每 band 行数 = numHashes/bands)。默认 16(64/16=每 band 4 行)。
+   * 取正整数。行为即配置(§3.2),无 magic number。
+   */
+  readonly lshBands: number;
+  /**
+   * LSH 去重前置:近重复判定的 Jaccard 阈值(承 §5.10 B2,Graphiti `Jaccard>0.9`):
+   * LSH 同桶候选再做**精确 Jaccard**(shingle 集合),超过此阈值才视为近重复 → 走既有"强化既有"语义。
+   * 默认 0.9(Graphiti 惯用)。落在 (0,1]。行为即配置(§3.2),无 magic number。
+   */
+  readonly lshJaccardThreshold: number;
+  /**
+   * LSH 去重前置:shingle/签名 LRU 缓存上限(承 §5.10 B2,Graphiti 式 LRU 缓存 shingle):
+   * 避免对同一文本重复切 shingle / 算 MinHash(写热路径降本)。默认 1024 条。取正整数。行为即配置(§3.2)。
+   */
+  readonly shingleCacheSize: number;
 }
 
 /** 各分层的召回权重(承 §5.9 缺口④);值非负。 */
@@ -226,6 +255,13 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
   closenessHalfLifeDays: 30,
   closenessUpK: 0.1,
   closenessFloor: 0,
+  // §5.8 / §5.10 B2 LSH 去重前置(Graphiti 式;行为即配置,§3.2,无 magic number):
+  // 3-gram shingle、MinHash 64 维签名、16 bands(每 band 4 行)、Jaccard>0.9 视近重复、shingle/签名 LRU 上限 1024。
+  lshShingleSize: 3,
+  lshNumHashes: 64,
+  lshBands: 16,
+  lshJaccardThreshold: 0.9,
+  shingleCacheSize: 1024,
 };
 
 /** 合并用户覆盖与默认值。 */
@@ -669,6 +705,154 @@ export function personalizedPageRank(
     if (score > 0) out.set(id, score);
   }
   return out;
+}
+
+// —— §5.8 / §5.10 B2:LSH 去重前置(Graphiti 式 MinHash/LSH;单一权威纯函数,两 store 共用)——
+// ADD 去重在既有"等价文本"判定前加确定性预筛:① 精确匹配快路径(规范化文本相等)→ 直接命中;
+// ② 3-gram shingle → MinHash 签名 → LSH 分桶,只在同桶找近重复候选(避免全表两两比);
+// ③ 同桶候选再做**精确 Jaccard**,>阈值视为近重复 → 走既有"强化既有"语义。
+// MinHash 用固定种子哈希族(确定性,不依赖随机/时间);两 store 共用,杜绝两后端漂移(§3.2)。
+
+/**
+ * 32 位 FNV-1a 哈希(单一权威,承 §5.10 B2):把字符串确定性映射到无符号 32 位整数。
+ * 纯函数、无随机/时间;供 shingle → MinHash 的基哈希用。逐字符按 UTF-16 码元参与,CJK 同样稳健。
+ */
+export function fnv1a32(text: string): number {
+  let h = 0x811c9dc5; // FNV offset basis(32 位)。
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    // FNV prime 32 位 = 16777619;用 Math.imul 做 32 位无溢出乘法。
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0; // 转无符号 32 位。
+}
+
+/**
+ * 切 k-gram shingle 集合(单一权威,承 §5.8 / §5.10 B2,Graphiti 式 3-gram):
+ * 对规范化文本取所有长度 k 的相邻字符子串(字符级,CJK 无空白也稳健);
+ * 文本短于 k(或恰等)时**整串即一个 shingle**(避免空集导致无法判重)。空串 → 空集。
+ * 用 Set 去重(同 shingle 只计一次,契合 Jaccard 集合语义)。纯函数、确定性。
+ */
+export function shingles(normalizedText: string, k: number): Set<string> {
+  const out = new Set<string>();
+  if (normalizedText.length === 0) return out;
+  const size = Math.max(1, Math.floor(k));
+  if (normalizedText.length <= size) {
+    out.add(normalizedText);
+    return out;
+  }
+  for (let i = 0; i + size <= normalizedText.length; i++) {
+    out.add(normalizedText.slice(i, i + size));
+  }
+  return out;
+}
+
+/**
+ * MinHash 签名(单一权威,承 §5.10 B2):对 shingle 集合算 `numHashes` 维签名,
+ * 第 j 维 = `min_{shingle} hashⱼ(shingle)`。哈希族用固定种子:`hashⱼ(s) = fnv1a32(s) XOR seedⱼ`
+ * 再混一轮(`Math.imul` + 移位),seedⱼ 由 j 确定性派生 → **不依赖随机/时间**(确定性,§3.2)。
+ * 空集合返回全 `0xffffffff`(最大值,与任何非空签名的估计相似度为 0,语义正确)。
+ * 两条文本的签名按位相等比例即 Jaccard 的无偏估计(供 LSH 分桶 + 候选缩减)。
+ */
+export function minHashSignature(shingleSet: ReadonlySet<string>, numHashes: number): number[] {
+  const m = Math.max(1, Math.floor(numHashes));
+  const sig = new Array<number>(m).fill(0xffffffff);
+  if (shingleSet.size === 0) return sig;
+  for (const s of shingleSet) {
+    const base = fnv1a32(s);
+    for (let j = 0; j < m; j++) {
+      // seedⱼ 确定性派生(j 混入);XOR 后再混一轮,得到第 j 个哈希族成员的值。
+      const seed = Math.imul(j + 1, 0x9e3779b1) >>> 0; // 黄金比例常数派生每维种子。
+      let h = (base ^ seed) >>> 0;
+      h = Math.imul(h ^ (h >>> 15), 0x85ebca6b) >>> 0; // 雪崩混淆(确定性)。
+      h = (h ^ (h >>> 13)) >>> 0;
+      if (h < sig[j]!) sig[j] = h;
+    }
+  }
+  return sig;
+}
+
+/**
+ * LSH 分桶 band 键(单一权威,承 §5.10 B2):把 `numHashes` 维签名按 `bands` 段等分,
+ * 每段(band)拼成一个 band 键 `"<bandIndex>:<该段签名值用逗号连接>"`。两条文本只要**任一 band 完全相等**
+ * 即落同桶 → 互为候选(高 Jaccard ⟹ 大概率至少一 band 相等,LSH 经典性质)。
+ * `bands` 须能整除 `numHashes`(每 band 行数 r = numHashes/bands);不能整除则退化为单 band(整签名一桶,保守不漏)。
+ * 纯函数、确定性。返回该签名的全部 band 键(供建桶 + 查桶)。
+ */
+export function lshBandKeys(signature: readonly number[], bands: number): string[] {
+  const m = signature.length;
+  const b = Math.max(1, Math.floor(bands));
+  // 不能整除 → 退化为单 band(整签名一桶):保守(候选更宽,绝不漏近重复)。
+  const rows = m % b === 0 ? m / b : m;
+  const effBands = m % b === 0 ? b : 1;
+  const keys: string[] = [];
+  for (let band = 0; band < effBands; band++) {
+    const start = band * rows;
+    const slice = signature.slice(start, start + rows);
+    keys.push(`${band}:${slice.join(',')}`);
+  }
+  return keys;
+}
+
+/**
+ * 精确 Jaccard 相似度(单一权威,承 §5.10 B2 终判):`|A∩B| / |A∪B|`,落在 [0,1]。
+ * LSH 同桶候选的**最终判定**用它(MinHash 只做候选缩减,精度由此式保证);两集皆空 → 0(无意义比较)。
+ * 纯函数、确定性。遍历较小集合求交,O(min(|A|,|B|))。
+ */
+export function jaccardSimilarity(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+  let inter = 0;
+  for (const s of small) if (large.has(s)) inter += 1;
+  const union = a.size + b.size - inter;
+  return union === 0 ? 0 : inter / union;
+}
+
+/**
+ * shingle + MinHash 签名的 LRU 缓存(承 §5.10 B2,Graphiti 式缓存 shingle):
+ * 键 = 规范化文本,值 = `{shingles, signature}`,避免对同一文本重复切 shingle / 算 MinHash(写热路径降本)。
+ * 用 Map 的插入序模拟 LRU:命中即"删后重插"挪到队尾(最近用);超上限淘汰队首(最久未用)。
+ * `computeCount` 暴露**实算次数**供测试断言缓存生效(同输入命中缓存则不增)。单线程同步,无并发问题。
+ */
+export class ShingleCache {
+  readonly #cache = new Map<string, { shingles: Set<string>; signature: number[] }>();
+  readonly #capacity: number;
+  readonly #shingleSize: number;
+  readonly #numHashes: number;
+  #computeCount = 0;
+
+  constructor(cfg: Pick<MemoryConfig, 'shingleCacheSize' | 'lshShingleSize' | 'lshNumHashes'>) {
+    this.#capacity = Math.max(1, Math.floor(cfg.shingleCacheSize));
+    this.#shingleSize = cfg.lshShingleSize;
+    this.#numHashes = cfg.lshNumHashes;
+  }
+
+  /** 取(或惰性计算并缓存)某规范化文本的 shingle 集合与 MinHash 签名(LRU 命中不重算)。 */
+  get(normalizedText: string): { shingles: Set<string>; signature: number[] } {
+    const hit = this.#cache.get(normalizedText);
+    if (hit !== undefined) {
+      // LRU 触达:删后重插挪到队尾(标记最近使用)。
+      this.#cache.delete(normalizedText);
+      this.#cache.set(normalizedText, hit);
+      return hit;
+    }
+    // 未命中:实算一次(计数+1 供测试断言),写入缓存;超上限淘汰最久未用(Map 队首)。
+    this.#computeCount += 1;
+    const sh = shingles(normalizedText, this.#shingleSize);
+    const signature = minHashSignature(sh, this.#numHashes);
+    const entry = { shingles: sh, signature };
+    this.#cache.set(normalizedText, entry);
+    if (this.#cache.size > this.#capacity) {
+      const oldest = this.#cache.keys().next().value;
+      if (oldest !== undefined) this.#cache.delete(oldest);
+    }
+    return entry;
+  }
+
+  /** 实算(未命中)次数:同输入第二次命中缓存则不增,供测试断言缓存生效。 */
+  get computeCount(): number {
+    return this.#computeCount;
+  }
 }
 
 // —— §5.6 接缝 7 / §5.5 末:向量存取 + 同步混合召回的纯函数地基(单一权威,两 store 共用)——

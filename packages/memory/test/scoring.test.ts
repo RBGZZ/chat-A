@@ -9,10 +9,14 @@ import {
   emotionSector,
   encodeEmbedding,
   entityKeys,
+  fnv1a32,
   hopDecay,
   inferMemoryKindForBackfill,
+  jaccardSimilarity,
   keywordScore,
+  lshBandKeys,
   memoryKindWeight,
+  minHashSignature,
   mixedRecallScore,
   normalizeAndFuse,
   personalizedPageRank,
@@ -20,6 +24,8 @@ import {
   reciprocalRankFusion,
   resolveMemoryConfig,
   resolveMemoryKind,
+  ShingleCache,
+  shingles,
   type Pad,
   type PprEdge,
   type PprParams,
@@ -488,5 +494,137 @@ describe('§5.6 向量存取纯函数(单一权威 golden)', () => {
     expect(rrf.get(3)).toBeCloseTo(1 / 63, 9);
     // 两路共识(A/B)高于单路(C)。
     expect(rrf.get(1)!).toBeGreaterThan(rrf.get(3)!);
+  });
+});
+
+/**
+ * §5.8 / §5.10 B2 LSH 去重前置纯函数 golden:锁住 shingle 切分、MinHash 确定性、
+ * LSH band 分桶、精确 Jaccard、LRU 缓存命中不重算。确定性内核,无随机/时间(§3.2)。
+ */
+describe('§5.8/§5.10 B2 LSH 去重前置(单一权威纯函数 golden)', () => {
+  describe('fnv1a32:确定性 32 位哈希', () => {
+    it('同输入恒同值、无符号 32 位、不同输入不同值', () => {
+      expect(fnv1a32('abc')).toBe(fnv1a32('abc'));
+      expect(fnv1a32('abc')).toBeGreaterThanOrEqual(0);
+      expect(fnv1a32('abc')).toBeLessThanOrEqual(0xffffffff);
+      expect(fnv1a32('abc')).not.toBe(fnv1a32('abd'));
+      // 空串也确定(FNV offset basis 无符号化)。
+      expect(fnv1a32('')).toBe(0x811c9dc5);
+    });
+  });
+
+  describe('shingles:k-gram 切分', () => {
+    it('取所有相邻 k 字符子串并去重', () => {
+      // "abcd" 的 3-gram = {abc, bcd}。
+      expect([...shingles('abcd', 3)].sort()).toEqual(['abc', 'bcd']);
+    });
+    it('文本短于 k:整串即一个 shingle(不空集)', () => {
+      expect([...shingles('ab', 3)]).toEqual(['ab']);
+      expect([...shingles('x', 3)]).toEqual(['x']);
+    });
+    it('空串 → 空集', () => {
+      expect(shingles('', 3).size).toBe(0);
+    });
+    it('重复子串只计一次(集合语义)', () => {
+      // "aaaa" 的 3-gram 全是 "aaa" → 去重后 1 个。
+      expect([...shingles('aaaa', 3)]).toEqual(['aaa']);
+    });
+  });
+
+  describe('minHashSignature:确定性 MinHash', () => {
+    it('同输入恒同签名(固定种子,无随机/时间)', () => {
+      const sh = shingles('今天天气很好', 3);
+      expect(minHashSignature(sh, 32)).toEqual(minHashSignature(sh, 32));
+    });
+    it('签名长度 = numHashes;空集合全为 0xffffffff', () => {
+      expect(minHashSignature(shingles('abcd', 3), 16).length).toBe(16);
+      const empty = minHashSignature(new Set<string>(), 8);
+      expect(empty).toEqual(new Array(8).fill(0xffffffff));
+    });
+    it('签名按位相等比例 ≈ Jaccard(无偏估计)', () => {
+      const a = shingles('今天下午我和朋友一起去公园里散步聊天', 3);
+      const b = shingles('今天下午我和朋友一起去公园里跑步聊天', 3);
+      const sa = minHashSignature(a, 128);
+      const sb = minHashSignature(b, 128);
+      let agree = 0;
+      for (let i = 0; i < sa.length; i++) if (sa[i] === sb[i]) agree += 1;
+      const est = agree / sa.length;
+      const exact = jaccardSimilarity(a, b);
+      // 估计与精确 Jaccard 接近(128 维,容差宽松)。
+      expect(Math.abs(est - exact)).toBeLessThan(0.2);
+    });
+  });
+
+  describe('jaccardSimilarity:精确终判', () => {
+    it('相同集合 = 1、不相交 = 0、部分重叠介于其间', () => {
+      const a = new Set(['x', 'y', 'z']);
+      expect(jaccardSimilarity(a, new Set(['x', 'y', 'z']))).toBe(1);
+      expect(jaccardSimilarity(a, new Set(['p', 'q']))).toBe(0);
+      // {x,y,z} vs {y,z,w}:交 2、并 4 → 0.5。
+      expect(jaccardSimilarity(a, new Set(['y', 'z', 'w']))).toBeCloseTo(0.5, 9);
+    });
+    it('任一空集 → 0', () => {
+      expect(jaccardSimilarity(new Set<string>(), new Set(['a']))).toBe(0);
+    });
+  });
+
+  describe('lshBandKeys:LSH 分桶', () => {
+    it('整除时返回 bands 个 band 键;相同签名键全等(同桶)', () => {
+      const sig = Array.from({ length: 8 }, (_, i) => i);
+      const keys = lshBandKeys(sig, 4);
+      expect(keys.length).toBe(4); // 8/4=每 band 2 行。
+      expect(lshBandKeys(sig, 4)).toEqual(keys); // 确定性。
+    });
+    it('近重复签名至少一 band 相等(LSH 候选不漏)', () => {
+      const a = shingles('明天上午九点要去市中心参加一场重要的面试', 3);
+      const b = shingles('明天上午九点要去市中心参加一场重要的会议', 3);
+      const ka = new Set(lshBandKeys(minHashSignature(a, 64), 16));
+      const kb = lshBandKeys(minHashSignature(b, 64), 16);
+      expect(kb.some((k) => ka.has(k))).toBe(true);
+    });
+    it('不能整除 → 退化为单 band(整签名一桶,保守不漏)', () => {
+      // numHashes=10、bands=3 不整除 → 单 band。
+      expect(lshBandKeys([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 3).length).toBe(1);
+    });
+  });
+
+  describe('ShingleCache:LRU 缓存命中不重算', () => {
+    const cfg = {
+      shingleCacheSize: 2,
+      lshShingleSize: 3,
+      lshNumHashes: 16,
+    };
+    it('同输入第二次命中缓存:computeCount 不增', () => {
+      const cache = new ShingleCache(cfg);
+      cache.get('今天天气很好');
+      expect(cache.computeCount).toBe(1);
+      cache.get('今天天气很好'); // 命中缓存,不重算。
+      expect(cache.computeCount).toBe(1);
+    });
+    it('返回正确的 shingles/signature(与纯函数一致)', () => {
+      const cache = new ShingleCache(cfg);
+      const { shingles: sh, signature } = cache.get('abcd');
+      expect([...sh].sort()).toEqual([...shingles('abcd', 3)].sort());
+      expect(signature).toEqual(minHashSignature(shingles('abcd', 3), 16));
+    });
+    it('超上限淘汰最久未用:被淘汰者再取需重算(computeCount 增)', () => {
+      const cache = new ShingleCache(cfg); // 容量 2
+      cache.get('A1'); // compute=1
+      cache.get('B2'); // compute=2
+      cache.get('C3'); // compute=3,淘汰最久未用 A1
+      expect(cache.computeCount).toBe(3);
+      cache.get('A1'); // A1 已被淘汰 → 重算,compute=4
+      expect(cache.computeCount).toBe(4);
+    });
+    it('LRU 触达刷新近用序:刚命中者不被随后插入淘汰', () => {
+      const cache = new ShingleCache(cfg); // 容量 2
+      cache.get('A1'); // [A1]
+      cache.get('B2'); // [A1,B2]
+      cache.get('A1'); // 命中 A1 → 挪队尾 [B2,A1];compute 仍 2
+      expect(cache.computeCount).toBe(2);
+      cache.get('C3'); // 插入 C3 → 淘汰最久未用 B2 [A1,C3];compute=3
+      cache.get('A1'); // A1 仍在 → 命中不重算
+      expect(cache.computeCount).toBe(3);
+    });
   });
 });

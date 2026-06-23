@@ -862,5 +862,71 @@ export function runMemoryStoreContract(name: string, make: MakeStore): void {
       expect(() => s.bumpCloseness('nope', 1, 1)).not.toThrow();
       s.close();
     });
+
+    // —— LSH 去重前置(承 §5.8 / §5.10 B2;MinHash/LSH 候选 + 精确 Jaccard 终判;golden 两实现一致)——
+
+    // 一对仅差一两个字的近重复文本(3-gram Jaccard≈0.8);两者共享子串"市中心"供 recall 验证。
+    const NEAR_A = '明天上午九点要去市中心参加一场重要的面试';
+    const NEAR_B = '明天上午九点要去市中心参加一场重要的会议';
+
+    it('LSH 近重复(改一两个字)命中并强化既有、不新建(承 §5.8 / §5.10 B2)', () => {
+      // 阈值放宽到 0.6(NEAR_A/B 的 3-gram Jaccard≈0.8 > 0.6)→ 视为近重复、强化既有。
+      const s = make({ config: { lshJaccardThreshold: 0.6 } });
+      const idA = s.addMemory({ text: NEAR_A });
+      const idB = s.addMemory({ text: NEAR_B });
+      // 近重复:不新建,返回被强化的既有那条 id(承 §5.8 ADD+去重)。
+      expect(idB).toBe(idA);
+      // 库里只有一条(以共享子串"市中心"召回),hits 累加为 2。
+      const r = s.recall('市中心', 10);
+      expect(r.length).toBe(1);
+      expect(r[0]?.id).toBe(idA);
+      expect(r[0]?.hits).toBe(2);
+      s.close();
+    });
+
+    it('LSH 不相似文本不误判为重复(各自独立成条,承 §5.10 B2)', () => {
+      const s = make({ config: { lshJaccardThreshold: 0.6 } });
+      // 两条几乎无共享 3-gram(Jaccard≈0)→ 不应被判近重复。
+      const id1 = s.addMemory({ text: '我喜欢喝咖啡' });
+      const id2 = s.addMemory({ text: '我养了一只狗' });
+      expect(id2).not.toBe(id1);
+      expect(s.recall('咖啡').length).toBe(1);
+      expect(s.recall('狗').length).toBe(1);
+      s.close();
+    });
+
+    it('LSH 精确匹配快路径:规范化相等直接命中(承 §5.10 B2)', () => {
+      const s = make();
+      const id1 = s.addMemory({ text: '我叫小明' });
+      // 仅大小写/空白差异 → 规范化后完全相等 → 走精确快路径(同既有等价去重)。
+      const id2 = s.addMemory({ text: '  我叫小明  ' });
+      expect(id2).toBe(id1);
+      const r = s.recall('小明', 10);
+      expect(r.length).toBe(1);
+      expect(r[0]?.hits).toBe(2);
+      s.close();
+    });
+
+    it('LSH Jaccard 阈值边界:阈值更高时近重复不再命中、各自成条(承 §5.10 B2)', () => {
+      // 阈值抬到 0.9(高于 NEAR_A/B 的≈0.8)→ 不再视为近重复 → 两条都新建。
+      const s = make({ config: { lshJaccardThreshold: 0.9 } });
+      const idA = s.addMemory({ text: NEAR_A });
+      const idB = s.addMemory({ text: NEAR_B });
+      expect(idB).not.toBe(idA);
+      // 共享子串"市中心"召回到两条(各自独立)。
+      expect(s.recall('市中心', 10).length).toBe(2);
+      s.close();
+    });
+
+    it('LSH 近重复去重不破坏既有等价去重语义(承 §5.8;不回归)', () => {
+      // 既有契约:完全等价文本只留一条、累加命中(LSH 前置不应改变这一最终结论方向)。
+      const s = make({ config: { lshJaccardThreshold: 0.6 } });
+      s.addMemory({ text: '用户对花生过敏' });
+      s.addMemory({ text: '用户对花生过敏' }); // 完全等价
+      const r = s.recall('花生', 10);
+      expect(r.length).toBe(1);
+      expect(r[0]?.hits).toBe(2);
+      s.close();
+    });
   });
 }
