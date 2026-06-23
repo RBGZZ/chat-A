@@ -37,12 +37,18 @@ importers:
       '@chat-a/persona':
         specifier: workspace:*
         version: link:../persona
+      '@chat-a/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       '@chat-a/providers':
         specifier: workspace:*
         version: link:../providers
       '@chat-a/runtime':
         specifier: workspace:*
         version: link:../runtime
+      '@chat-a/voice-detect':
+        specifier: workspace:*
+        version: link:../voice-detect
 
   packages/cognition:
     dependencies:
