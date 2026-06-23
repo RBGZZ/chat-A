@@ -1,6 +1,6 @@
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
-import { stdin, stdout, env } from 'node:process';
+import { stdin, stdout, env, argv } from 'node:process';
 import { Conversation, LightVoiceBus, ToolCallingStrategy } from '@chat-a/runtime';
 import { buildDefaultRegistry } from '@chat-a/interaction';
 import { createLlm, loadLlmConfig, createEmbedder, loadEmbedderConfig } from '@chat-a/providers';
@@ -8,6 +8,7 @@ import { initTelemetry, createDecisionTraceSinkFromEnv } from '@chat-a/observabi
 import { createMemoryStoreFromEnv, LlmMemoryExtractor, LlmReflector, NoopReflector } from '@chat-a/memory';
 import type { Reflector } from '@chat-a/memory';
 import { loadPersonaFromEnv, seedPersonaMemories, createKvPersonaStore, LlmAppraiser, LlmStanceDetector, LlmOceanEvolver, LlmSelfNotionEvolver } from '@chat-a/persona';
+import { startVoiceMode, type VoiceModeHandle } from './cli-voice';
 
 /**
  * chat-A 文字版 MVP REPL(瘦客户端的文字形态,承 §9)。
@@ -98,6 +99,26 @@ async function main(): Promise<void> {
     stdout.write('(未检测到 ANTHROPIC_API_KEY → FakeLLM 占位。设 ANTHROPIC_API_KEY 用真 Claude;\n');
     stdout.write(' 或用 CHAT_A_LLM_PROVIDER / CHAT_A_LLM_MODEL 自选模型。)\n');
   }
+  // 语音模式(R2,默认关):`--voice` 或 CHAT_A_VOICE=1 切语音;文字模式默认不变。
+  // 装配 AudioDevice(真/Fake)→ InProcessAudioTransport → VoiceLoop;send 注入 convo.send(零改 Conversation)。
+  const voiceOn = argv.includes('--voice') || (env['CHAT_A_VOICE'] ?? '').length > 0;
+  let voice: VoiceModeHandle | undefined;
+  if (voiceOn) {
+    try {
+      voice = await startVoiceMode({
+        send: convo.send.bind(convo),
+        memory: mem.store,
+        bus,
+        sessionId,
+        env,
+      });
+      stdout.write(`语音: on  设备=${voice.info.device}  STT=${voice.info.stt}  TTS=${voice.info.tts}\n`);
+    } catch (err) {
+      stdout.write(`语音: 启动失败(回落纯文字):${err instanceof Error ? err.message : String(err)}\n`);
+    }
+  } else {
+    stdout.write('语音: off (--voice 或 CHAT_A_VOICE=1 启用)\n');
+  }
   stdout.write('和小雪打字对话,Ctrl+C 退出。\n\n');
 
   const rl = createInterface({ input: stdin, output: stdout });
@@ -123,6 +144,8 @@ async function main(): Promise<void> {
     if (!closed) rl.prompt();
   }
 
+  // 语音模式收尾:停采集/loop/设备(幂等;无语音则 no-op)。
+  voice?.stop();
   // 会话结束的夜间沉淀(§5/§6.1):在关库之前异步蒸馏一次;幂等 + 全程降级,失败吞掉不影响退出。
   await reflector.reflect(sessionId).catch(() => {});
   mem.store.close();

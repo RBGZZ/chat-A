@@ -9,6 +9,8 @@
   },
   "dependencies": {
     "@chat-a/runtime": "workspace:*",
+    "@chat-a/protocol": "workspace:*",
+    "@chat-a/voice-detect": "workspace:*",
     "@chat-a/interaction": "workspace:*",
     "@chat-a/providers": "workspace:*",
     "@chat-a/observability": "workspace:*",
