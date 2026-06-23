@@ -17,7 +17,7 @@ import { renderToneFragment } from './tone';
 import { resolveNegativePosture } from './posture';
 import { DefaultAppraiser } from './appraiser';
 import { InMemoryPersonaStore } from './store';
-import { applyOceanDelta, buildDeltaSnapshot, isZeroDelta, shouldEvolve } from './ocean-evolution';
+import { applyOceanDelta, buildDeltaSnapshot, clampOceanDelta, isZeroDelta, shouldEvolve } from './ocean-evolution';
 
 export interface ToneView {
   readonly emotion: Emotion;
@@ -95,7 +95,15 @@ export class PersonaEngine {
   async advance(userText: string): Promise<void> {
     const dials = this.#seed.dials;
     const turn = this.#snapshot.turn + 1;
-    this.#recentUserTexts.push(userText);
+    // 仅在注入了 evolver 时累积演化窗口——默认路径(无 evolver)不 push,杜绝长跑进程无界增长。
+    if (this.#oceanEvolver !== undefined) {
+      this.#recentUserTexts.push(userText);
+      // 防御上限:窗口本应每 N 轮被 #maybeEvolveOcean 清空;万一节拍失效也不无界(ring 语义)。
+      const cap = Math.max(this.#config.evolutionEveryTurns, 1) * 2;
+      if (this.#recentUserTexts.length > cap) {
+        this.#recentUserTexts.splice(0, this.#recentUserTexts.length - cap);
+      }
+    }
 
     // 慢变量:二级 OCEAN delta 演化(每 N 轮一次,仅注入 evolver 时;全程降级)。
     const evolved = await this.#maybeEvolveOcean(turn);
@@ -117,7 +125,7 @@ export class PersonaEngine {
   }
 
   /**
-   * 若到节拍且注入了 evolver,跑一次二级 OCEAN 演化:据近段对话产出 delta → 钳制已在 evolver 内 →
+   * 若到节拍且注入了 evolver,跑一次二级 OCEAN 演化:据近段对话产出 delta → 接缝侧 ±max 钳制 →
    * 应用 → 追加版本快照。返回新 OCEAN + history;未触发/失败/null/全零则返回 undefined(OCEAN 不变)。
    * 任何分支都不抛出、不打断回合(§3.2 优雅降级)。
    */
@@ -133,8 +141,12 @@ export class PersonaEngine {
     this.#recentUserTexts = [];
 
     const before = this.#snapshot.ocean;
-    const delta = await evolver.evolve({ recentUserTexts, ocean: before, turn });
-    if (delta === null || isZeroDelta(delta)) return undefined; // 无信号 → 不演化、不写快照。
+    const raw = await evolver.evolve({ recentUserTexts, ocean: before, turn });
+    if (raw === null) return undefined; // 无信号 → 不演化、不写快照。
+    // ±max 单步上限是接缝侧硬不变式(单一权威):无论哪种 evolver 实现都在此封顶,
+    // evolver 内部钳制退化为纵深防御。钳制后若全零(无有效信号)同样不演化。
+    const delta = clampOceanDelta(raw, this.#config.maxOceanDeltaPerStep);
+    if (isZeroDelta(delta)) return undefined;
 
     const after = applyOceanDelta(before, delta);
     const snapshot = buildDeltaSnapshot(before, after, delta, turn, this.#now());
