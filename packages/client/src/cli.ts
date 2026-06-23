@@ -2,7 +2,7 @@ import { createInterface } from 'node:readline';
 import { stdin, stdout, env } from 'node:process';
 import { Conversation, LightVoiceBus } from '@chat-a/runtime';
 import { createLlm, loadLlmConfig } from '@chat-a/providers';
-import { initTelemetry } from '@chat-a/observability';
+import { initTelemetry, createDecisionTraceSinkFromEnv } from '@chat-a/observability';
 import { createMemoryStoreFromEnv, LlmMemoryExtractor } from '@chat-a/memory';
 import { loadPersonaFromEnv, seedPersonaMemories, createKvPersonaStore, LlmAppraiser, LlmStanceDetector } from '@chat-a/persona';
 
@@ -36,12 +36,15 @@ async function main(): Promise<void> {
   // 分歧检测(§7#3 会反对):默认确定性话题命中;CHAT_A_STANCE=llm 用 LLM 检测器(失败降级)。
   const stanceMode = (env['CHAT_A_STANCE'] ?? 'default').toLowerCase();
   const stanceDetector = stanceMode === 'llm' ? new LlmStanceDetector({ provider: llm }) : undefined;
+  // 决策 trace(§8.1 可重放):CHAT_A_DECISION_TRACE=1 开启 SQLite sink(默认 Noop)。
+  const trace = createDecisionTraceSinkFromEnv();
   const convo = new Conversation({
     bus,
     llm,
     memory: mem.store,
     personaSeed: seed,
     personaStore,
+    traceSink: trace.sink,
     ...(appraiser ? { appraiser } : {}),
     ...(memoryExtractor ? { memoryExtractor } : {}),
     ...(stanceDetector ? { stanceDetector } : {}),
@@ -57,6 +60,7 @@ async function main(): Promise<void> {
   stdout.write(`来源: ${personaSource}${personaEnvOverride ? ' + env 覆盖' : ''}  lore=${seeded.lore} 画像=${seeded.userProfile} 观点=${seeded.selfNotions}\n`);
   stdout.write(`认知: appraiser=${appraiser ? 'llm' : 'default'}  记忆抽取=${memoryExtractor ? 'llm' : 'off'}\n`);
   stdout.write(`立场: 分歧检测=${stanceDetector ? 'llm' : 'default'}  敢顶嘴(assertiveness)=${seed.dials.assertiveness}\n`);
+  stdout.write(`决策trace: ${trace.enabled ? `on (${trace.dbPath})` : 'off'}\n`);
   if (traceOn) stdout.write('(OTel trace 已开:每回合在控制台输出 turn→llm span。)\n');
   if (cfg.provider === 'fake') {
     stdout.write('(未检测到 ANTHROPIC_API_KEY → FakeLLM 占位。设 ANTHROPIC_API_KEY 用真 Claude;\n');
@@ -88,6 +92,7 @@ async function main(): Promise<void> {
   }
 
   mem.store.close();
+  trace.sink.close();
   await telemetry?.shutdown();
 }
 

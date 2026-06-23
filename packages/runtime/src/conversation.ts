@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { SpanStatusCode } from '@opentelemetry/api';
+import { SpanStatusCode, isSpanContextValid } from '@opentelemetry/api';
 import { makeBusEvent } from '@chat-a/protocol';
 import type { LlmProvider } from '@chat-a/providers';
 import {
@@ -29,7 +29,14 @@ import {
   type SelfNotion,
   type StanceDetector,
 } from '@chat-a/persona';
-import { getTracer, GENAI, CHAT_A } from '@chat-a/observability';
+import {
+  getTracer,
+  GENAI,
+  CHAT_A,
+  NoopDecisionTraceSink,
+  type DecisionTraceSink,
+  type DecisionTraceRecalled,
+} from '@chat-a/observability';
 import type { LightVoiceBus } from './bus';
 
 function toException(err: unknown): Error {
@@ -51,6 +58,8 @@ export interface ConversationDeps {
   readonly memoryExtractor?: MemoryExtractor;
   /** 分歧检测接缝(§7#3);默认确定性 DefaultStanceDetector(话题命中)。 */
   readonly stanceDetector?: StanceDetector;
+  /** 决策 trace 写入接缝(§8.1);默认 Noop(不写)。回合收尾写,失败不打断回合。 */
+  readonly traceSink?: DecisionTraceSink;
   readonly sessionId?: string;
 }
 
@@ -72,6 +81,7 @@ export class Conversation {
   readonly #stanceDetector: StanceDetector;
   readonly #selfNotions: readonly SelfNotion[];
   readonly #assertiveness: number;
+  readonly #traceSink: DecisionTraceSink;
   readonly #sessionId: string;
   #turnSeq = 0;
 
@@ -85,6 +95,7 @@ export class Conversation {
     this.#stanceDetector = deps.stanceDetector ?? new DefaultStanceDetector();
     this.#selfNotions = seed.selfNotions ?? [];
     this.#assertiveness = seed.dials.assertiveness;
+    this.#traceSink = deps.traceSink ?? new NoopDecisionTraceSink();
     // 构造期建好 assembler(注册四个内置 contributor),实例稳定供 KV 复用(§5.4)。
     this.#assembler = new PromptAssembler([
       new PersonaSkeletonContributor(),
@@ -108,14 +119,18 @@ export class Conversation {
    * 委托 assembler 产出 { system, messages }。召回失败走空(§3.2,保留现有降级);
    * 取数在编排层、assembler 不直接碰 MemoryStore(接缝边界,§3.1)。
    */
-  #composeSystem(userText: string, toneFragment: string, stance: StanceInput): AssembledPrompt {
+  #composeSystem(
+    userText: string,
+    toneFragment: string,
+    stance: StanceInput,
+  ): { assembled: AssembledPrompt; recalled: readonly MemoryRecord[] } {
     let recalled: readonly MemoryRecord[] = [];
     try {
       recalled = this.#memory.recall(userText);
     } catch {
       recalled = [];
     }
-    return this.#assembler.assemble({
+    const assembled = this.#assembler.assemble({
       skeleton: this.#skeleton,
       recalled,
       toneFragment,
@@ -123,6 +138,8 @@ export class Conversation {
       history: this.#memory.snapshot(),
       stance,
     });
+    // 同时回传 recalled 供决策 trace 记录(§8.1);assembler 仍只消费 ctx,不破接缝。
+    return { assembled, recalled };
   }
 
   /**
@@ -140,6 +157,56 @@ export class Conversation {
       return { assertiveness, notions: res.notions.map((n) => n.position) };
     } catch {
       return { assertiveness, notions: [] };
+    }
+  }
+
+  /**
+   * 回合收尾写决策 trace(§8.1 可重放真相源)。在取得回复、落记忆后调用(不挡首字);
+   * 写入失败自吞,绝不打断回合(§3.2)。traceId/spanId 取本回合 OTel span(无效则省略,缝合用)。
+   */
+  #recordTrace(args: {
+    correlationId: string;
+    turnId: string;
+    spanContext: { traceId: string; spanId: string } | undefined;
+    createdAtMs: number;
+    latencyMs: number;
+    userText: string;
+    recalled: readonly MemoryRecord[];
+    emotion: string;
+    pad: { pleasure: number; arousal: number; dominance: number };
+    stance: StanceInput;
+    system: string;
+    messages: readonly { role: string; content: string }[];
+    reply: string;
+  }): void {
+    try {
+      const recalled: DecisionTraceRecalled[] = args.recalled.map((r) => ({
+        text: r.text,
+        subject: r.subject,
+        hits: r.hits,
+        ...(r.kind !== undefined ? { kind: r.kind } : {}),
+      }));
+      this.#traceSink.record({
+        correlationId: args.correlationId,
+        ...(args.spanContext ? { traceId: args.spanContext.traceId, spanId: args.spanContext.spanId } : {}),
+        sessionId: this.#sessionId,
+        turnId: args.turnId,
+        createdAtMs: args.createdAtMs,
+        latencyMs: args.latencyMs,
+        userText: args.userText,
+        recalled,
+        emotion: args.emotion,
+        pad: args.pad,
+        assertiveness: args.stance.assertiveness,
+        stanceNotions: args.stance.notions,
+        system: args.system,
+        messages: args.messages,
+        provider: this.#llm.id,
+        model: this.#llm.model,
+        reply: args.reply,
+      });
+    } catch {
+      /* 决策 trace 写入失败:可观测性绝不打断回合(§3.2) */
     }
   }
 
@@ -167,7 +234,8 @@ export class Conversation {
         turnSpan.setAttribute(CHAT_A.CORRELATION_ID, correlationId);
         turnSpan.setAttribute(CHAT_A.SESSION_ID, this.#sessionId);
         turnSpan.setAttribute(CHAT_A.TURN_ID, turnId);
-        this.#bus.emit(makeBusEvent('turn:start', { startedAtMs: Date.now() }, correlationId));
+        const turnStartMs = Date.now();
+        this.#bus.emit(makeBusEvent('turn:start', { startedAtMs: turnStartMs }, correlationId));
         // 回合前:读当前心情渲染本轮 tone(不改状态;情绪推进留到回合后,保首字零额外延迟)。
         const mood = this.#persona.tone();
         turnSpan.setAttribute('chat_a.emotion', mood.emotion);
@@ -175,7 +243,8 @@ export class Conversation {
         const stance = await this.#detectStance(userText);
         turnSpan.setAttribute('chat_a.stance_notions', stance.notions.length);
         // 委托 assembler:system(骨架→记忆→tone→异议)+ messages([...history, userMsg],含 volatile 追加)。
-        const { system, messages } = this.#composeSystem(userText, mood.toneFragment, stance);
+        const { assembled, recalled } = this.#composeSystem(userText, mood.toneFragment, stance);
+        const { system, messages } = assembled;
         try {
           const reply = await tracer.startActiveSpan('llm', async (llmSpan) => {
             // GenAI 语义约定:id/model 仅供 trace,业务不据此分支(承 Provider 接缝)。
@@ -226,6 +295,23 @@ export class Conversation {
           }
           // 记忆来源:有抽取器 → 抽要点入库(失败跳过);否则 naive 存用户原话(默认)。
           await this.#writeMemories(userText, reply, at);
+          // 决策 trace 收尾落库(§8.1,首字之后,失败不打断回合);trace_id/span_id 缝合 OTel。
+          const sc = turnSpan.spanContext();
+          this.#recordTrace({
+            correlationId,
+            turnId,
+            spanContext: isSpanContextValid(sc) ? { traceId: sc.traceId, spanId: sc.spanId } : undefined,
+            createdAtMs: turnStartMs,
+            latencyMs: Date.now() - turnStartMs,
+            userText,
+            recalled,
+            emotion: mood.emotion,
+            pad: mood.pad,
+            stance,
+            system,
+            messages,
+            reply,
+          });
           this.#bus.emit(makeBusEvent('turn:end', { reason: 'completed', atMs: Date.now() }, correlationId));
           turnSpan.setStatus({ code: SpanStatusCode.OK });
           return reply;

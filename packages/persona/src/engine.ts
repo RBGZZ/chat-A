@@ -1,4 +1,4 @@
-import type { Appraiser, Emotion, PersonaConfig, PersonaSeed, PersonaSnapshot, PersonaStore } from './types';
+import type { Appraiser, Emotion, Pad, PersonaConfig, PersonaSeed, PersonaSnapshot, PersonaStore } from './types';
 import { DEFAULT_PERSONA_CONFIG } from './defaults';
 import { oceanToPadBaseline, padToEmotion, stepPad } from './numeric';
 import { renderToneFragment } from './tone';
@@ -8,6 +8,8 @@ import { InMemoryPersonaStore } from './store';
 export interface ToneView {
   readonly emotion: Emotion;
   readonly toneFragment: string;
+  /** 当前 PAD 状态(供决策 trace 记录"当时心情",§8.1)。 */
+  readonly pad: Pad;
 }
 
 export interface PersonaEngineOptions {
@@ -52,6 +54,7 @@ export class PersonaEngine {
     return {
       emotion: padToEmotion(this.#snapshot.pad),
       toneFragment: renderToneFragment(this.#snapshot.pad, dials),
+      pad: this.#snapshot.pad,
     };
   }
 

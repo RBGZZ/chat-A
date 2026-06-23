@@ -18,6 +18,11 @@ REM
 REM Disagreement (§7#3 "会反对"): she pushes back using the card's selfNotions,
 REM gated by the assertiveness dial (low = compliant, high = opinionated).
 REM Deterministic topic-match by default; set CHAT_A_STANCE=llm for LLM detection.
+REM
+REM Decision trace (§8.1 replay): CHAT_A_DECISION_TRACE=1 logs each turn's full
+REM decision chain (recall/mood/stance/assembled prompt/reply) to a local SQLite
+REM truth source (CHAT_A_DECISION_TRACE_DB, default chat-a-trace.db) for replay.
+REM Distinct from CHAT_A_TRACE (OTel console spans); stitched by same trace_id/span_id.
 
 if not exist ".env.local" (
   echo [chat-A] Missing .env.local. Create it in the project root with one line:
