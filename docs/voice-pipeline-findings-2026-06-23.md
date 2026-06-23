@@ -93,6 +93,32 @@ TtsCloneConfig {
 - **嵌入式**:**克隆不下端(均需 GPU)**——端侧用固定音色 **Kokoro-onnx(Apache,纯 CPU,24k)/ Piper / Sherpa-ONNX**;克隆走云或 PC 大脑侧,端侧只收 24k PCM 流。
 - **云兜底**:ElevenLabs(voice_id + stability/similarity_boost)。
 
+## 5b. 补充:VAD / EOU / 端侧引擎选型（GitHub 实时语音管线调研,2026-06-23）
+> 排除已深研 Pipecat/LiveKit/voice-core/RealtimeVoiceChat,聚焦新框架/引擎。[V]=README 验证 / [I]=推断。
+
+### EOU(说完没,§4 动态 endpointing,**解决 §11 EOU 本地模型选型待决项**)
+- **Smart-Turn v3 = 端侧 TurnDetector 首选** [V]:**8MB INT8 ONNX、~8M 参、x86 ~12ms / ARM ~15ms、23 语种含中文、音频原生(用韵律非转写)、BSD-2(商用干净)**。配方 = Whisper-Tiny encoder + 线性头 + QAT 量化。→ chat-A §4 EOU 直接选它(待真 Pi benchmark)。
+- **LiveKit turn-detector:抄策略不抄模型**(66-281MB + 自定义 License)[V]:EOU 概率 vs **per-language `unlikely_threshold`** + `min/max_endpointing_delay` 兜底——与设计"自校准延迟预算"同算法的独立佐证;per-language 阈值合"行为即配置"(中文句末韵律≠英文)。
+- **TEN 3 态语义 EOU**(Finished/Unfinished/Wait)[V]:比二元静音丰富——Wait=显式别说话(对接硬打断通道)、Unfinished=思考停顿别抢话。建议作 chat-A EOU **输出契约**(模型本体 7B 走云)。
+
+### VAD(有没有声,§4)
+- **Silero VAD = 标准 VAD 层** [V]:~2MB ONNX、<1ms/chunk、16k/512 固定帧;**sherpa-onnx/faster-whisper/whisper.cpp 全内置它** → 标准化到 Silero = PC/Pi 同一 VAD 同一 framing。
+- **TEN VAD**(306KB,RTF<0.016,Apache)[V]:号称静音转换检测比 Silero 快,值得真 Pi 对测。
+
+### 端侧 STT/TTS 引擎(修正/补强 §4.3)
+- **sherpa-onnx = 嵌入式最佳契合** [V]:一套 ONNX API、int8、显式 Pi/ARM/RISC-V/NPU、Apache、全离线、流式 Zipformer(zh-en)+ 自带语种 ID 路由 + 规则端点。
+- **whisper.cpp = Pi 真 STT 引擎**(GGML+NEON,tiny Pi4 ~实时,显式 Pi 支持);**faster-whisper = 默认本地 STT**(同库改 model/compute_type 缩放,带概率语种检测驱动 §4.1 路由)。
+- **🔧 修正**:第 5 节"端侧 TTS 仅 Kokoro/Edge-TTS"应**补入 Piper**——**Pi5 实时已验证(VITS+ONNX,低 RAM),是端侧最被验证的 TTS**。Kokoro Pi RTF 桌面~0.5、**Pi 未验证**(Cortex-A72 偏紧)。**Edge-TTS 仅作 fallback**:依赖微软未公开端点 + `Sec-MS-GEC` token、ToS 灰区、易 403。**license 警示**:Piper 维护 fork 与 Edge-TTS 均 **GPL-3.0**(端侧分发查 copyleft)。
+- **编排库**:RealtimeTTS(30+ 引擎统一流式,Piper+Kokoro+Edge 同屋檐)、RealtimeSTT(两级 VAD WebRTC→Silero)、speaches(OpenAI 兼容即换 Provider 的"语音界 Ollama")——可作 §4.3 接缝实现参考。
+
+### audio-in LLM 路径(§4 双路径之"多模态 audio-in",§4.3 接缝要留松)
+- **Qwen-Omni(经 DashScope 托管)= 最现实的云 audio-in Provider** [V]:半双工,与 chat-A 显式打断/回合机制**互补不冲突**;Provider 接口(送音频回合→得音频/文本回合)直接契合 §4.3。
+- **Ultravox**:STT+LLM 融合为单个 `AudioLLMProvider`,省 ASR 跳 ~150-200ms 且保留韵律喂 §5/§6 → §4.3 应允许这种"折叠"而不重写管线。
+- **Moshi / MiniCPM-o 4.5**(全双工 what-if):原生全双工把打断溶进模型,§4.3 边界要留松让未来全双工 Provider 自管回合、**绕过**显式打断层;但**均非 Pi 可行(24GB+ 底线)**,嵌入式仍 STT+LLM+TTS 兜底。
+
+### license 速查(商用)
+干净:Silero(MIT)/Smart-Turn(BSD-2)/sherpa-onnx/Kokoro/CosyVoice(Apache)/whisper.cpp/faster-whisper/speaches/GPT-SoVITS(MIT)。**需审查**:LiveKit turn-detector(自定义)、Fish-Speech(非商用)、F5-TTS 权重(CC-BY-NC)、Piper fork/Edge-TTS(GPL-3.0)。
+
 ## 6. 不确定项(诚实标注)
 - Edge-TTS 输出 "24kHz/48kbit mono mp3" 为微软服务惯例 [推断];管线务必先解码再重采样。
 - GPT-SoVITS / CosyVoice2 license(MIT/Apache)为 [推断],**商用落地前必须核对各仓库 LICENSE**。
