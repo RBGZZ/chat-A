@@ -306,6 +306,24 @@ export interface MemoryStore {
    * 返回 `{ id, text }`,数量受 `limit` 约束(省略用配置 `recallLimit`)。读失败优雅降级为空数组(§3.2)。
    */
   memoriesNeedingEmbedding(limit?: number): readonly { readonly id: number; readonly text: string }[];
+  /**
+   * 读关系亲密度(承 §6/§5.3b 关系亲密度小节):取 `people.relationship_state.closeness`
+   * 并按距上次互动时长**惰性衰减** `c·0.5^(days/H)`,夹到 `[closenessFloor, 1]`;
+   * 无记录返回配置 `initialCloseness`。**读不写回**(承 §5.5 衰减纪律)。生产用 `Date.now()`。
+   */
+  getCloseness(personId: string): number;
+  /**
+   * 同 `getCloseness`,但**可注入时刻** `atMs`(承 §3.2 可测试性):
+   * 供确定性测试时间衰减、以及编排层在固定时刻演化用;生产 `getCloseness` 即以"现在"调用它。
+   */
+  getClosenessAt(personId: string, atMs: number): number;
+  /**
+   * 抬升关系亲密度(承 §6/§2.3,回合收尾按 appraiser 正向 valence 调用,非首字热路径):
+   * 先取衰减后当前值 `c`,`c' = clamp(c + closenessUpK·clamp(valencePos,0,1)·(1−c), floor, 1)`
+   * (渐近饱和),写回 `relationship_state` JSON `{closeness:c', closenessUpdatedAtMs:atMs}`,返回 `c'`。
+   * `valencePos≤0` 时只刷新衰减基线(等价 `c'=c`,更新时间戳)。对未知 personId **幂等不抛**(§3.2)。
+   */
+  bumpCloseness(personId: string, valencePos: number, atMs: number): number;
   /** 通用状态 KV 读(真相源持久化原语;persona 状态等复用)。无则 undefined。 */
   getState(key: string): string | undefined;
   /** 通用状态 KV 写(同 key 覆盖)。 */

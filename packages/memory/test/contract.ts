@@ -785,5 +785,35 @@ export function runMemoryStoreContract(name: string, make: MakeStore): void {
       expect(() => s.recallHybrid('查询', { queryVector: [1, 0, 0], limit: 10 })).not.toThrow();
       s.close();
     });
+
+    // —— 关系亲密度 closeness(中速慢变量,承 §6/§5.3b;惰性衰减 + 渐近抬升;golden 两实现一致)——
+
+    // 主用户 id(缺省值,与 makePrimaryPerson 一致;测试常量,避免硬编码散落)。
+    const PRIMARY_PERSON_ID = 'primary';
+
+    it('closeness 默认初值 + 抬升渐近饱和 + 惰性衰减', () => {
+      const s = make(); // 工厂注入,主用户已 seed
+      const pid = PRIMARY_PERSON_ID;
+      expect(s.getCloseness(pid)).toBeCloseTo(0.1, 5); // 默认初值
+      const t0 = 1_000_000_000_000;
+      const c1 = s.bumpCloseness(pid, 1, t0); // 满正向
+      expect(c1).toBeCloseTo(0.1 + 0.1 * (1 - 0.1), 5); // 0.19
+      const c2 = s.bumpCloseness(pid, 1, t0); // 再抬,渐近
+      expect(c2).toBeGreaterThan(c1);
+      expect(c2).toBeLessThan(1);
+      // 30 天后(半衰期)读取应≈半衰
+      const t30 = t0 + 30 * 24 * 3600 * 1000;
+      expect(s.getClosenessAt(pid, t30)).toBeCloseTo(c2 / 2, 2);
+      s.close();
+    });
+
+    it('bumpCloseness valence≤0 不升只刷新基线;未知 person 不抛', () => {
+      const s = make();
+      const pid = PRIMARY_PERSON_ID;
+      const c = s.bumpCloseness(pid, 0, 1_000_000_000_000);
+      expect(c).toBeCloseTo(0.1, 5);
+      expect(() => s.bumpCloseness('nope', 1, 1)).not.toThrow();
+      s.close();
+    });
   });
 }

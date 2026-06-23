@@ -18,7 +18,9 @@ import type {
 } from './types';
 import {
   anchorIndex,
+  bumpClosenessValue,
   cosineSimilarity,
+  decayCloseness,
   decayFactor,
   decodeEmbedding,
   emotionResonance,
@@ -1024,6 +1026,60 @@ export class SqliteMemoryStore implements MemoryStore {
     } catch (err) {
       this.#onError(err, 'memoriesNeedingEmbedding');
       return [];
+    }
+  }
+
+  /**
+   * 读 `people.relationship_state` JSON → `{closeness, updatedAtMs}`(承 §6/§5.3b);
+   * 无行 / 无 JSON / 解析失败 / 字段缺失均返回 null(由调用方落到 `initialCloseness`,容错不抛)。
+   * 存储字段名 `closenessUpdatedAtMs`,读时映射为内部 `updatedAtMs`(JSON 形状单一权威,与 InMemory 一致)。
+   */
+  #readRel(personId: string): { closeness: number; updatedAtMs: number } | null {
+    const row = this.#db
+      .prepare(`SELECT relationship_state FROM people WHERE person_id = ?`)
+      .get(personId);
+    if (row === undefined) return null;
+    const raw = row['relationship_state'];
+    if (raw === null || raw === undefined) return null;
+    try {
+      const parsed = JSON.parse(asString(raw)) as Record<string, unknown>;
+      const closeness = parsed['closeness'];
+      const updatedAtMs = parsed['closenessUpdatedAtMs'];
+      if (typeof closeness !== 'number' || typeof updatedAtMs !== 'number') return null;
+      return { closeness, updatedAtMs };
+    } catch {
+      return null;
+    }
+  }
+
+  getCloseness(personId: string): number {
+    return this.getClosenessAt(personId, this.#now());
+  }
+
+  getClosenessAt(personId: string, atMs: number): number {
+    try {
+      const rel = this.#readRel(personId);
+      // 无记录(含未知 person / 容错降级):返回配置初值(陌生起步,承 §6)。读不写回(§5.5)。
+      if (rel === null) return this.#cfg.initialCloseness;
+      return decayCloseness(rel.closeness, rel.updatedAtMs, atMs, this.#cfg);
+    } catch (err) {
+      this.#onError(err, 'getClosenessAt');
+      return this.#cfg.initialCloseness;
+    }
+  }
+
+  bumpCloseness(personId: string, valencePos: number, atMs: number): number {
+    try {
+      // 先取衰减后当前值,再按正向程度渐近抬升(单一权威公式,承 §6/§2.3)。
+      const cur = this.getClosenessAt(personId, atMs);
+      const next = bumpClosenessValue(cur, valencePos, this.#cfg);
+      const json = JSON.stringify({ closeness: next, closenessUpdatedAtMs: atMs });
+      // 写回 relationship_state;未知 personId 命中 0 行,幂等不抛(承 §3.2)。
+      this.#db.prepare(`UPDATE people SET relationship_state = ? WHERE person_id = ?`).run(json, personId);
+      return next;
+    } catch (err) {
+      this.#onError(err, 'bumpCloseness');
+      return this.#cfg.initialCloseness;
     }
   }
 
