@@ -39,3 +39,4 @@ reference/
 
 # User's actual persona card (personal data; persona.example.yaml is the committed template)
 persona.yaml
+.claude/worktrees/
