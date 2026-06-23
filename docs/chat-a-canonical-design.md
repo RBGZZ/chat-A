@@ -222,6 +222,16 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 
 > §4 的打断/延迟工程增量(预测性生成、EOU 概率驱动动态 endpointing、先 pause 后定夺打断 + 半句写回上下文、TTS 关 context 而非断连等)见 `voice-infra-findings-2026-06-22.md`,落在 B/C 层。
 
+### 4.3 语音 Provider 可换性 = 嵌入式硬约束(2026-06-23 参考代码调研)
+> 依据 `embedded-lightweight-findings-2026-06-23.md`(精读 8 个参考项目簇)。视角:**PC 优先开发,但为嵌入式预留轻量化后路,且后路绝不能被 day-1 决策堵死。**
+
+- **🚨 TTS 是嵌入式真正的瓶颈(不是 LLM)**:LLM 可量化/可回源,但 CoquiTTS/GPT-SoVITS 无 ARM 优化。可行的嵌入式 TTS 仅 **Kokoro ONNX(~100MB 本地,projectBEA 验证)+ Edge-TTS(云,免费流式,Nexus 默认)**。→ **STT/TTS/LLM/Embedder 必须从 day 1 做成可换 Provider(接缝 2),核心层禁止引入无 ARM 路径的硬依赖**(CoquiTTS 这类只能作 PC 可选 Provider)。
+- **最高优先接缝 = Factory + discriminated-union 配置**(抄 Open-LLM-VTuber):五类后端(STT/TTS/LLM/Embedder/人格)全走 `create_X(config)` + 判别联合配置,**零代码切换、无 if/else 散落、无重启**。这是"PC↔嵌入式分档"的物理基础,后补代价极大。Embedder 接缝见 §5.7。
+- **profile gate `--target pc|raspberry|browser`**:档间差异**全在配置 + Factory 选择**,代码零分叉(承 §5.6)。即使当前只实现 pc 档,接缝先留好 `device(cpu/cuda)`/`compute_type(int8/float16)` 字段。
+- **能力门 fail-fast + 优雅降级**:Provider 声明 `support_tools`/`support_streaming`/`requires_cuda`,**加载前检查能力**(不是失败后回退,避免状态歧义);ASR 失败→纯文本输入,TTS 失败→只显示文本无音频(参考项目普遍缺此降级,chat-A 须补,承 §3.2)。
+- **延迟阈值全自校准、不写死**(LiveKit 范式,承 §4 自校准延迟预算):PC/Pi 同代码自适配。
+- 其余可借鉴(流式 TTS chunker 降 TTFA / CJK 用 grapheme count / failover orchestrator + 成本闸门 / idle 状态机两档同代码 / bullet-list 上下文省 KV)详见调研文档,落 B/C 层与 §5.4。
+
 ---
 
 ## 5. 认知记忆架构(模拟人类记忆,本设计核心)
@@ -301,6 +311,12 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 
 > 认知**分层是逻辑概念,物理后端统一**(SQLite 真相源 + sqlite-vec 派生索引,§5.2)——既保住嵌入式可行性,又避免单机项目背上分布式组件的复杂度。
 > **接缝预留**:"向量存取"做成接缝(承接缝 7),`sqlite-vec → LanceDB` 在记忆量逼近 ~10 万 或弱 CPU(Pi 4)超延迟预算时**平替**,召回逻辑不动。Redis/专用向量库仅作**未来真有横向扩展需求**时的可选项,当前不引入。
+
+> **🆕 轻量化接缝清单(2026-06-23 参考代码调研,详见 `embedded-lightweight-findings-2026-06-23.md`)**——"现在埋零成本、后补堵死后路"的接缝,贯穿 §4.3/§5.7:
+> - **现在埋**:① 五类后端 **Factory + discriminated-union**(最高优先,§4.3)② profile gate `--target`(留 device/compute_type 字段)③ 能力门 fail-fast + STT/TTS 降级链 ④ generation 标签贯穿(承 §4/§8.1)⑤ 记忆向量 **BLOB 不透明存储**(换 embedder 后台 re-embed 写回同列,免 schema 迁移)⑥ 人格情绪**纯本地确定性**(LLM 情感评估仅可选增强,已落地)。
+> - **以后填**:Pi 量化 runbook(Llama.cpp GGUF + Kokoro ONNX + Sherpa-ONNX,目标 ~1.2GB 纯 CPU)、idle 状态机低功耗档、failover orchestrator + 成本闸门。
+> - **避开**:无条件引 transformers/ChromaDB/Milvus、硬编码后端、毫秒级衰减写回、全表余弦无上限、agentic 记忆操作(均见调研反模式表)。
+> - ⚠️ **所有 Pi 延迟数字均为估算,需真实树莓派实测后再定阈值**。
 
 ### 5.7 Embedder(接缝 7)
 - 默认 **BGE-M3**(BAAI,中文标杆,dense+sparse 天然混合,8192 ctx,大脑在 PC/服务端跑无压力)。
