@@ -4,6 +4,8 @@ export * from './numeric';
 export * from './tone';
 export * from './appraiser';
 export * from './llm-appraiser';
+export * from './ocean-evolution';
+export * from './llm-ocean-evolver';
 export * from './store';
 export * from './seed';
 export * from './engine';

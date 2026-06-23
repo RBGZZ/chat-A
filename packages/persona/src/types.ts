@@ -46,13 +46,55 @@ export interface PersonaConfig {
   readonly coldStartTurns: number;
   /** 冷启动加速回弹系数(放大 spring k)。 */
   readonly coldStartReboundFactor: number;
+  /** 二级 OCEAN delta 演化节拍:每多少轮触发一次信号分析(§6.1,默认 20)。 */
+  readonly evolutionEveryTurns: number;
+  /** 单次演化每维 OCEAN delta 上限(钳制,§6.1,默认 0.01)。 */
+  readonly maxOceanDeltaPerStep: number;
 }
 
-/** 持久化快照:人格(OCEAN)+ 当前情感(PAD)+ 已历轮次。 */
+/** OCEAN 五维微调量(二级演化产出,§6.1);各维通常极小并受 maxOceanDeltaPerStep 钳制。 */
+export type OceanDelta = Ocean;
+
+/**
+ * 一次 OCEAN 演化的版本快照(§6.1 版本快照 history,承数据迁移纪律:可回溯/可回滚)。
+ * before=旧 OCEAN(回滚目标),after=新 OCEAN,delta=实际应用(已钳制)的微调。
+ */
+export interface OceanDeltaSnapshot {
+  readonly turn: number;
+  /** ISO 时间戳(可回溯)。 */
+  readonly at: string;
+  readonly before: Ocean;
+  readonly after: Ocean;
+  readonly delta: OceanDelta;
+}
+
+/**
+ * 持久化快照:人格(OCEAN)+ 当前情感(PAD)+ 已历轮次 + 可选演化 history。
+ * history 为向后兼容的加法:旧快照无此字段,读回视作空(§3.2 迁移纪律)。
+ */
 export interface PersonaSnapshot {
   readonly ocean: Ocean;
   readonly pad: Pad;
   readonly turn: number;
+  /** OCEAN 二级演化的版本快照序列(可选;缺省=尚无演化)。 */
+  readonly history?: readonly OceanDeltaSnapshot[];
+}
+
+/** 二级 OCEAN 演化的输入(§6.1):本周期累积的近段对话 + 当前 OCEAN + 触发轮次。 */
+export interface OceanEvolveContext {
+  /** 本演化周期内累积的用户输入(近段对话信号)。 */
+  readonly recentUserTexts: readonly string[];
+  readonly ocean: Ocean;
+  readonly turn: number;
+}
+
+/**
+ * 二级 OCEAN 演化接缝(§3.1/§6.1):据近段对话产出 OCEAN 微调 delta。
+ * 异步以容纳 LLM 实现;返回 null = 本次不演化(信号不足/失败降级)。
+ * **无确定性默认实现**:性格漂移需语义理解,默认行为是"不注入即不演化"。
+ */
+export interface OceanEvolver {
+  evolve(ctx: OceanEvolveContext): Promise<OceanDelta | null>;
 }
 
 /**
