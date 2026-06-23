@@ -112,7 +112,7 @@ async function main(): Promise<void> {
         sessionId,
         env,
       });
-      stdout.write(`语音: on  设备=${voice.info.device}  STT=${voice.info.stt}  TTS=${voice.info.tts}\n`);
+      stdout.write(`语音: on  设备=${voice.info.device}  STT=${voice.info.stt}  TTS=${voice.info.tts}  VAD=${voice.info.vad}  EOU=${voice.info.eou}\n`);
     } catch (err) {
       stdout.write(`语音: 启动失败(回落纯文字):${err instanceof Error ? err.message : String(err)}\n`);
     }
