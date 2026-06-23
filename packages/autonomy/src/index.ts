@@ -18,3 +18,5 @@ export * from './arbiter';
 export * from './budget';
 export * from './open-thread';
 export * from './open-thread-skill';
+export * from './idle-emotion-arc';
+export * from './idle-emotion-arc-skill';
