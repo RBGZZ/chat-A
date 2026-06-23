@@ -58,6 +58,12 @@ export interface ConversationDeps {
   /** 回合执行策略接缝(§9 P3 前置);默认 SingleShotStrategy(单趟流式回合)。 */
   readonly strategy?: TurnStrategy;
   readonly sessionId?: string;
+  /**
+   * 主用户稳定标识(§5.3b / §6.1b 关系亲密度):closeness 读写归属此 person。
+   * 默认 `'primary'`,与 memory 配置默认一致;若 memory 用 env 自定义了主用户 ID,
+   * 应在此一并传入相同值(保持 closeness 归属一致)。
+   */
+  readonly primaryPersonId?: string;
 }
 
 /**
@@ -80,6 +86,8 @@ export interface TurnDeps {
   readonly extractor: MemoryExtractor;
   readonly extractEnabled: boolean;
   readonly traceSink: DecisionTraceSink;
+  /** 主用户标识(§6.1b):closeness 读写归属;回合前读、收尾抬升。 */
+  readonly primaryPersonId: string;
 }
 
 /**
@@ -119,8 +127,10 @@ export interface TurnStrategy {
 export class SingleShotStrategy implements TurnStrategy {
   async run(ctx: TurnContext): Promise<string> {
     const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs, turn } = ctx;
-    // 回合前:读当前心情渲染本轮 tone(不改状态;情绪推进留到回合后,保首字零额外延迟)。
-    const mood = deps.persona.tone();
+    // 回合前:读关系亲密度(§6.1b,惰性衰减、同步快)+ 当前心情渲染本轮 tone
+    // (不改状态;情绪推进/closeness 抬升留到回合后,保首字零额外延迟)。
+    const closeness = deps.memory.getCloseness(deps.primaryPersonId);
+    const mood = deps.persona.tone(closeness);
     turnSpan.setAttribute('chat_a.emotion', mood.emotion);
     // 分歧检测(§7#3):确定性默认同步极快;LLM 实现会增首字延迟(默认关)。降级见 turn-shared。
     const stance = await detectStance(deps, userText);
@@ -234,6 +244,7 @@ export class Conversation {
       extractor,
       extractEnabled,
       traceSink,
+      primaryPersonId: deps.primaryPersonId ?? 'primary',
     };
     this.#strategy = deps.strategy ?? new SingleShotStrategy();
   }

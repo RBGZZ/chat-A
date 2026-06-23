@@ -45,7 +45,8 @@ export class ToolCallingStrategy implements TurnStrategy {
     }
     const completeWithTools = deps.llm.completeWithTools.bind(deps.llm);
 
-    const mood = deps.persona.tone();
+    const closeness = deps.memory.getCloseness(deps.primaryPersonId);
+    const mood = deps.persona.tone(closeness);
     turnSpan.setAttribute('chat_a.emotion', mood.emotion);
     const stance = await detectStance(deps, userText);
     turnSpan.setAttribute('chat_a.stance_notions', stance.notions.length);

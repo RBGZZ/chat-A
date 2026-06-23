@@ -128,6 +128,13 @@ export async function finalizeTurn(
     /* 立场本轮不演化,回合继续 */
   }
   await writeMemories(deps, args.userText, args.reply, at);
+  // 关系亲密度抬升(§6.1b):按当轮情绪正向程度(pleasure 正分量)缓升,渐近饱和;
+  // 在回复之后、非首字热路径;失败不打断回合(§3.2)。
+  try {
+    deps.memory.bumpCloseness(deps.primaryPersonId, Math.max(args.mood.pad.pleasure, 0), at);
+  } catch {
+    /* closeness 本轮不更新,回合继续 */
+  }
   // 决策 trace 收尾落库(§8.1,失败自吞);trace_id/span_id 缝合 OTel。
   try {
     const sc = args.turnSpan.spanContext();
