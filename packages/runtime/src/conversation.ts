@@ -25,6 +25,7 @@ import {
   XIAOXUE_SEED,
   DefaultStanceDetector,
   type Appraiser,
+  type OceanEvolver,
   type PersonaSeed,
   type PersonaStore,
   type SelfNotion,
@@ -61,6 +62,8 @@ export interface ConversationDeps {
   readonly stanceDetector?: StanceDetector;
   /** 决策 trace 写入接缝(§8.1);默认 Noop(不写)。回合收尾写,失败不打断回合。 */
   readonly traceSink?: DecisionTraceSink;
+  /** 二级 OCEAN 演化接缝(§6.1);默认不注入 = OCEAN 恒定(opt-in,失败降级)。 */
+  readonly oceanEvolver?: OceanEvolver;
   /** 回合执行策略接缝(§9 P3 前置);默认 SingleShotStrategy(单趟流式回合)。 */
   readonly strategy?: TurnStrategy;
   readonly sessionId?: string;
@@ -356,6 +359,7 @@ export class Conversation {
       seed,
       ...(deps.appraiser ? { appraiser: deps.appraiser } : {}),
       ...(deps.personaStore ? { store: deps.personaStore } : {}),
+      ...(deps.oceanEvolver ? { oceanEvolver: deps.oceanEvolver } : {}),
     });
     // 注入了抽取器 → 用抽取的要点;否则保持 naive "存用户原话"(默认行为不变)。
     const extractEnabled = deps.memoryExtractor !== undefined;
