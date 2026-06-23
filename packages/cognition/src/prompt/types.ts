@@ -61,6 +61,8 @@ export interface PromptContext {
   readonly history: readonly ChatMessage[];
   /** 本轮分歧检测结果(§7#3);由编排层调 StanceDetector 产出,缺省/无异议时省略。 */
   readonly stance?: StanceInput;
+  /** expressiveness 旋钮值 [0,1](§7#4);由编排层据人格旋钮填入,微调风格强度。缺省时 StyleDisciplineContributor 回落中性档。 */
+  readonly expressiveness?: number;
   /** volatile 上下文键值(时间戳/turnId 等),追加到末条用户消息(§5.4);P1 可空。 */
   readonly volatile?: ReadonlyArray<readonly [key: string, value: string]>;
 }

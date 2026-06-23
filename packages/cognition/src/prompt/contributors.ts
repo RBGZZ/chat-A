@@ -1,4 +1,4 @@
-import { PROMPT_PRIORITY, DISSENT_ASSERTIVENESS } from './config';
+import { PROMPT_PRIORITY, DISSENT_ASSERTIVENESS, STYLE_EXPRESSIVENESS } from './config';
 import type { PromptContributor, PromptFragment, PromptContext } from './types';
 
 /**
@@ -57,5 +57,40 @@ export class DissentContributor implements PromptContributor {
       );
     }
     return { text: `[立场]\n${parts.join('\n')}`, priority: PROMPT_PRIORITY.dissent, tier: 'peripheral' };
+  }
+}
+
+/**
+ * 对话风格纪律(§7#4 真实对话纪律):每轮注入"像真人朋友那样说话"的生成纪律,作为每轮主动 steer
+ * (骨架靠前易被长对话稀释,这里放高注意力档补一道)。硬纪律恒守,口头禅/语气词放开程度由
+ * expressiveness 外置分档微调(无 magic number)。同步无 I/O(承缝契约);priority 在 tone 之后、
+ * dissent 之前;tier='peripheral'(极端预算下可被裁,核心事实/记忆优先)。
+ */
+export class StyleDisciplineContributor implements PromptContributor {
+  contribute(ctx: PromptContext): PromptFragment | null {
+    // 三档恒守的硬纪律:风格底线,不随旋钮变化。
+    const hard = [
+      '说话像真人朋友,不像写文章:每次尽量一两句话,口语、自然。',
+      '不要说"作为AI/作为助手"这类自指,也别提示自己是程序;就当你是你自己。',
+      '别过度解释、别罗列要点、别长篇大论;一次只说重点,有来有回。',
+    ];
+    // 据 expressiveness 分档调"口头禅·语气词"放开程度(缺省回落中性档代表值)。
+    const e = ctx.expressiveness ?? (STYLE_EXPRESSIVENESS.reservedCeil + STYLE_EXPRESSIVENESS.expressiveFloor) / 2;
+    let flavor: string;
+    if (e < STYLE_EXPRESSIVENESS.reservedCeil) {
+      // 含蓄档:更克制,语气词点到为止。
+      flavor = '语气克制内敛,少用语气词和口头禅,话更短一些。';
+    } else if (e >= STYLE_EXPRESSIVENESS.expressiveFloor) {
+      // 外放档:更外向,允许更多语气词/口头禅/接话。
+      flavor = '可以外放些:多用"嗯""嗯嗯""哈哈"这类语气词接话,带点自己的口头禅,情绪写在脸上。';
+    } else {
+      // 中性档:自然为度。
+      flavor = '语气自然,可以适当用"嗯""嗯嗯"接话、带点口头禅,别端着。';
+    }
+    return {
+      text: `[说话方式]\n${[...hard, flavor].join('\n')}`,
+      priority: PROMPT_PRIORITY.style,
+      tier: 'peripheral',
+    };
   }
 }

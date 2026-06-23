@@ -12,8 +12,22 @@ export const PROMPT_PRIORITY = {
   memoryRecall: 500,
   /** tone:大(靠近末尾/最近注意力)。 */
   tone: 900,
+  /** 对话风格纪律(§7#4):tone 之后、dissent 之前的高注意力区——风格 steer 比"当前情绪"更想贴近末尾,但仍让立场/反谄媚压轴。 */
+  style: 920,
   /** 异议(§7#3):tone 之后,作为本轮最强 steer(最靠近末尾)。 */
   dissent: 950,
+} as const;
+
+/**
+ * expressiveness → 对话风格分档(§7#4,行为即配置,无 magic number):
+ * < reservedCeil:含蓄档(更短、收敛口头禅/语气词);
+ * [reservedCeil, expressiveFloor):中性档(默认,缺省 expressiveness 回落此档);
+ * >= expressiveFloor:外放档(更多口头禅/语气词)。
+ * 仅调"口头禅·语气词放开程度";硬纪律(禁"作为AI…"/禁过度解释/别像写文章/话短口语)三档恒守。
+ */
+export const STYLE_EXPRESSIVENESS = {
+  reservedCeil: 0.35,
+  expressiveFloor: 0.65,
 } as const;
 
 /**

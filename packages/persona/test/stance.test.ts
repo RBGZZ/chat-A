@@ -6,6 +6,7 @@ import {
   LlmStanceDetector,
   parsePersonaCard,
   seedPersonaMemories,
+  XIAOXUE_SEED,
   type SelfNotion,
   type StanceDetector,
 } from '../src/index';
@@ -57,6 +58,40 @@ describe('DefaultStanceDetector: 话题命中 + assertiveness 门槛', () => {
       assertiveness: 0.9,
     });
     expect(r.notions).toHaveLength(2);
+  });
+});
+
+describe('XIAOXUE_SEED.selfNotions: 默认种子自带非空观点,可被命中(§7#3)', () => {
+  it('默认种子有 3 条以上观点', () => {
+    expect((XIAOXUE_SEED.selfNotions ?? []).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('命中"熬夜"话题 → 返回相关立场', async () => {
+    const r = await new DefaultStanceDetector().detect({
+      userText: '我今天又要熬夜赶工了',
+      selfNotions: XIAOXUE_SEED.selfNotions ?? [],
+      assertiveness: 0.5,
+    });
+    expect(r.notions.length).toBeGreaterThan(0);
+    expect(r.notions[0]?.position).toContain('熬夜');
+  });
+
+  it('命中"咖啡"话题 → 返回手冲立场', async () => {
+    const r = await new DefaultStanceDetector().detect({
+      userText: '速溶咖啡又快又省事',
+      selfNotions: XIAOXUE_SEED.selfNotions ?? [],
+      assertiveness: 0.5,
+    });
+    expect(r.notions[0]?.position).toContain('手冲');
+  });
+
+  it('无关话题 → 空命中', async () => {
+    const r = await new DefaultStanceDetector().detect({
+      userText: '明天会下雨吗',
+      selfNotions: XIAOXUE_SEED.selfNotions ?? [],
+      assertiveness: 0.5,
+    });
+    expect(r.notions).toHaveLength(0);
   });
 });
 
