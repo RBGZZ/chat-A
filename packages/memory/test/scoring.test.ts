@@ -2,15 +2,28 @@ import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_MEMORY_CONFIG,
   EMOTION_RESONANCE_MATRIX,
+  defaultNormalize,
   emotionResonance,
   emotionSector,
+  entityKeys,
+  hopDecay,
   keywordScore,
   mixedRecallScore,
+  normalizeAndFuse,
   recallScore,
   resolveMemoryConfig,
   type Pad,
+  type RawRecallSignals,
   type RecallSignal,
+  type RecallSignalWeights,
 } from '../src/index';
+
+/** 构造一条候选的原始信号(测试便捷;缺省各路缺席)。 */
+function rawSignals(p: Partial<RawRecallSignals>): RawRecallSignals {
+  const off: RecallSignal = { present: false, value: 0 };
+  return { keyword: off, strength: off, emotion: off, association: off, ...p };
+}
+const EQUAL: RecallSignalWeights = { keyword: 1, strength: 1, emotion: 1, association: 1 };
 
 /**
  * §5.5 混合召回单一权威公式 golden:锁住关键词归一(自适应中点)、自适应分母混合、
@@ -165,5 +178,136 @@ describe('§5.5 混合召回打分归一(单一权威公式 golden)', () => {
     it('= importance × decay', () => {
       expect(recallScore(0.6, 0.5)).toBeCloseTo(0.3, 6);
     });
+  });
+});
+
+/**
+ * §5.9 缺口③ 多信号 min-max 归一 + 可配权重融合(单一权威公式 golden)。
+ * 锁住:候选集尺度归一、量纲可比、等权/可配权重、退化边界、不丢"仅某路强信号"项。
+ */
+describe('§5.9 缺口③ normalizeAndFuse(min-max 归一 + 权重融合)', () => {
+  it('候选集内单路 min-max 归一:max→1、min→0(量纲可比)', () => {
+    // 关键词原始命中数量纲(2 vs 1)与强度量纲(0.9 vs 0.1)各自归一到 [0,1]。
+    const cands = [
+      rawSignals({ keyword: { present: true, value: 2 }, strength: { present: true, value: 0.1 } }),
+      rawSignals({ keyword: { present: true, value: 1 }, strength: { present: true, value: 0.9 } }),
+    ];
+    const out = normalizeAndFuse(cands, EQUAL);
+    // A:(keyword 归一 1 + strength 归一 0)/2 = 0.5;B:(0 + 1)/2 = 0.5 → 量纲已可比、等权下打平。
+    expect(out[0]).toBeCloseTo(0.5, 6);
+    expect(out[1]).toBeCloseTo(0.5, 6);
+  });
+
+  it('量纲可比:不会因关键词原始数远大于强度而失真(归一前会失真)', () => {
+    // 关键词原始命中数 100 远大于强度 1;若不归一,关键词会碾压。归一后两路同尺度。
+    const cands = [
+      rawSignals({ keyword: { present: true, value: 100 }, strength: { present: true, value: 0.0 } }),
+      rawSignals({ keyword: { present: true, value: 0 }, strength: { present: true, value: 1.0 } }),
+    ];
+    const out = normalizeAndFuse(cands, EQUAL);
+    // A:(1+0)/2;B:(0+1)/2 → 各 0.5,关键词大量纲未碾压强度(归一让其可比)。
+    expect(out[0]).toBeCloseTo(0.5, 6);
+    expect(out[1]).toBeCloseTo(0.5, 6);
+  });
+
+  it('退化:单候选 → span=0 该路归一为 1(不除零、等量贡献)', () => {
+    const out = normalizeAndFuse(
+      [rawSignals({ keyword: { present: true, value: 7 }, strength: { present: true, value: 0.3 } })],
+      EQUAL,
+    );
+    expect(out[0]).toBeCloseTo(1, 6); // 两路皆退化为 1 → 融合 1。
+  });
+
+  it('退化:全相等列 → span=0 该列全归一为 1(不被无端压成 0)', () => {
+    const cands = [
+      rawSignals({ keyword: { present: true, value: 0.5 }, strength: { present: true, value: 0.5 } }),
+      rawSignals({ keyword: { present: true, value: 0.5 }, strength: { present: true, value: 0.5 } }),
+    ];
+    const out = normalizeAndFuse(cands, EQUAL);
+    expect(out[0]).toBeCloseTo(1, 6);
+    expect(out[1]).toBeCloseTo(1, 6);
+  });
+
+  it('缺席路不计入该候选的权重和(自适应分母,不被不存在信号稀释)', () => {
+    // A 有 keyword+strength 两路;B 只有 strength 一路(keyword 缺席)。
+    const cands = [
+      rawSignals({ keyword: { present: true, value: 1 }, strength: { present: true, value: 0 } }),
+      rawSignals({ strength: { present: true, value: 1 } }), // 仅 strength 在场
+    ];
+    const out = normalizeAndFuse(cands, EQUAL);
+    // strength 列:A=0→归一0、B=1→归一1。keyword 列:仅 A 在场→A 归一1。
+    // A:(1+0)/2=0.5;B:仅 strength 一路在场 → 1/1=1(不被缺席的 keyword 稀释)。
+    expect(out[0]).toBeCloseTo(0.5, 6);
+    expect(out[1]).toBeCloseTo(1, 6);
+  });
+
+  it('不丢"仅情感强共振"的项:无关键词但情感在场仍得正分(不硬门控,§5.5/§5.9)', () => {
+    // A 仅关键词、B 仅情感共振(无关键词)。两者都应有正分(任一路在场即在候选池)。
+    const cands = [
+      rawSignals({ keyword: { present: true, value: 1 } }),
+      rawSignals({ emotion: { present: true, value: 0.9 } }),
+    ];
+    const out = normalizeAndFuse(cands, EQUAL);
+    expect(out[0]).toBeGreaterThan(0); // 仅关键词
+    expect(out[1]).toBeGreaterThan(0); // 仅情感强共振 → 不被丢
+  });
+
+  it('可配权重:抬高某路权重改变融合占比(行为即配置)', () => {
+    const cands = [
+      rawSignals({ keyword: { present: true, value: 1 }, strength: { present: true, value: 0 } }),
+      rawSignals({ keyword: { present: true, value: 0 }, strength: { present: true, value: 1 } }),
+    ];
+    // 关键词权重远高于强度 → 偏向关键词高的 A。
+    const w: RecallSignalWeights = { keyword: 4, strength: 1, emotion: 1, association: 1 };
+    const out = normalizeAndFuse(cands, w);
+    expect(out[0]!).toBeGreaterThan(out[1]!);
+  });
+
+  it('权重 0 视作该路不参与(可关某路)', () => {
+    const cands = [
+      rawSignals({ keyword: { present: true, value: 1 }, strength: { present: true, value: 0 } }),
+      rawSignals({ keyword: { present: true, value: 0 }, strength: { present: true, value: 1 } }),
+    ];
+    // 关掉 strength(权重 0)→ 只看 keyword,A 胜。
+    const w: RecallSignalWeights = { keyword: 1, strength: 0, emotion: 1, association: 1 };
+    const out = normalizeAndFuse(cands, w);
+    expect(out[0]).toBeCloseTo(1, 6);
+    expect(out[1]).toBeCloseTo(0, 6);
+  });
+
+  it('空候选集 → 空数组', () => {
+    expect(normalizeAndFuse([], EQUAL)).toEqual([]);
+  });
+
+  it('全路缺席的候选 → 0(可被零信号门控丢弃)', () => {
+    const out = normalizeAndFuse([rawSignals({})], EQUAL);
+    expect(out[0]).toBe(0);
+  });
+});
+
+/** §5.9 缺口① 联想扩散纯函数 golden:实体键抽取(排除主用户)、跳数衰减。 */
+describe('§5.9 缺口① entityKeys / hopDecay', () => {
+  it('entityKeys:特定人物 + 规范化 token 都成键(带类型前缀)', () => {
+    const keys = entityKeys('喜欢 咖啡', 'guest-1', defaultNormalize);
+    expect(keys).toContain('p:guest-1');
+    expect(keys).toContain('t:喜欢');
+    expect(keys).toContain('t:咖啡');
+  });
+
+  it('entityKeys:主用户 person_id 被排除(防全图连成一团)', () => {
+    const keys = entityKeys('随便', 'primary', defaultNormalize, 'primary');
+    expect(keys).not.toContain('p:primary');
+    expect(keys).toContain('t:随便');
+  });
+
+  it('entityKeys:无 person_id(如 agent 主语)只出 token 键', () => {
+    expect(entityKeys('小雪喜欢下雪', undefined, defaultNormalize)).toEqual(['t:小雪喜欢下雪']);
+  });
+
+  it('hopDecay:hop=0→1、按跳数几何衰减(每跳 ×decay)', () => {
+    expect(hopDecay(0, 0.5)).toBe(1);
+    expect(hopDecay(1, 0.5)).toBeCloseTo(0.5, 6);
+    expect(hopDecay(2, 0.5)).toBeCloseTo(0.25, 6);
+    expect(hopDecay(2, 0.8)).toBeCloseTo(0.64, 6);
   });
 });

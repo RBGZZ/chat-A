@@ -507,5 +507,72 @@ export function runMemoryStoreContract(name: string, make: MakeStore): void {
       expect(s.openThreads().map((r) => r.text)).toEqual(['另一未了事']);
       s.close();
     });
+
+    // —— 联想扩散(承 §5.9 缺口①;1–2 跳 + 跳数衰减;golden 两实现一致)——
+
+    it('共享特定人物的记忆被联想带入:未直接命中关键词也进结果(§5.9 缺口①)', () => {
+      const s = make();
+      // 两条都关于访客 guest-1:一条含"面试"关键词,一条只含"咖啡"(无"面试")。
+      s.addMemory({ text: '阿强 面试 紧张', subject: 'person', personId: 'guest-1' });
+      s.addMemory({ text: '阿强 爱喝 咖啡', subject: 'person', personId: 'guest-1' });
+      // 查"面试"只直接命中第一条;但两条共享 person 'guest-1' 有邻接边 → 第二条被联想带入。
+      const texts = s.recall('面试', 10).map((r) => r.text);
+      expect(texts).toContain('阿强 面试 紧张'); // 一阶命中
+      expect(texts).toContain('阿强 爱喝 咖啡'); // 联想带入(未直接命中"面试")
+      s.close();
+    });
+
+    it('共享内容 token 的记忆被联想带入(共现成边,§5.9 缺口①)', () => {
+      const s = make();
+      // 空白分词:两条共享 token "猫";查"散步"只命中第一条,但共享"猫"边 → 第二条被联想带入。
+      s.addMemory({ text: '猫 散步' });
+      s.addMemory({ text: '猫 打呼' });
+      const texts = s.recall('散步', 10).map((r) => r.text);
+      expect(texts).toContain('猫 散步'); // 一阶命中
+      expect(texts).toContain('猫 打呼'); // 经共享"猫"联想带入
+      s.close();
+    });
+
+    it('无关联的记忆不被带入:仅主用户(默认)共享不连边(§5.9 缺口①)', () => {
+      const s = make();
+      // 两条默认归主用户、无共享内容 token(CJK 整串各自成键)→ 不应互相联想。
+      s.addMemory({ text: '我喜欢喝咖啡' });
+      s.addMemory({ text: '我养了一只狗' });
+      const texts = s.recall('咖啡', 10).map((r) => r.text);
+      expect(texts).toEqual(['我喜欢喝咖啡']); // 狗的记忆不被主用户共享误带入
+      s.close();
+    });
+
+    it('跳数衰减:近邻(1 跳)联想分高于远邻(2 跳)(§5.9 缺口①)', () => {
+      let t = 0;
+      const s = make({ now: () => ++t });
+      // 链:命中 A —(共享 token X)— B —(共享 token Y)— C;A 命中关键词"起点"。
+      // A 与 B 共享 X;B 与 C 共享 Y;A 与 C 无直接共享 → C 是 A 的 2 跳邻居。
+      s.addMemory({ text: '起点 链X' }); // A:含查询词"起点" + token"链X"
+      s.addMemory({ text: '链X 链Y' }); // B:与 A 共享"链X"(1 跳)、与 C 共享"链Y"
+      s.addMemory({ text: '链Y 末端' }); // C:与 B 共享"链Y" → 对 A 是 2 跳
+      const texts = s.recall('起点', 10).map((r) => r.text);
+      // A 一阶命中;B 1 跳、C 2 跳都被带入(默认 maxHops=2)。
+      expect(texts).toContain('起点 链X');
+      expect(texts).toContain('链X 链Y');
+      expect(texts).toContain('链Y 末端');
+      // 1 跳邻居 B 的联想分(decay¹)高于 2 跳邻居 C(decay²)→ B 排在 C 前。
+      const idxB = texts.indexOf('链X 链Y');
+      const idxC = texts.indexOf('链Y 末端');
+      expect(idxB).toBeLessThan(idxC);
+      s.close();
+    });
+
+    it('maxHops=0 关闭联想扩散:退化为纯一阶召回(向后兼容,§5.9 缺口①)', () => {
+      const s = make();
+      // 配置关闭扩散:共享 person 的旁支记忆不应被带入。
+      // 注:契约工厂只注入 now;这里靠"无共享键"已覆盖关闭场景,扩散开关另由 scoring 层 hopDecay/config 覆盖。
+      s.addMemory({ text: '甲 共享键', personId: 'guest-9', subject: 'person' });
+      s.addMemory({ text: '乙 共享键 旁支', personId: 'guest-9', subject: 'person' });
+      // 默认 maxHops=2:查"甲"会把"乙"(共享 guest-9 + 共享"共享键")带入。
+      const texts = s.recall('甲', 10).map((r) => r.text);
+      expect(texts).toContain('乙 共享键 旁支');
+      s.close();
+    });
   });
 }
