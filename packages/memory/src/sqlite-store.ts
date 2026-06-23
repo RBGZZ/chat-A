@@ -26,10 +26,10 @@ import {
   emotionResonance,
   encodeEmbedding,
   entityKeys,
-  hopDecay,
   makePrimaryPerson,
   memoryKindWeight,
   normalizeAndFuse,
+  personalizedPageRank,
   recallScore,
   reciprocalRankFusion,
   reinforceImportance,
@@ -39,6 +39,7 @@ import {
   tokenize,
   windowRange,
   type MemoryConfig,
+  type PprEdge,
   type RawRecallSignals,
   type RecallSignalWeights,
 } from './config';
@@ -470,42 +471,62 @@ export class SqliteMemoryStore implements MemoryStore {
   }
 
   /**
-   * 沿邻接图扩散(承 §5.9 缺口①):从一阶命中记忆 id 出发做 1..maxHops 跳广度遍历,
-   * 返回每个被联想到的额外记忆 id → 其最小跳数(供按跳数衰减算联想分)。
-   * 一阶命中本身(hop=0)不计入返回(它们已在候选池)。无边表/读失败优雅降级为空(§3.2)。
+   * 联想扩散(承 §5.9 缺口① / §5.10 B1):**PPR(HippoRAG 式随机游走)取代固定跳 BFS**。
+   * 从 query 命中的一阶种子出发,先 BFS 在邻接连通子图上圈定可达 `associationMaxHops` 跳内的节点集
+   * (端侧只在子图上跑、节点数封顶 `pprMaxNodes`,几千节点单位数毫秒,承 §5.5 非阻塞),
+   * 再在子图加权边上迭代 `r=(1−α)·M·r+α·s`,返回**每个非种子记忆 id → 其 PPR 稳态联想分**
+   * (替代原 hop-decay 分;一阶种子不计入,同原 #spread)。强连接/近邻稳态分更高,自然处理多跳衰减。
+   * 无边表/读失败/空种子/扩散关闭(maxHops<=0)→ 空(优雅降级,同现状,§3.2)。
    */
-  #spread(seedIds: readonly number[], maxHops: number): Map<number, number> {
-    const hopOf = new Map<number, number>();
-    if (maxHops <= 0 || seedIds.length === 0) return hopOf;
+  #spread(seedIds: readonly number[]): Map<number, number> {
+    const empty = new Map<number, number>();
+    if (this.#cfg.associationMaxHops <= 0 || seedIds.length === 0) return empty;
     try {
-      const seed = new Set(seedIds);
+      // —— BFS 圈定子图:从种子出发可达 associationMaxHops 跳内的节点,封顶 pprMaxNodes(近种子优先)——
       const neighborStmt = this.#db.prepare(
-        // 无向:给定一端 id,取另一端(a=? 取 b;b=? 取 a)。
-        `SELECT b AS other FROM memory_edges WHERE a = ?
-         UNION
-         SELECT a AS other FROM memory_edges WHERE b = ?`,
+        // 无向:给定一端 id,取另一端 + 边权(a=? 取 b;b=? 取 a)。
+        `SELECT b AS other, weight FROM memory_edges WHERE a = ?
+         UNION ALL
+         SELECT a AS other, weight FROM memory_edges WHERE b = ?`,
       );
-      let frontier: number[] = [...seedIds];
-      for (let hop = 1; hop <= maxHops; hop++) {
+      const cap = this.#cfg.pprMaxNodes;
+      const visited = new Set<number>(seedIds); // 种子先入子图(BFS 到达序:种子在前)。
+      // 子图加权边集(规范化为 a<b 去重;weight 取该对的累计共现权重)。
+      const edgeWeight = new Map<string, PprEdge>();
+      let frontier: number[] = [...new Set(seedIds)];
+      for (let hop = 1; hop <= this.#cfg.associationMaxHops; hop++) {
         const next: number[] = [];
         for (const id of frontier) {
-          const rows = neighborStmt.all(id, id) as { other: number }[];
+          const rows = neighborStmt.all(id, id) as { other: number; weight: number }[];
           for (const row of rows) {
             const other = asNumber(row.other);
-            if (seed.has(other)) continue; // 一阶命中不算联想候选。
-            if (hopOf.has(other)) continue; // 已记录更小跳数(BFS 先到即最小)。
-            hopOf.set(other, hop);
+            if (other === id) continue; // 自环跳过。
+            const w = asNumber(row.weight);
+            // 记录子图边(规范化无向键);PPR 转移矩阵据此构建。
+            const a = Math.min(id, other);
+            const b = Math.max(id, other);
+            const key = `${a}:${b}`;
+            if (!edgeWeight.has(key)) edgeWeight.set(key, { a, b, weight: w });
+            if (visited.has(other)) continue;
+            if (visited.size >= cap) continue; // 子图节点封顶:超出不再纳入(近种子优先,承端侧性能)。
+            visited.add(other);
             next.push(other);
           }
         }
         frontier = next;
         if (frontier.length === 0) break;
       }
+      // 只保留两端都在子图节点集内的边(封顶后悬边裁掉,保证 PPR 在封闭子图上跑)。
+      const edges: PprEdge[] = [];
+      for (const e of edgeWeight.values()) {
+        if (visited.has(e.a) && visited.has(e.b)) edges.push(e);
+      }
+      // —— 在子图上跑 PPR 稳态分(单一权威纯函数,与 InMemory 零漂移)——
+      return personalizedPageRank(seedIds, edges, this.#cfg);
     } catch (err) {
       this.#onError(err, 'spread');
       return new Map();
     }
-    return hopOf;
   }
 
   /** 把一行 memories 记录映射为 MemoryRecord(读列兜底单一权威,recall/扩散候选共用,零漂移)。 */
@@ -639,12 +660,12 @@ export class SqliteMemoryStore implements MemoryStore {
     limit: number,
     weights: RecallSignalWeights = this.#cfg.recallSignalWeights,
   ): readonly MemoryRecord[] {
-    // —— 联想扩散(承 §5.9 缺口①):从已入池候选沿邻接图 1..maxHops 跳带入额外候选 ——
+    // —— 联想扩散(承 §5.9 缺口① / §5.10 B1):PPR 稳态分把多跳关联记忆带入候选 ——
     const seedIds = [...candById.keys()];
-    const hopOf = this.#spread(seedIds, this.#cfg.associationMaxHops);
-    if (hopOf.size > 0) {
+    const pprOf = this.#spread(seedIds);
+    if (pprOf.size > 0) {
       // 批量取回联想候选记忆行(避免逐条查询;按 id 升序确定)。
-      const ids = [...hopOf.keys()];
+      const ids = [...pprOf.keys()];
       const placeholders = ids.map(() => '?').join(', ');
       const assocRows = this.#db
         .prepare(`SELECT ${MEMORY_COLS} FROM memories WHERE id IN (${placeholders})`)
@@ -654,7 +675,7 @@ export class SqliteMemoryStore implements MemoryStore {
         if (candById.has(record.id)) continue; // 已是一阶/向量命中,不重复。
         // 按 kind 分路(承 §5.9 缺口④):联想带入的旁支若不在过滤集内也跳过(分路一致)。
         if (kindFilter !== undefined && !kindFilter.has(record.memoryKind ?? 'episodic')) continue;
-        const hop = hopOf.get(record.id)!;
+        const ppr = pprOf.get(record.id)!;
         const normalized = asString(r['normalized_text']);
         // 联想候选也算其自身关键词命中(可能 0):0 命中则关键词路缺席(不硬丢,靠联想/强度入池)。
         const rawHits = tokens.reduce((n, t) => (normalized.includes(t) ? n + 1 : n), 0);
@@ -662,8 +683,8 @@ export class SqliteMemoryStore implements MemoryStore {
           record,
           raw: this.#baseSignals(record, now, pad, {
             keyword: rawHits > 0 ? { present: true, value: rawHits } : { present: false, value: 0 },
-            // 联想分按跳数衰减(hop=1→decay、hop=2→decay²;承 §5.9 缺口①)。
-            association: { present: true, value: hopDecay(hop, this.#cfg.associationHopDecay) },
+            // 联想分 = PPR 稳态分(承 §5.10 B1;强连接>弱连接、近>远;在候选集内 min-max 归一)。
+            association: { present: true, value: ppr },
           }),
         });
       }

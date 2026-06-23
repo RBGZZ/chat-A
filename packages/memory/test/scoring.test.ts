@@ -15,11 +15,14 @@ import {
   memoryKindWeight,
   mixedRecallScore,
   normalizeAndFuse,
+  personalizedPageRank,
   recallScore,
   reciprocalRankFusion,
   resolveMemoryConfig,
   resolveMemoryKind,
   type Pad,
+  type PprEdge,
+  type PprParams,
   type RawRecallSignals,
   type RecallSignal,
   type RecallSignalWeights,
@@ -322,6 +325,75 @@ describe('§5.9 缺口① entityKeys / hopDecay', () => {
     expect(hopDecay(1, 0.5)).toBeCloseTo(0.5, 6);
     expect(hopDecay(2, 0.5)).toBeCloseTo(0.25, 6);
     expect(hopDecay(2, 0.8)).toBeCloseTo(0.64, 6);
+  });
+});
+
+/** §5.10 B1 Personalized PageRank(HippoRAG 式)纯函数 golden:稳态分单调合理、确定性、退化。 */
+describe('§5.10 B1 personalizedPageRank', () => {
+  const PARAMS: PprParams = {
+    pprAlpha: DEFAULT_MEMORY_CONFIG.pprAlpha,
+    pprIterations: DEFAULT_MEMORY_CONFIG.pprIterations,
+    pprConvergenceEpsilon: DEFAULT_MEMORY_CONFIG.pprConvergenceEpsilon,
+  };
+
+  it('近 > 远:链 seed–B–C,1 跳 B 稳态分高于 2 跳 C(自然多跳衰减)', () => {
+    // 链:1(seed)—2—3;均匀权重 → PPR 质量随跳数递减。
+    const edges: PprEdge[] = [
+      { a: 1, b: 2, weight: 1 },
+      { a: 2, b: 3, weight: 1 },
+    ];
+    const r = personalizedPageRank([1], edges, PARAMS);
+    expect(r.has(1)).toBe(false); // 种子不计入联想候选(同原 #spread)。
+    expect(r.get(2)!).toBeGreaterThan(r.get(3)!); // 近 > 远。
+  });
+
+  it('强连接 > 弱连接:同距邻居,边权重者稳态分更高', () => {
+    // seed=1 同时连 2(强边 w=3)与 3(弱边 w=1);两者都是 1 跳,但强边分得更多质量。
+    const edges: PprEdge[] = [
+      { a: 1, b: 2, weight: 3 },
+      { a: 1, b: 3, weight: 1 },
+    ];
+    const r = personalizedPageRank([1], edges, PARAMS);
+    expect(r.get(2)!).toBeGreaterThan(r.get(3)!); // 强连接 > 弱连接。
+  });
+
+  it('确定性:同输入多次调用结果完全一致', () => {
+    const edges: PprEdge[] = [
+      { a: 1, b: 2, weight: 2 },
+      { a: 2, b: 3, weight: 1 },
+      { a: 1, b: 3, weight: 1 },
+    ];
+    const a = personalizedPageRank([1], edges, PARAMS);
+    const b = personalizedPageRank([1], edges, PARAMS);
+    expect([...a.entries()]).toEqual([...b.entries()]);
+  });
+
+  it('退化:空种子 / 空边 / 迭代数<=0 → 空 Map(优雅降级)', () => {
+    const edges: PprEdge[] = [{ a: 1, b: 2, weight: 1 }];
+    expect(personalizedPageRank([], edges, PARAMS).size).toBe(0);
+    expect(personalizedPageRank([1], [], PARAMS).size).toBe(0);
+    expect(personalizedPageRank([1], edges, { ...PARAMS, pprIterations: 0 }).size).toBe(0);
+  });
+
+  it('自环 / 非正权边被忽略,不污染稳态分', () => {
+    const edges: PprEdge[] = [
+      { a: 1, b: 1, weight: 5 }, // 自环:忽略。
+      { a: 1, b: 2, weight: 0 }, // 零权:忽略 → 2 不可达。
+      { a: 1, b: 3, weight: 1 }, // 唯一有效边。
+    ];
+    const r = personalizedPageRank([1], edges, PARAMS);
+    expect(r.has(2)).toBe(false); // 零权边不可达。
+    expect(r.get(3)!).toBeGreaterThan(0);
+  });
+
+  it('多种子均匀分布:对称图下两端等价节点稳态分相等', () => {
+    // 种子 {1,4};1—2、4—3,结构对称 → 2 与 3 稳态分应相等。
+    const edges: PprEdge[] = [
+      { a: 1, b: 2, weight: 1 },
+      { a: 4, b: 3, weight: 1 },
+    ];
+    const r = personalizedPageRank([1, 4], edges, PARAMS);
+    expect(r.get(2)!).toBeCloseTo(r.get(3)!, 9);
   });
 });
 
