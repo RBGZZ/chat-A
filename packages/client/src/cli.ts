@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { stdin, stdout, env } from 'node:process';
 import { Conversation, LightVoiceBus, ToolCallingStrategy } from '@chat-a/runtime';
 import { buildDefaultRegistry } from '@chat-a/interaction';
-import { createLlm, loadLlmConfig } from '@chat-a/providers';
+import { createLlm, loadLlmConfig, createEmbedder, loadEmbedderConfig } from '@chat-a/providers';
 import { initTelemetry, createDecisionTraceSinkFromEnv } from '@chat-a/observability';
 import { createMemoryStoreFromEnv, LlmMemoryExtractor, LlmReflector, NoopReflector } from '@chat-a/memory';
 import type { Reflector } from '@chat-a/memory';
@@ -58,6 +58,10 @@ async function main(): Promise<void> {
   const reflectMode = (env['CHAT_A_REFLECTION'] ?? 'off').toLowerCase();
   const reflector: Reflector =
     reflectMode === 'llm' ? new LlmReflector({ provider: llm, store: mem.store }) : new NoopReflector();
+  // 语义召回(c2b,§5.5/§5.7b,默认关):设 CHAT_A_EMBEDDER 才启用——query 异步嵌入(非阻塞)+
+  // recallHybrid(关键词+向量加权归一)+ 回合收尾后台写侧嵌入。缺省=纯关键词召回,零额外开销。
+  const embedderMode = (env['CHAT_A_EMBEDDER'] ?? '').trim();
+  const embedder = embedderMode.length > 0 ? createEmbedder(loadEmbedderConfig(env)) : undefined;
   const convo = new Conversation({
     bus,
     llm,
@@ -72,6 +76,7 @@ async function main(): Promise<void> {
     ...(oceanEvolver ? { oceanEvolver } : {}),
     ...(selfNotionEvolver ? { selfNotionEvolver } : {}),
     ...(strategy ? { strategy } : {}),
+    ...(embedder ? { embedder } : {}),
   });
 
   // OTel 追踪骨架(§8.1):默认不开以免刷屏;设 CHAT_A_TRACE=1 打开控制台 span 树。
@@ -85,6 +90,7 @@ async function main(): Promise<void> {
   stdout.write(`认知: appraiser=${appraiser ? 'llm' : 'default'}  记忆抽取=${memoryExtractor ? 'llm' : 'off'}\n`);
   stdout.write(`立场: 分歧检测=${stanceDetector ? 'llm' : 'default'}  敢顶嘴(assertiveness)=${seed.dials.assertiveness}\n`);
   stdout.write(`决策trace: ${trace.enabled ? `on (${trace.dbPath})` : 'off'}\n`);
+  stdout.write(`语义召回: ${embedder ? `on (${embedder.id}, dim=${embedder.dimension})` : 'off (纯关键词)'}\n`);
   stdout.write(`沉淀: ${reflectMode === 'llm' ? 'llm (会话结束蒸馏)' : 'off'}  人格演化: ${oceanEvolver ? 'llm (每N轮)' : 'off'}  立场演化: ${selfNotionEvolver ? 'llm' : 'off'}\n`);
   stdout.write(`策略: ${useTools ? `tools (Agent loop, 动作=${actionRegistry.size})` : 'single (单趟)'}\n`);
   if (traceOn) stdout.write('(OTel trace 已开:每回合在控制台输出 turn→llm span。)\n');

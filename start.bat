@@ -31,6 +31,11 @@ REM strengthen over conversation (persisted; default off).
 REM Agent loop (§3.3/§12.2): CHAT_A_STRATEGY=tools lets her call local actions
 REM (e.g. current_time) via a tool-use loop; falls back to single-shot if the
 REM provider has no tool support. Default = single-shot.
+REM
+REM Semantic recall (§5.5/§5.7b c2b, default off): set CHAT_A_EMBEDDER to enable
+REM query embedding (non-blocking, overlapped) + hybrid recall (keyword+vector) +
+REM background write-side embedding. Unset = pure keyword recall (zero extra cost).
+REM CHAT_A_EMBEDDER=hash (zero-dep local fallback) | openai-compat (set base/model/key).
 
 if not exist ".env.local" (
   echo [chat-A] Missing .env.local. Create it in the project root with one line:
