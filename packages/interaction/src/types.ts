@@ -17,5 +17,11 @@ export interface Action {
   readonly name: string;
   readonly description: string;
   readonly inputSchema: Readonly<Record<string, unknown>>;
+  /**
+   * 该动作执行所需的设备/环境能力标签(能力门,§12.2),如 'time'/'audio'。
+   * **缺省(未声明)= 无需任何能力,始终可用**——能力声明随动作走,能力集由调用方按设备传入,
+   * 声明与环境解耦(行为即配置,§3.2)。
+   */
+  readonly capability?: string;
   perform(input: unknown): Promise<ActionResult>;
 }
