@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { SpanStatusCode, type Span, type Tracer } from '@opentelemetry/api';
 import { makeBusEvent } from '@chat-a/protocol';
-import type { LlmProvider } from '@chat-a/providers';
+import type { LlmProvider, Embedder } from '@chat-a/providers';
 import {
   buildSystemPrompt,
   PromptAssembler,
@@ -32,6 +32,7 @@ import {
 } from '@chat-a/persona';
 import { getTracer, GENAI, CHAT_A, NoopDecisionTraceSink, type DecisionTraceSink } from '@chat-a/observability';
 import type { LightVoiceBus } from './bus';
+import { QueryEmbedder, type QueryEmbedOptions } from './query-embed';
 import { composeSystem, detectStance, finalizeTurn, toException } from './turn-shared';
 
 export interface ConversationDeps {
@@ -64,6 +65,13 @@ export interface ConversationDeps {
    * 应在此一并传入相同值(保持 closeness 归属一致)。
    */
   readonly primaryPersonId?: string;
+  /**
+   * Embedder 接缝(§5.7/c2b):提供则启用**语义召回**(query 异步嵌入 + recallHybrid);
+   * **缺省 = 不启用 = 与今天纯关键词召回逐字一致**(非阻塞硬约束 §5.5)。
+   */
+  readonly embedder?: Embedder;
+  /** query 嵌入预算/缓存(c2b);缺省用 QueryEmbedder 默认(budget 120ms / cache 256)。 */
+  readonly queryEmbed?: QueryEmbedOptions;
 }
 
 /**
@@ -88,6 +96,10 @@ export interface TurnDeps {
   readonly traceSink: DecisionTraceSink;
   /** 主用户标识(§6.1b):closeness 读写归属;回合前读、收尾抬升。 */
   readonly primaryPersonId: string;
+  /** 语义召回(c2b,§5.7b):回合前并行嵌入 query;缺省=不启用=关键词快路径。 */
+  readonly queryEmbedder?: QueryEmbedder;
+  /** Embedder(c2b 写侧):回合收尾后台嵌入新记忆;缺省=不嵌入。 */
+  readonly embedder?: Embedder;
 }
 
 /**
@@ -132,11 +144,16 @@ export class SingleShotStrategy implements TurnStrategy {
     const closeness = deps.memory.getCloseness(deps.primaryPersonId);
     const mood = deps.persona.tone(closeness);
     turnSpan.setAttribute('chat_a.emotion', mood.emotion);
+    // 语义召回(c2b,§5.5 非阻塞):query 嵌入**异步起跑**,与下面 detectStance 并行重叠;
+    // 有界等待(QueryEmbedder 内超时→null 退快路径),绝不内联进同步召回。
+    const embedP = deps.queryEmbedder ? deps.queryEmbedder.embed(userText) : null;
     // 分歧检测(§7#3):确定性默认同步极快;LLM 实现会增首字延迟(默认关)。降级见 turn-shared。
     const stance = await detectStance(deps, userText);
     turnSpan.setAttribute('chat_a.stance_notions', stance.notions.length);
+    const qe = embedP ? await embedP : null; // 与 stance 并行;超时/失败→vector:null
     // 委托 assembler:system(骨架→记忆→tone→异议)+ messages([...history, userMsg])。
-    const { assembled, recalled } = composeSystem(deps, userText, mood.toneFragment, stance);
+    // 有 queryVector → recallHybrid(关键词+向量);否则关键词快路径(composeSystem 内分流)。
+    const { assembled, recalled } = composeSystem(deps, userText, mood.toneFragment, stance, qe?.vector ?? undefined);
     const { system, messages } = assembled;
     const reply = await deps.tracer.startActiveSpan('llm', async (llmSpan) => {
       // GenAI 语义约定:id/model 仅供 trace,业务不据此分支(承 Provider 接缝)。
@@ -175,6 +192,7 @@ export class SingleShotStrategy implements TurnStrategy {
       system,
       messages,
       turn,
+      ...(qe ? { semantic: qe } : {}),
     });
     return reply;
   }
@@ -228,6 +246,10 @@ export class Conversation {
     const extractEnabled = deps.memoryExtractor !== undefined;
     const extractor = deps.memoryExtractor ?? new NoopMemoryExtractor();
     this.#sessionId = deps.sessionId ?? randomUUID().slice(0, 8);
+    // 语义召回(c2b):注入 embedder → 建 QueryEmbedder(非阻塞 query 嵌入);缺省=纯关键词。
+    const queryEmbedder = deps.embedder
+      ? new QueryEmbedder(deps.embedder, deps.queryEmbed)
+      : undefined;
     // 依赖装配完打包成 TurnDeps(只读句柄),供策略消费而不反向依赖外壳内部(§3.1)。
     this.#deps = {
       tracer: getTracer(),
@@ -245,6 +267,8 @@ export class Conversation {
       extractEnabled,
       traceSink,
       primaryPersonId: deps.primaryPersonId ?? 'primary',
+      ...(queryEmbedder ? { queryEmbedder } : {}),
+      ...(deps.embedder ? { embedder: deps.embedder } : {}),
     };
     this.#strategy = deps.strategy ?? new SingleShotStrategy();
   }

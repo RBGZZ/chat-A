@@ -3,6 +3,7 @@ import type { AssembledPrompt, StanceInput } from '@chat-a/cognition';
 import type { MemoryRecord } from '@chat-a/memory';
 import type { DecisionTraceRecalled } from '@chat-a/observability';
 import type { TurnDeps } from './conversation';
+import type { QueryEmbedResult } from './query-embed';
 
 /**
  * 回合共享逻辑(§3.1 复用,不重复):SingleShotStrategy 与 ToolCallingStrategy 共用的
@@ -30,10 +31,14 @@ export function composeSystem(
   userText: string,
   toneFragment: string,
   stance: StanceInput,
+  /** c2b:编排层异步算好的 query 向量;提供则走 recallHybrid(关键词+向量),否则关键词快路径(§5.5)。 */
+  queryVector?: number[],
 ): { assembled: AssembledPrompt; recalled: readonly MemoryRecord[] } {
   let recalled: readonly MemoryRecord[] = [];
   try {
-    recalled = deps.memory.recall(userText);
+    recalled = queryVector !== undefined
+      ? deps.memory.recallHybrid(userText, { queryVector })
+      : deps.memory.recall(userText);
   } catch {
     recalled = [];
   }
@@ -96,6 +101,8 @@ export async function finalizeTurn(
     readonly messages: readonly { readonly role: string; readonly content: string }[];
     /** 会话内回合序号(§7#3 立场演化轮次)。 */
     readonly turn: number;
+    /** c2b:本轮 query 嵌入结果(供 trace 记语义元数据);缺省=未启用语义。 */
+    readonly semantic?: QueryEmbedResult;
   },
 ): Promise<void> {
   const at = Date.now();
@@ -135,6 +142,24 @@ export async function finalizeTurn(
   } catch {
     /* closeness 本轮不更新,回合继续 */
   }
+  // 写侧 embedding(c2b,§5.2/§5.5):回复之后**后台 fire-and-forget**,绝不挡热路径;
+  // 取仍缺向量的记忆批量嵌入并写回(失败本轮跳过,§3.2)。仅在启用 embedder 时进行。
+  const embedder = deps.embedder;
+  if (embedder !== undefined) {
+    const pending = deps.memory.memoriesNeedingEmbedding(8);
+    if (pending.length > 0) {
+      void Promise.allSettled(
+        pending.map(async (m) => {
+          try {
+            const [v] = await embedder.embed([m.text]);
+            if (v !== undefined) deps.memory.setEmbedding(m.id, v);
+          } catch {
+            /* 后台嵌入失败:本轮跳过,下轮再补 */
+          }
+        }),
+      );
+    }
+  }
   // 决策 trace 收尾落库(§8.1,失败自吞);trace_id/span_id 缝合 OTel。
   try {
     const sc = args.turnSpan.spanContext();
@@ -163,6 +188,14 @@ export async function finalizeTurn(
       provider: deps.llm.id,
       model: deps.llm.model,
       reply: args.reply,
+      ...(args.semantic
+        ? {
+            semanticUsed: args.semantic.vector !== null,
+            embedLatencyMs: args.semantic.latencyMs,
+            embedTimedOut: args.semantic.timedOut,
+            embedCacheHit: args.semantic.cacheHit,
+          }
+        : {}),
     });
   } catch {
     /* 决策 trace 写入失败:可观测性绝不打断回合(§3.2) */

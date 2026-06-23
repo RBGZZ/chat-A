@@ -48,9 +48,12 @@ export class ToolCallingStrategy implements TurnStrategy {
     const closeness = deps.memory.getCloseness(deps.primaryPersonId);
     const mood = deps.persona.tone(closeness);
     turnSpan.setAttribute('chat_a.emotion', mood.emotion);
+    // 语义召回(c2b,§5.5 非阻塞):query 嵌入异步起跑,与 detectStance 并行重叠。
+    const embedP = deps.queryEmbedder ? deps.queryEmbedder.embed(userText) : null;
     const stance = await detectStance(deps, userText);
     turnSpan.setAttribute('chat_a.stance_notions', stance.notions.length);
-    const { assembled, recalled } = composeSystem(deps, userText, mood.toneFragment, stance);
+    const qe = embedP ? await embedP : null;
+    const { assembled, recalled } = composeSystem(deps, userText, mood.toneFragment, stance, qe?.vector ?? undefined);
     const { system } = assembled;
     // 工作消息随工具往返增长(初始 = assembler 产出的 [...history, userMsg])。
     const working: ChatMessage[] = [...assembled.messages];
@@ -100,6 +103,7 @@ export class ToolCallingStrategy implements TurnStrategy {
       system,
       messages: working.map((m) => ({ role: m.role, content: m.content })),
       turn,
+      ...(qe ? { semantic: qe } : {}),
     });
     return reply;
   }
