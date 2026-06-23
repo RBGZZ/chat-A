@@ -30,7 +30,7 @@ import {
 } from './config';
 
 /** 当前代码支持的记忆库 schema 版本。每次破坏性/累加性变更 +1 并新增一条迁移。 */
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 /**
  * 迁移步骤上下文:主用户花名册条目 + 记忆重要性初值经此注入(承 §3.2 行为即配置),
@@ -117,6 +117,14 @@ const MIGRATIONS: Record<number, (db: DatabaseSync, ctx: MigrationContext) => vo
     db.prepare(
       `UPDATE memories SET importance = ?, access_count = 0, pinned = 0 WHERE importance IS NULL`,
     ).run(ctx.initialImportance);
+  },
+  5(db) {
+    // 未闭合话题标记(承 §7#2 主动跟进的数据层):open_thread(0/1)+ closed_at(闭合时间戳)。
+    // ALTER ADD COLUMN 无列级 IF NOT EXISTS,幂等性靠 v5 只在 schema_version<5 跑一次(同 v3/v4 手法)。
+    db.exec(`ALTER TABLE memories ADD COLUMN open_thread INTEGER;`);
+    db.exec(`ALTER TABLE memories ADD COLUMN closed_at INTEGER;`); // NULL=尚未闭合(决策 1)。
+    // backfill 历史行:旧记忆视作"非未了事";closed_at 容 NULL 即"未闭合",无需显式写。零数据丢失(§3.2)。
+    db.prepare(`UPDATE memories SET open_thread = 0 WHERE open_thread IS NULL`).run();
   },
 };
 
@@ -253,11 +261,13 @@ export class SqliteMemoryStore implements MemoryStore {
     // 评分列初值(承 §5.5):importance 缺省配置初值、access_count=0、last_accessed=创建时、pinned 缺省 0。
     const importance = rec.importance ?? this.#cfg.initialImportance;
     const pinned = rec.pinned === true ? 1 : 0;
+    // 未闭合话题标记(承 §7#2):缺省 0(非未了事);closed_at 写 NULL(尚未闭合)。
+    const openThread = rec.openThread === true ? 1 : 0;
     try {
       this.#db
         .prepare(
-          `INSERT INTO memories(text, normalized_text, kind, created_at, last_seen_at, hits, source_session, subject, person_id, importance, access_count, last_accessed, pinned)
-           VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, ?, ?)
+          `INSERT INTO memories(text, normalized_text, kind, created_at, last_seen_at, hits, source_session, subject, person_id, importance, access_count, last_accessed, pinned, open_thread, closed_at)
+           VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, ?, ?, ?, NULL)
            ON CONFLICT(normalized_text) DO UPDATE SET hits = hits + 1, last_seen_at = excluded.last_seen_at`,
         )
         .run(
@@ -272,6 +282,7 @@ export class SqliteMemoryStore implements MemoryStore {
           importance,
           at,
           pinned,
+          openThread,
         );
     } catch (err) {
       this.#onError(err, 'addMemory');
@@ -294,7 +305,7 @@ export class SqliteMemoryStore implements MemoryStore {
       const rows = this.#db
         .prepare(
           `SELECT id, text, normalized_text, kind, created_at, last_seen_at, hits, subject, person_id,
-                  importance, access_count, last_accessed, pinned
+                  importance, access_count, last_accessed, pinned, open_thread, closed_at
            FROM memories
            WHERE ${where}`,
         )
@@ -309,6 +320,10 @@ export class SqliteMemoryStore implements MemoryStore {
             ? this.#cfg.initialImportance
             : asNumber(r['importance']);
         const pinned = asNumber(r['pinned'] ?? 0) === 1;
+        // 未闭合话题(承 §7#2):open_thread=1 且 closed_at 为空才算"当前未闭合";旧库 NULL 兜底为 false。
+        const openThread =
+          asNumber(r['open_thread'] ?? 0) === 1 &&
+          (r['closed_at'] === null || r['closed_at'] === undefined);
         const record: MemoryRecord = {
           id: asNumber(r['id']),
           text: asString(r['text']),
@@ -327,6 +342,7 @@ export class SqliteMemoryStore implements MemoryStore {
           importance,
           accessCount: r['access_count'] === null || r['access_count'] === undefined ? 0 : asNumber(r['access_count']),
           pinned,
+          openThread,
         };
         // 关键词原始分:命中查询 token 去重数(与 InMemory 同 normalized includes 规则,零漂移)。
         const normalized = asString(r['normalized_text']);
@@ -417,6 +433,76 @@ export class SqliteMemoryStore implements MemoryStore {
     }
     const merged: ChatMessage[] = [...mergedIdx].sort((a, b) => a - b).map((i) => timeline[i]!.msg);
     return { memories, mergedContext: merged };
+  }
+
+  openThreads(limit: number = this.#cfg.recallLimit): readonly MemoryRecord[] {
+    try {
+      // 只取"标记未闭合且未闭合"的记忆(承 §7#2);排序在 JS 层用与 recall 同一权威强度公式(零漂移)。
+      const rows = this.#db
+        .prepare(
+          `SELECT id, text, normalized_text, kind, created_at, last_seen_at, hits, subject, person_id,
+                  importance, access_count, last_accessed, pinned, open_thread, closed_at
+           FROM memories
+           WHERE open_thread = 1 AND closed_at IS NULL`,
+        )
+        .all();
+      const now = this.#now();
+      const candidates: { record: MemoryRecord; score: number }[] = [];
+      for (const r of rows) {
+        const lastSeenAtMs = asNumber(r['last_seen_at']);
+        const importance =
+          r['importance'] === null || r['importance'] === undefined
+            ? this.#cfg.initialImportance
+            : asNumber(r['importance']);
+        const pinned = asNumber(r['pinned'] ?? 0) === 1;
+        const record: MemoryRecord = {
+          id: asNumber(r['id']),
+          text: asString(r['text']),
+          kind: r['kind'] === null || r['kind'] === undefined ? undefined : asString(r['kind']),
+          createdAtMs: asNumber(r['created_at']),
+          lastSeenAtMs,
+          hits: asNumber(r['hits']),
+          subject: (r['subject'] === null || r['subject'] === undefined
+            ? 'person'
+            : asString(r['subject'])) as MemorySubject,
+          personId:
+            r['person_id'] === null || r['person_id'] === undefined
+              ? undefined
+              : asString(r['person_id']),
+          importance,
+          accessCount:
+            r['access_count'] === null || r['access_count'] === undefined ? 0 : asNumber(r['access_count']),
+          pinned,
+          openThread: true, // WHERE 已保证(open_thread=1 AND closed_at IS NULL)。
+        };
+        // 记忆强度分(承 §5.5):importance × decay;与 recall 同一权威公式(单一来源,两实现零漂移)。
+        const score = recallScore(importance, decayFactor(lastSeenAtMs, now, pinned, this.#cfg));
+        candidates.push({ record, score });
+      }
+      // 强度降序;同分按近因(last_seen)、再按 id 兜底,排序完全确定(与 InMemory 一致)。
+      candidates.sort(
+        (a, b) =>
+          b.score - a.score ||
+          b.record.lastSeenAtMs - a.record.lastSeenAtMs ||
+          b.record.id - a.record.id,
+      );
+      // 决策 2:巡检不触发检索即强化(不调用 #reinforce),免待办虚高强度污染 recall 排序。
+      return candidates.slice(0, limit).map((c) => c.record);
+    } catch (err) {
+      this.#onError(err, 'openThreads');
+      return [];
+    }
+  }
+
+  closeThread(id: number): void {
+    try {
+      // 幂等:仅闭合尚未闭合者(closed_at IS NULL),已闭合 / 未知 id 命中 0 行、无副作用(承 §7#2 决策 3)。
+      this.#db
+        .prepare(`UPDATE memories SET closed_at = ? WHERE id = ? AND closed_at IS NULL`)
+        .run(this.#now(), id);
+    } catch (err) {
+      this.#onError(err, 'closeThread');
+    }
   }
 
   getState(key: string): string | undefined {

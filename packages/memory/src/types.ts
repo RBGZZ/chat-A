@@ -78,6 +78,12 @@ export interface MemoryInput {
    * P1 不开放常规写入路径设置,主要供核心标注/巩固用。
    */
   readonly pinned?: boolean;
+  /**
+   * 是否未闭合话题(承 §7#2 主动跟进的数据层):标记"一件悬而未决、值得日后回访的事"
+   * (如"明天要面试")。省略默认 false。纯加法可选,既有写入方无需改动(向后兼容)。
+   * 本切片只做记忆数据层,不接 autonomy/主动回合调度。
+   */
+  readonly openThread?: boolean;
 }
 
 /** 召回返回的记忆条目。 */
@@ -102,6 +108,13 @@ export interface MemoryRecord {
   readonly accessCount?: number;
   /** 是否核心记忆(承 §5);true 则免于时间衰减。纯加法可选,recall 返回必有值。 */
   readonly pinned?: boolean;
+  /**
+   * 是否未闭合话题(承 §7#2 主动跟进的数据层):true 表示这是一件悬而未决、值得回访的事,
+   * 且尚未闭合(被 `closeThread` 标记闭合后即为 false / 退出未闭合查询)。
+   * **纯加法可选**:两实现 recall / openThreads 返回时恒填充;声明为可选只为让现有消费者
+   * (构造 MemoryRecord 字面量者)无需级联改动(向后兼容)。运行期返回必有值。
+   */
+  readonly openThread?: boolean;
 }
 
 /**
@@ -167,6 +180,22 @@ export interface MemoryStore {
    * `memories` 命中顺序与同参数 `recall` 一致。取窗优雅降级(空库/读失败→窗口为空,不抛,§3.2)。
    */
   recallWithContext(query: string, opts?: RecallContextOptions): RecallWithContext;
+  /**
+   * 列出当前未闭合话题(承 §7#2 主动跟进的数据层):返回所有
+   * "标记 openThread 且尚未闭合"的记忆,按记忆强度(`importance × decay`)降序,
+   * 同分按近因 / id 兜底——与 `recall` 同一套单一权威强度公式(§5.5),两实现零漂移。
+   * 数量受 `limit` 约束(省略用配置 `recallLimit`)。
+   *
+   * **不触发检索即强化**(决策 2):巡检待办不等于"被想起",不升 importance / access_count,
+   * 免待办因被巡检而虚高强度污染 recall 排序。读失败优雅降级为空数组,不抛(§3.2)。
+   */
+  openThreads(limit?: number): readonly MemoryRecord[];
+  /**
+   * 标记话题闭合(承 §7#2):把指定记忆置为已闭合(记录闭合时间),令其退出 `openThreads()`。
+   * **幂等**:对已闭合记忆重复调用、或对不存在 / 非未闭合的 id 调用,均无副作用且不抛(§3.2)。
+   * 闭合是轻量状态字段更新(同 pinned 列),非记忆内容 update/delete,故走热路径而非离线巩固。
+   */
+  closeThread(id: number): void;
   /** 通用状态 KV 读(真相源持久化原语;persona 状态等复用)。无则 undefined。 */
   getState(key: string): string | undefined;
   /** 通用状态 KV 写(同 key 覆盖)。 */

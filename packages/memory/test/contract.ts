@@ -414,5 +414,98 @@ export function runMemoryStoreContract(name: string, make: MakeStore): void {
       expect(withCtx).toEqual(plain);
       s.close();
     });
+
+    // —— 未闭合话题标记 / 查询 / 闭合(承 §7#2 主动跟进的数据层;golden 两实现一致)——
+
+    it('写入默认非未闭合:不进 openThreads(承 §7#2)', () => {
+      const s = make();
+      s.addMemory({ text: '今天喝了咖啡' }); // 不指定 openThread
+      // recall 返回的 openThread 为 false。
+      expect(s.recall('咖啡')[0]?.openThread).toBe(false);
+      // 未闭合查询为空(普通记忆不进)。
+      expect(s.openThreads()).toEqual([]);
+      s.close();
+    });
+
+    it('显式标记未闭合:recall 带 openThread=true 且进 openThreads(承 §7#2)', () => {
+      const s = make();
+      s.addMemory({ text: '明天要面试', openThread: true });
+      expect(s.recall('面试')[0]?.openThread).toBe(true);
+      const open = s.openThreads();
+      expect(open.length).toBe(1);
+      expect(open[0]?.text).toBe('明天要面试');
+      expect(open[0]?.openThread).toBe(true);
+      s.close();
+    });
+
+    it('openThreads 只返回未闭合话题:不含普通 / 已闭合记忆(承 §7#2)', () => {
+      const s = make();
+      s.addMemory({ text: '普通记忆甲' }); // 非未了事
+      s.addMemory({ text: '未了事乙', openThread: true });
+      s.addMemory({ text: '未了事丙', openThread: true });
+      // 闭合丙。
+      const bing = s.recall('丙')[0]!;
+      s.closeThread(bing.id);
+      const open = s.openThreads(10).map((r) => r.text);
+      expect(open).toEqual(['未了事乙']); // 只剩未闭合的乙
+      s.close();
+    });
+
+    it('openThreads 按记忆强度排序且受上限约束(与 recall 同一权威公式,§7#2/§5.5)', () => {
+      let nowMs = 10 * 86_400_000;
+      const s = make({ now: () => nowMs });
+      // 同一时刻写入(衰减相同),用 importance 区分强度。
+      s.addMemory({ text: '高要事', createdAtMs: 10 * 86_400_000, importance: 0.9, openThread: true });
+      s.addMemory({ text: '中要事', createdAtMs: 10 * 86_400_000, importance: 0.5, openThread: true });
+      s.addMemory({ text: '低要事', createdAtMs: 10 * 86_400_000, importance: 0.1, openThread: true });
+      // 强度降序。
+      expect(s.openThreads(10).map((r) => r.text)).toEqual(['高要事', '中要事', '低要事']);
+      // 受上限约束:取前 2。
+      expect(s.openThreads(2).map((r) => r.text)).toEqual(['高要事', '中要事']);
+      s.close();
+    });
+
+    it('openThreads 不触发检索即强化(巡检 ≠ 被想起,承 §7#2 决策 2)', () => {
+      let nowMs = 86_400_000;
+      const s = make({ now: () => nowMs });
+      s.addMemory({ text: '待跟进的事', createdAtMs: 86_400_000, importance: 0.5, openThread: true });
+      // 多次巡检不应升 importance / accessCount。
+      s.openThreads();
+      s.openThreads();
+      // 用 recall 读取(recall 第一次返回的是强化前值):importance 仍为初值、accessCount 仍 0。
+      const r = s.recall('待跟进')[0];
+      expect(r?.importance).toBeCloseTo(0.5, 6);
+      expect(r?.accessCount).toBe(0);
+      s.close();
+    });
+
+    it('closeThread 后退出 openThreads,且 recall 的 openThread 变 false(承 §7#2)', () => {
+      const s = make();
+      s.addMemory({ text: '要闭合的事', openThread: true });
+      const rec = s.recall('闭合')[0]!;
+      expect(rec.openThread).toBe(true);
+      s.closeThread(rec.id);
+      // 退出未闭合查询。
+      expect(s.openThreads()).toEqual([]);
+      // recall 仍能召回该记忆,但 openThread 已为 false(已闭合)。
+      expect(s.recall('闭合')[0]?.openThread).toBe(false);
+      s.close();
+    });
+
+    it('closeThread 幂等:重复闭合 / 未知 id 不抛、无副作用(承 §7#2/§3.2)', () => {
+      const s = make();
+      s.addMemory({ text: '幂等的事', openThread: true });
+      const rec = s.recall('幂等')[0]!;
+      // 重复闭合不抛。
+      expect(() => {
+        s.closeThread(rec.id);
+        s.closeThread(rec.id);
+      }).not.toThrow();
+      // 未知 id 不抛、不影响其它未闭合话题。
+      s.addMemory({ text: '另一未了事', openThread: true });
+      expect(() => s.closeThread(999_999)).not.toThrow();
+      expect(s.openThreads().map((r) => r.text)).toEqual(['另一未了事']);
+      s.close();
+    });
   });
 }
