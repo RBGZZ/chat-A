@@ -18,6 +18,17 @@ function isValidSnapshot(v: unknown): v is PersonaSnapshot {
   return oceanOk && padOk && isFiniteNum(s['turn']);
 }
 
+/**
+ * 规整化已通过校验的快照:human 状态(ocean/pad/turn)取出;history 做向后兼容处理——
+ * 缺失=旧快照(空 history);存在且为数组=保留;存在但形状非法=**丢弃 history 字段而非丢整快照**
+ * (§3.2 数据迁移纪律:人格状态绝不因 history 损坏而丢)。
+ */
+function normalizeSnapshot(parsed: PersonaSnapshot): PersonaSnapshot {
+  const raw = (parsed as { history?: unknown }).history;
+  const base: PersonaSnapshot = { ocean: parsed.ocean, pad: parsed.pad, turn: parsed.turn };
+  return Array.isArray(raw) ? { ...base, history: raw } : base;
+}
+
 /** 进程内人格状态存储(默认/测试)。 */
 export class InMemoryPersonaStore implements PersonaStore {
   #snapshot: PersonaSnapshot | null = null;
@@ -42,7 +53,7 @@ export function createKvPersonaStore(kv: KvLike): PersonaStore {
       if (raw === undefined) return null;
       try {
         const parsed: unknown = JSON.parse(raw);
-        return isValidSnapshot(parsed) ? parsed : null;
+        return isValidSnapshot(parsed) ? normalizeSnapshot(parsed) : null;
       } catch {
         return null; // 解析失败/形状非法 → 视作无状态,用种子初始化(优雅降级)。
       }

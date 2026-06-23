@@ -15,11 +15,18 @@ export const DEFAULT_DIALS: PersonaDials = {
 export const DEFAULT_PERSONA_CONFIG: PersonaConfig = {
   coldStartTurns: 5,
   coldStartReboundFactor: 2,
+  evolutionEveryTurns: 20,
+  maxOceanDeltaPerStep: 0.01,
 };
 
 /** 钳制到 [-1,1]。 */
 export function clampUnit(x: number): number {
   return x < -1 ? -1 : x > 1 ? 1 : x;
+}
+
+/** 钳制到 [0,1](OCEAN 维度的合法区间)。 */
+export function clamp01(x: number): number {
+  return x < 0 ? 0 : x > 1 ? 1 : x;
 }
 
 /** [0,1] 居中到 [-1,1](OCEAN→PAD 前的归一)。 */
