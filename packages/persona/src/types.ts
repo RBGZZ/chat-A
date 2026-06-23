@@ -241,9 +241,10 @@ export type Emotion = 'joyful' | 'content' | 'neutral' | 'down' | 'irritated';
 
 /**
  * 负面人际姿态(§7#6):在情绪之上的人际行为叠加层,仅负面区激活、由 negativeAffectExpression 门控。
- * sulking=赌气(心情差且有气);withdrawn=冷淡抽离(心情差且蔫)。无姿态时为 null。
+ * sulking=赌气(心情差、唤起高、有气);withdrawn=冷淡抽离(心情差、唤起低、蔫);
+ * cold=冷硬疏远(心情差但掌控感强:不闹不蔫,克制而有距离)。无姿态时为 null。
  */
-export type Posture = 'sulking' | 'withdrawn';
+export type Posture = 'sulking' | 'withdrawn' | 'cold';
 
 export interface AppraiseContext {
   readonly userText: string;
