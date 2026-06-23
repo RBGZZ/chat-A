@@ -105,6 +105,37 @@ export interface MemoryRecord {
 }
 
 /**
+ * 召回命中 + 其在对话时序里的上下文窗口(承 §5.5「上下文窗口拼接」)。
+ * **纯加法派生视图**:`record` 即原 `recall` 返回的离散条目;`contextWindow` 是把该命中
+ * 按时间戳就近锚回 `messages` 时序后、取前后各 N 条相邻消息拼成的连贯片段(含锚点,按时序)。
+ * 无相邻消息(空库/取窗失败降级)时 `contextWindow` 为空数组。
+ */
+export interface RecalledMemory {
+  readonly record: MemoryRecord;
+  readonly contextWindow: readonly ChatMessage[];
+}
+
+/**
+ * `recallWithContext` 的返回(承 §5.5):逐命中结果 + 跨命中去重的合并窗口。
+ * - `memories`:命中顺序与同参数 `recall` 一致,每项带自己独立的连贯上下文窗口。
+ * - `mergedContext`:所有命中窗口按全局时序合并、同一条消息只出现一次(跨命中去重)。
+ */
+export interface RecallWithContext {
+  readonly memories: readonly RecalledMemory[];
+  readonly mergedContext: readonly ChatMessage[];
+}
+
+/** `recallWithContext` 的可选入参(纯加法;省略全用配置默认,签名向后兼容)。 */
+export interface RecallContextOptions {
+  /** 召回返回上限;省略用配置 `recallLimit`(同 `recall`)。 */
+  readonly limit?: number;
+  /** 可选情感共振 PAD(同 `recall`;省略不启用)。 */
+  readonly pad?: Pad;
+  /** 前后各取条数 N;省略用配置 `contextWindowSize`。 */
+  readonly windowSize?: number;
+}
+
+/**
  * 记忆存储接缝(承 §3.1):cognition/runtime 只依赖本接口,不碰具体实现内部。
  * 内存实现与 SQLite 实现满足同一契约、可互换;同步签名(本地毫秒级读 + 同步驱动)。
  */
@@ -127,6 +158,15 @@ export interface MemoryStore {
    * `pad` 为**可选**:传入则启用情感共振重排,缺省不启用(签名向后兼容,默认行为不变)。
    */
   recall(query: string, limit?: number, pad?: Pad): readonly MemoryRecord[];
+  /**
+   * 带上下文窗口的召回(承 §5.5「上下文窗口拼接」):在 `recall` 命中基础上,
+   * 把每条命中按**时间戳就近**锚回 `messages` 时序,取前后各 N 条相邻消息拼成连贯片段,
+   * 并提供跨命中去重的合并窗口。N 走配置(`contextWindowSize`)、可经 `opts.windowSize` 覆盖。
+   *
+   * **纯加法**:复用 `recall` 的召回/排序/检索即强化(不另起第二套打分),仅追加取窗;
+   * `memories` 命中顺序与同参数 `recall` 一致。取窗优雅降级(空库/读失败→窗口为空,不抛,§3.2)。
+   */
+  recallWithContext(query: string, opts?: RecallContextOptions): RecallWithContext;
   /** 通用状态 KV 读(真相源持久化原语;persona 状态等复用)。无则 undefined。 */
   getState(key: string): string | undefined;
   /** 通用状态 KV 写(同 key 覆盖)。 */

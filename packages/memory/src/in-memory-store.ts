@@ -6,9 +6,13 @@ import type {
   MemorySubject,
   Pad,
   Person,
+  RecallContextOptions,
+  RecallWithContext,
+  RecalledMemory,
   StoredMessage,
 } from './types';
 import {
+  anchorIndex,
   decayFactor,
   emotionResonance,
   keywordScore,
@@ -19,6 +23,7 @@ import {
   resolveAttribution,
   resolveMemoryConfig,
   tokenize,
+  windowRange,
   type MemoryConfig,
   type RecallSignal,
 } from './config';
@@ -174,6 +179,37 @@ export class InMemoryMemoryStore implements MemoryStore {
       r.lastAccessedAtMs = now;
     }
     return out;
+  }
+
+  recallWithContext(query: string, opts: RecallContextOptions = {}): RecallWithContext {
+    // 复用 recall 的召回/排序/检索即强化(纯加法,不另起第二套打分);命中顺序即 recall 顺序。
+    const hits = this.recall(query, opts.limit, opts.pad);
+    const n = opts.windowSize ?? this.#cfg.contextWindowSize;
+    // 全局 messages 时序(写入序即时序);时间戳数组供就近锚定(单一权威纯函数,§5.5)。
+    const timestamps = this.#messages.map((m) => m.createdAtMs);
+    const total = this.#messages.length;
+    const memories: RecalledMemory[] = [];
+    // 跨命中去重:合并窗口按全局时序、同一条消息(按下标=稳定身份)只一次。
+    const mergedIdx = new Set<number>();
+    for (const record of hits) {
+      const anchor = anchorIndex(timestamps, record.createdAtMs);
+      const { start, end } = windowRange(anchor, total, n);
+      const window: ChatMessage[] = [];
+      for (let i = start; i < end; i++) {
+        const m = this.#messages[i]!;
+        window.push({ role: m.role, content: m.content });
+        mergedIdx.add(i);
+      }
+      memories.push({ record, contextWindow: window });
+    }
+    // 合并窗口:下标升序还原全局时序,去重后映射为 ChatMessage。
+    const merged: ChatMessage[] = [...mergedIdx]
+      .sort((a, b) => a - b)
+      .map((i) => {
+        const m = this.#messages[i]!;
+        return { role: m.role, content: m.content };
+      });
+    return { memories, mergedContext: merged };
   }
 
   getState(key: string): string | undefined {

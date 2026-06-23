@@ -44,6 +44,12 @@ export interface MemoryConfig {
    * 长查询要求命中更多 token 才算高分,随查询长度自适应;默认 0.5(过半命中即过中点)。
    */
   readonly keywordMidpointFraction: number;
+  /**
+   * 上下文窗口拼接的前后各取条数 N(承 §5.5「上下文窗口拼接」/ §3.2 行为即配置):
+   * `recallWithContext` 把召回命中锚回 messages 时序后取前 N + 锚点 + 后 N 共至多 2N+1 条。
+   * 默认 5(对齐 findings §4③「命中后额外取前后各 5 条」);无 magic number,可经 per-call 覆盖。
+   */
+  readonly contextWindowSize: number;
 }
 
 /** 默认规范化:去首尾空白、小写、空白折叠。去重与召回共用此规则。 */
@@ -66,6 +72,8 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
   // §5.5 混合召回打分归一参数(行为即配置,§3.2):关键词 sigmoid 陡度 1.5、中点比例 0.5(过半命中过中点)。
   keywordSigmoidSteepness: 1.5,
   keywordMidpointFraction: 0.5,
+  // §5.5 上下文窗口前后各 N 条(行为即配置,§3.2):默认 5(对齐 findings §4③)。
+  contextWindowSize: 5,
 };
 
 /** 合并用户覆盖与默认值。 */
@@ -250,4 +258,45 @@ export function emotionResonance(pad: Pad, memoryEmotion?: Pick<Pad, 'pleasure' 
   const mem = memoryEmotion === undefined ? 0 : emotionSector(memoryEmotion);
   const row = EMOTION_RESONANCE_MATRIX[cur] ?? EMOTION_RESONANCE_MATRIX[0]!;
   return clamp01(row[mem] ?? 0.5);
+}
+
+// —— §5.5 上下文窗口拼接:时间戳就近锚定 + 取窗区间(单一权威纯函数,两实现共用,§3.2)——
+// 内存与 SQLite 两实现都调用这两个纯函数把召回命中锚回 messages 时序并切窗,杜绝两后端各写一遍。
+
+/**
+ * 时间戳就近锚点(单一权威,承 §5.5):在按时序升序排列的消息时间戳数组里,
+ * 返回与记忆 `createdAtMs` 距离最小的那条的下标(记忆形成时所处的对话时刻)。
+ * **同距取较早**(较小下标)做确定性兜底;空数组返回 -1。
+ * 入参 `timestamps` 约定已按对话时序升序(调用方保证:内存即写入序、SQLite `ORDER BY id`)。
+ */
+export function anchorIndex(timestamps: readonly number[], memoryCreatedAtMs: number): number {
+  if (timestamps.length === 0) return -1;
+  let best = 0;
+  let bestDist = Math.abs((timestamps[0] ?? 0) - memoryCreatedAtMs);
+  for (let i = 1; i < timestamps.length; i++) {
+    const dist = Math.abs((timestamps[i] ?? 0) - memoryCreatedAtMs);
+    // 严格小于才更新:同距保留更早(更小)下标(确定性兜底)。
+    if (dist < bestDist) {
+      best = i;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
+/**
+ * 取窗区间(单一权威,承 §5.5):锚点下标 `anchor` 前后各 N 条 → 半开区间 `[start, end)`。
+ * `start = max(0, anchor − n)`、`end = min(total, anchor + n + 1)`,越界自然夹取(边界收窄)。
+ * `anchor < 0`(无锚点)返回空区间 `[0, 0)`;`n` 取非负(负数视作 0,窗口只含锚点)。
+ */
+export function windowRange(
+  anchor: number,
+  total: number,
+  n: number,
+): { readonly start: number; readonly end: number } {
+  if (anchor < 0 || total <= 0) return { start: 0, end: 0 };
+  const radius = Math.max(0, n);
+  const start = Math.max(0, anchor - radius);
+  const end = Math.min(total, anchor + radius + 1);
+  return { start, end };
 }

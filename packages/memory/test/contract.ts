@@ -289,5 +289,130 @@ export function runMemoryStoreContract(name: string, make: MakeStore): void {
       expect(r).toEqual(['重要的猫事', '次要的猫事']);
       s.close();
     });
+
+    // —— 上下文窗口拼接(承 §5.5;时间戳就近锚定 + 前后各 N + 跨命中去重;golden 两实现一致)——
+
+    /** 顺序写入若干消息(createdAtMs 与下标对齐,便于锚定断言)。 */
+    function seedMessages(s: MemoryStore, contents: readonly string[]): void {
+      contents.forEach((content, i) => {
+        s.appendMessage({
+          sessionId: 's',
+          turnId: `t${i}`,
+          role: i % 2 === 0 ? 'user' : 'assistant',
+          content,
+          createdAtMs: (i + 1) * 10, // 10,20,30,... 与下标一一对应
+        });
+      });
+    }
+
+    it('召回命中拼出前后各 N 条连贯窗口(含锚点,按时序,§5.5)', () => {
+      const s = make();
+      // 7 条消息:m0..m6,时间戳 10..70。
+      seedMessages(s, ['m0', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6']);
+      // 记忆 createdAtMs=40 → 就近锚到 m3(下标 3);N=2 → 取 m1..m5。
+      s.addMemory({ text: '关键记忆', createdAtMs: 40 });
+      const out = s.recallWithContext('关键记忆', { windowSize: 2 });
+      expect(out.memories.length).toBe(1);
+      expect(out.memories[0]?.record.text).toBe('关键记忆');
+      expect(out.memories[0]?.contextWindow.map((m) => m.content)).toEqual([
+        'm1',
+        'm2',
+        'm3',
+        'm4',
+        'm5',
+      ]);
+      // 单命中时合并窗口 = 该命中窗口。
+      expect(out.mergedContext.map((m) => m.content)).toEqual(['m1', 'm2', 'm3', 'm4', 'm5']);
+      s.close();
+    });
+
+    it('窗口随时间戳就近锚定到正确消息(§5.5)', () => {
+      const s = make();
+      seedMessages(s, ['m0', 'm1', 'm2', 'm3', 'm4']); // 时间戳 10,20,30,40,50
+      // 记忆 createdAtMs=33 → 距 m2(30)差 3、距 m3(40)差 7 → 锚 m2;N=1 → m1..m3。
+      s.addMemory({ text: '锚定记忆', createdAtMs: 33 });
+      const out = s.recallWithContext('锚定记忆', { windowSize: 1 });
+      expect(out.memories[0]?.contextWindow.map((m) => m.content)).toEqual(['m1', 'm2', 'm3']);
+      s.close();
+    });
+
+    it('跨命中窗口去重:重叠合并无重复、按全局时序(§5.5)', () => {
+      let t = 0;
+      const s = make({ now: () => ++t });
+      seedMessages(s, ['m0', 'm1', 'm2', 'm3', 'm4', 'm5']); // 时间戳 10..60
+      // 两条命中同关键词「事」,锚点相近,窗口会重叠。
+      s.addMemory({ text: '事甲', createdAtMs: 20 }); // 锚 m1
+      s.addMemory({ text: '事乙', createdAtMs: 30 }); // 锚 m2
+      const out = s.recallWithContext('事', { limit: 10, windowSize: 1 });
+      expect(out.memories.length).toBe(2);
+      // 甲窗口 m0..m2、乙窗口 m1..m3;合并去重后 m0..m3,按全局时序、无重复。
+      expect(out.mergedContext.map((m) => m.content)).toEqual(['m0', 'm1', 'm2', 'm3']);
+      // 每条命中仍各自拿到完整连贯片段(不被去重削掉)。
+      const windows = out.memories.map((rm) => rm.contextWindow.map((m) => m.content));
+      expect(windows).toContainEqual(['m0', 'm1', 'm2']);
+      expect(windows).toContainEqual(['m1', 'm2', 'm3']);
+      s.close();
+    });
+
+    it('边界:锚点在会话首/尾时窗口自然收窄(§5.5)', () => {
+      const s = make();
+      seedMessages(s, ['m0', 'm1', 'm2', 'm3', 'm4']); // 时间戳 10..50
+      // 锚首:createdAtMs=10 → 锚 m0;N=2 → 只取 m0..m2(前侧无可取)。
+      s.addMemory({ text: '首部记忆', createdAtMs: 10 });
+      expect(
+        s.recallWithContext('首部记忆', { windowSize: 2 }).memories[0]?.contextWindow.map((m) => m.content),
+      ).toEqual(['m0', 'm1', 'm2']);
+      // 锚尾:createdAtMs=50 → 锚 m4;N=2 → 只取 m2..m4(后侧无可取)。
+      s.addMemory({ text: '尾部记忆', createdAtMs: 50 });
+      expect(
+        s.recallWithContext('尾部记忆', { windowSize: 2 }).memories[0]?.contextWindow.map((m) => m.content),
+      ).toEqual(['m2', 'm3', 'm4']);
+      s.close();
+    });
+
+    it('N=0:窗口只含锚点一条(§5.5)', () => {
+      const s = make();
+      seedMessages(s, ['m0', 'm1', 'm2']);
+      s.addMemory({ text: '点记忆', createdAtMs: 20 }); // 锚 m1
+      const out = s.recallWithContext('点记忆', { windowSize: 0 });
+      expect(out.memories[0]?.contextWindow.map((m) => m.content)).toEqual(['m1']);
+      s.close();
+    });
+
+    it('空库取窗优雅降级:无消息时窗口为空(§5.5/§3.2)', () => {
+      const s = make();
+      s.addMemory({ text: '孤记忆', createdAtMs: 5 });
+      const out = s.recallWithContext('孤记忆');
+      expect(out.memories.length).toBe(1);
+      expect(out.memories[0]?.contextWindow).toEqual([]);
+      expect(out.mergedContext).toEqual([]);
+      s.close();
+    });
+
+    it('N 外置:默认取配置 contextWindowSize,可被 per-call windowSize 覆盖(§5.5/§3.2)', () => {
+      const s = make();
+      // 13 条消息,默认 N=5 → 锚 m6 时取 m1..m11 共 11 条。
+      seedMessages(s, ['m0', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7', 'm8', 'm9', 'm10', 'm11', 'm12']);
+      s.addMemory({ text: '宽窗记忆', createdAtMs: 70 }); // 锚 m6(时间戳 70)
+      // 不传 windowSize → 默认配置 5。
+      const def = s.recallWithContext('宽窗记忆');
+      expect(def.memories[0]?.contextWindow.length).toBe(11);
+      // per-call 覆盖为 1 → 3 条。
+      const overridden = s.recallWithContext('宽窗记忆', { windowSize: 1 });
+      expect(overridden.memories[0]?.contextWindow.map((m) => m.content)).toEqual(['m5', 'm6', 'm7']);
+      s.close();
+    });
+
+    it('recallWithContext 命中顺序与 recall 一致(向后兼容,§5.5)', () => {
+      let nowMs = 5 * 86_400_000;
+      const s = make({ now: () => nowMs });
+      seedMessages(s, ['m0', 'm1', 'm2']);
+      s.addMemory({ text: '要紧的事', createdAtMs: 5 * 86_400_000, importance: 0.9 });
+      s.addMemory({ text: '琐碎的事', createdAtMs: 5 * 86_400_000, importance: 0.1 });
+      const plain = s.recall('事', 5).map((r) => r.text);
+      const withCtx = s.recallWithContext('事', { limit: 5 }).memories.map((rm) => rm.record.text);
+      expect(withCtx).toEqual(plain);
+      s.close();
+    });
   });
 }
