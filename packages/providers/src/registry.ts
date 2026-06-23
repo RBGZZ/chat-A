@@ -32,6 +32,12 @@ export function createLlm(config: LlmConfig): LlmProvider {
   return factory(config);
 }
 
+// ---- OpenAI 兼容厂商默认端点(无 magic number;可经 CHAT_A_LLM_BASE_URL / LlmConfig.baseURL 覆盖)----
+/** DeepSeek 默认端点根。 */
+export const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
+/** 通义千问(阿里 DashScope)OpenAI 兼容端点根(纯文本 chat/completions + SSE,§3.3)。 */
+export const QWEN_DASHSCOPE_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+
 // ---- 内置厂商(新厂商照此注册即可)----
 registerLlm('anthropic', (cfg) =>
   new AnthropicLlm({
@@ -48,7 +54,23 @@ registerLlm('deepseek', (cfg) => {
     id: 'deepseek',
     model: cfg.model,
     apiKey: cfg.apiKey,
-    baseURL: 'https://api.deepseek.com',
+    // 默认 DeepSeek 端点;配置提供 baseURL 时覆盖(自托管/代理),缺省行为不变。
+    baseURL: cfg.baseURL ?? DEEPSEEK_BASE_URL,
+    ...(cfg.maxTokens !== undefined ? { maxTokens: cfg.maxTokens } : {}),
+  });
+});
+// 通义千问(DashScope)纯文本:复用 OpenAiCompatLlm(§3.3),镜像 deepseek 分支。
+// 仅纯文本路径(qwen-plus / qwen3 等);多模态 audio-in(qwen omni 系列)留待后续 QwenOmniLlm。
+registerLlm('qwen', (cfg) => {
+  if (cfg.apiKey === undefined || cfg.apiKey.length === 0) {
+    throw new Error('qwen 需要 API key(设 CHAT_A_LLM_API_KEY,即阿里云 DASHSCOPE_API_KEY)');
+  }
+  return new OpenAiCompatLlm({
+    id: 'qwen',
+    model: cfg.model,
+    apiKey: cfg.apiKey,
+    // 默认 DashScope 兼容端点;配置提供 baseURL 时覆盖(自托管/代理),缺省行为不变。
+    baseURL: cfg.baseURL ?? QWEN_DASHSCOPE_BASE_URL,
     ...(cfg.maxTokens !== undefined ? { maxTokens: cfg.maxTokens } : {}),
   });
 });

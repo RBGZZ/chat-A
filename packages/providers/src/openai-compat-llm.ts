@@ -64,6 +64,11 @@ export class OpenAiCompatLlm implements LlmProvider {
     this.#maxTokens = opts.maxTokens ?? 1024;
   }
 
+  /** 已规整(去尾随斜杠)的端点根——与公开的 id/model 对称,仅供 trace/日志(§8.1)与可测性,不改 fetch 行为。 */
+  get baseURL(): string {
+    return this.#baseURL;
+  }
+
   #buildMessages(req: LlmRequest): Array<{ role: string; content: string }> {
     return [
       ...(req.system ? [{ role: 'system', content: req.system }] : []),
