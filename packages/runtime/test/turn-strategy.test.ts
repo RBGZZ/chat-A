@@ -89,6 +89,76 @@ describe('runtime/TurnStrategy 接缝(§9 P3 前置)', () => {
       expect(starts.map((e) => e.correlationId)).toEqual(['s1/t1/0', 's1/t2/0']);
     });
 
+    it('send 把 signal 经 TurnContext 透传给策略(同一实例);不传时为 undefined', async () => {
+      const bus = new LightVoiceBus();
+      const seen: (AbortSignal | undefined)[] = [];
+      const fake: TurnStrategy = {
+        async run(ctx) {
+          seen.push(ctx.signal);
+          return 'ok';
+        },
+      };
+      const convo = new Conversation({ bus, llm: new FakeLlm(), strategy: fake, sessionId: 's1' });
+      const ac = new AbortController();
+      await convo.send('带 signal', () => {}, ac.signal);
+      await convo.send('不带 signal', () => {});
+      expect(seen[0]).toBe(ac.signal); // 同一实例透传
+      expect(seen[1]).toBeUndefined(); // 不传 → undefined
+    });
+
+    it('SingleShotStrategy 把 ctx.signal 透传给 llm.stream(第二实参)', async () => {
+      const bus = new LightVoiceBus();
+      const seenSignals: (AbortSignal | undefined)[] = [];
+      const recordingLlm: LlmProvider = {
+        id: 'rec',
+        model: 'rec-1',
+        async *stream(_req, signal) {
+          seenSignals.push(signal);
+          yield '回';
+          yield '复';
+        },
+        async complete() {
+          return '';
+        },
+      };
+      const convo = new Conversation({ bus, llm: recordingLlm, sessionId: 's1' });
+      const ac = new AbortController();
+      await convo.send('带 signal', () => {}, ac.signal);
+      await convo.send('不带 signal', () => {});
+      expect(seenSignals[0]).toBe(ac.signal);
+      expect(seenSignals[1]).toBeUndefined();
+    });
+
+    it('abort 后 LLM 流停止,外壳 catch 发 turn:end{error} 并重抛(不崩,§3.2)', async () => {
+      const bus = new LightVoiceBus();
+      const reasons: string[] = [];
+      bus.on('turn:end', (e) => reasons.push(e.data.reason));
+      // LLM 在 abort 后抛(模拟真 Provider 的 AbortError);首 token 后流途中取消。
+      const ac = new AbortController();
+      const abortingLlm: LlmProvider = {
+        id: 'abr',
+        model: 'abr-1',
+        async *stream(_req, signal) {
+          yield '第一段';
+          ac.abort(); // 流途中取消
+          if (signal?.aborted === true) {
+            const e = new Error('aborted');
+            e.name = 'AbortError';
+            throw e;
+          }
+        },
+        async complete() {
+          return '';
+        },
+      };
+      const convo = new Conversation({ bus, llm: abortingLlm, sessionId: 's1' });
+      const tokens: string[] = [];
+      await expect(convo.send('你好', (t) => tokens.push(t), ac.signal)).rejects.toThrow();
+      // 半句已产出(首 token),回合经外壳 catch 标 error,不崩
+      expect(tokens).toEqual(['第一段']);
+      expect(reasons.at(-1)).toBe('error');
+    });
+
     it('策略 run 抛错 → 外壳 emit turn:end{error} 并重抛(降级语义不变,§3.2)', async () => {
       const bus = new LightVoiceBus();
       const reasons: string[] = [];

@@ -37,7 +37,7 @@ export class ToolCallingStrategy implements TurnStrategy {
   }
 
   async run(ctx: TurnContext): Promise<string> {
-    const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs, turn } = ctx;
+    const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs, turn, signal } = ctx;
     const tools = this.#registry.toolDefs();
     // 降级:Provider 不支持工具 / 未实现 completeWithTools / 空注册表 → 走单趟(§3.2)。
     if (deps.llm.supportsTools !== true || typeof deps.llm.completeWithTools !== 'function' || tools.length === 0) {
@@ -68,7 +68,8 @@ export class ToolCallingStrategy implements TurnStrategy {
       let iters = 0;
       try {
         for (; iters < this.#maxIters; iters++) {
-          const resp = await completeWithTools({ system, messages: working, tools });
+          // 透传 signal(§3.2 真打断):打断时底层工具补全真停;缺省=undefined 等价现状。
+          const resp = await completeWithTools({ system, messages: working, tools }, signal);
           finalText = resp.text;
           if (resp.stopReason !== 'tool_use' || resp.toolCalls.length === 0) break;
           // 回灌:assistant(本轮 tool_use)+ tool(执行结果);execute 容错不抛(§3.2)。

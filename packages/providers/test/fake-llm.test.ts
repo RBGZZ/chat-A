@@ -16,6 +16,32 @@ describe('providers/FakeLlm', () => {
     expect(text).toContain('FakeLLM');
     expect(llm.id).toBe('fake');
   });
+
+  it('stream 尊重 AbortSignal:首 token 后 abort → 停止 yield 干净结束', async () => {
+    const llm = new FakeLlm();
+    const ac = new AbortController();
+    const tokens: string[] = [];
+    let count = 0;
+    for await (const t of llm.stream(
+      { system: 's', messages: [{ role: 'user', content: '一段较长的文本用于多 token 流式' }] },
+      ac.signal,
+    )) {
+      tokens.push(t);
+      count++;
+      if (count === 1) ac.abort(); // 首 token 后立即取消
+    }
+    // 取消后不再 yield 新 token(干净结束,不无限产出):只拿到首 token
+    expect(tokens).toEqual([tokens[0]]);
+    expect(tokens).toHaveLength(1);
+  });
+
+  it('stream 不传 signal 时行为不变(全量产出)', async () => {
+    const llm = new FakeLlm();
+    const full = await collect(llm.stream({ system: 's', messages: [{ role: 'user', content: 'abc' }] }));
+    expect(full).toContain('abc');
+    // 与 signal 路径区分:不传 signal 一定全量
+    expect(full.length).toBeGreaterThan(3);
+  });
 });
 
 describe('providers/config', () => {
