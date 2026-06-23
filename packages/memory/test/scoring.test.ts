@@ -2,9 +2,12 @@ import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_MEMORY_CONFIG,
   EMOTION_RESONANCE_MATRIX,
+  cosineSimilarity,
+  decodeEmbedding,
   defaultNormalize,
   emotionResonance,
   emotionSector,
+  encodeEmbedding,
   entityKeys,
   hopDecay,
   inferMemoryKindForBackfill,
@@ -13,6 +16,7 @@ import {
   mixedRecallScore,
   normalizeAndFuse,
   recallScore,
+  reciprocalRankFusion,
   resolveMemoryConfig,
   resolveMemoryKind,
   type Pad,
@@ -24,9 +28,15 @@ import {
 /** 构造一条候选的原始信号(测试便捷;缺省各路缺席)。 */
 function rawSignals(p: Partial<RawRecallSignals>): RawRecallSignals {
   const off: RecallSignal = { present: false, value: 0 };
-  return { keyword: off, strength: off, emotion: off, association: off, ...p };
+  return { keyword: off, strength: off, emotion: off, association: off, vector: off, ...p };
 }
-const EQUAL: RecallSignalWeights = { keyword: 1, strength: 1, emotion: 1, association: 1 };
+const EQUAL: RecallSignalWeights = {
+  keyword: 1,
+  strength: 1,
+  emotion: 1,
+  association: 1,
+  vector: 1,
+};
 
 /**
  * §5.5 混合召回单一权威公式 golden:锁住关键词归一(自适应中点)、自适应分母混合、
@@ -261,7 +271,7 @@ describe('§5.9 缺口③ normalizeAndFuse(min-max 归一 + 权重融合)', () =
       rawSignals({ keyword: { present: true, value: 0 }, strength: { present: true, value: 1 } }),
     ];
     // 关键词权重远高于强度 → 偏向关键词高的 A。
-    const w: RecallSignalWeights = { keyword: 4, strength: 1, emotion: 1, association: 1 };
+    const w: RecallSignalWeights = { keyword: 4, strength: 1, emotion: 1, association: 1, vector: 1 };
     const out = normalizeAndFuse(cands, w);
     expect(out[0]!).toBeGreaterThan(out[1]!);
   });
@@ -272,7 +282,7 @@ describe('§5.9 缺口③ normalizeAndFuse(min-max 归一 + 权重融合)', () =
       rawSignals({ keyword: { present: true, value: 0 }, strength: { present: true, value: 1 } }),
     ];
     // 关掉 strength(权重 0)→ 只看 keyword,A 胜。
-    const w: RecallSignalWeights = { keyword: 1, strength: 0, emotion: 1, association: 1 };
+    const w: RecallSignalWeights = { keyword: 1, strength: 0, emotion: 1, association: 1, vector: 1 };
     const out = normalizeAndFuse(cands, w);
     expect(out[0]).toBeCloseTo(1, 6);
     expect(out[1]).toBeCloseTo(0, 6);
@@ -360,5 +370,51 @@ describe('§5.9 缺口④ 情景/语义分层(单一权威纯函数 golden)', ()
     // undefined 兜底 episodic;负权重夹到 0(防御)。
     expect(memoryKindWeight(undefined, w)).toBe(w.episodic);
     expect(memoryKindWeight('semantic', { episodic: 1, semantic: -3, core: 1 })).toBe(0);
+  });
+});
+
+/**
+ * §5.6 接缝 7 / §5.9 RRF 向量存取纯函数 golden:Float32 BLOB 编解码往返、cosine、RRF 名次融合。
+ * 两 store 共用同一权威,锁住单点规则(§3.2)。
+ */
+describe('§5.6 向量存取纯函数(单一权威 golden)', () => {
+  it('encodeEmbedding/decodeEmbedding:Float32 往返保真(端侧不透明存储)', () => {
+    const v = [1, 0.5, -0.25, 0];
+    const bytes = encodeEmbedding(v);
+    expect(bytes.length).toBe(v.length * 4); // Float32 每元素 4 字节。
+    const back = decodeEmbedding(bytes);
+    expect(back.length).toBe(v.length);
+    for (let i = 0; i < v.length; i++) expect(back[i]).toBeCloseTo(v[i]!, 5);
+  });
+
+  it('decodeEmbedding:空 / 非 4 倍数字节 → 空数组(读列兜底,不抛)', () => {
+    expect(decodeEmbedding(new Uint8Array(0))).toEqual([]);
+    expect(decodeEmbedding(new Uint8Array([1, 2, 3]))).toEqual([]); // 3 字节非 Float32 边界。
+  });
+
+  it('cosineSimilarity:同向=1、正交=0、反向=-1;维度不符 / 零向量 → 0', () => {
+    expect(cosineSimilarity([1, 0, 0], [2, 0, 0])).toBeCloseTo(1, 6); // 同向(模长无关)。
+    expect(cosineSimilarity([1, 0], [0, 1])).toBeCloseTo(0, 6); // 正交。
+    expect(cosineSimilarity([1, 0], [-1, 0])).toBeCloseTo(-1, 6); // 反向。
+    expect(cosineSimilarity([1, 0, 0], [1, 0])).toBe(0); // 维度不符。
+    expect(cosineSimilarity([0, 0], [1, 1])).toBe(0); // 零向量。
+  });
+
+  it('reciprocalRankFusion:Σ1/(k+rank),两路共识者得分更高;某路缺席不丢项', () => {
+    // 关键词路名次:A,B,C;向量路名次:B,A(C 不在向量路)。
+    const rrf = reciprocalRankFusion(
+      [
+        [1, 2, 3],
+        [2, 1],
+      ],
+      60,
+    );
+    // A:1/(60+1)+1/(60+2);B:1/(60+2)+1/(60+1);A 与 B 同分(两路一头一尾对称)。
+    expect(rrf.get(1)).toBeCloseTo(1 / 61 + 1 / 62, 9);
+    expect(rrf.get(2)).toBeCloseTo(1 / 62 + 1 / 61, 9);
+    // C 只在关键词路 rank 3,仍有分(不硬门控丢项)。
+    expect(rrf.get(3)).toBeCloseTo(1 / 63, 9);
+    // 两路共识(A/B)高于单路(C)。
+    expect(rrf.get(1)!).toBeGreaterThan(rrf.get(3)!);
   });
 });

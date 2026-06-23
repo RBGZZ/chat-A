@@ -187,6 +187,35 @@ export interface RecallContextOptions {
 }
 
 /**
+ * `recallHybrid` 的入参(承 §5.5 末「🔴 非阻塞召回」/ §5.9「RRF 混合检索」):
+ * - **无 `queryVector` → 行为等同 `recall(query, limit, pad, kindOptions)`**(关键词快路径,逐字一致,快路径下限)。
+ * - **有 `queryVector` → 关键词路 + 向量 KNN 路用 RRF 按名次融合**得到候选,再接既有联想/归一/kind 调制。
+ *
+ * `queryVector` 由**调用方传入**(memory 不依赖 embedder、不发网络/不异步;承本切片硬约束):
+ * 编排层在调 recall 之前异步算好 query embedding,再同步传入(承 §5.5 末「query 向量在调 recall 之前异步算好」)。
+ * 纯加法可选,缺省全走快路径/配置,签名向后兼容。
+ */
+export interface RecallHybridOptions {
+  /** 查询向量(调用方异步算好后传入);省略 = 走关键词快路径(逐字等同 `recall`)。 */
+  readonly queryVector?: readonly number[];
+  /** 召回返回上限;省略用配置 `recallLimit`(同 `recall`)。 */
+  readonly limit?: number;
+  /** 可选情感共振 PAD(同 `recall`;省略不启用)。 */
+  readonly pad?: Pad;
+  /** 按 kind 分路(承 §5.9 缺口④);省略 = 全 kind 混合召回。 */
+  readonly kindOptions?: RecallKindOptions;
+}
+
+/**
+ * `recallByVector` 的可选入参(承 §5.6 接缝 7;纯加法,省略全用配置默认)。
+ * 候选封顶走配置 `vectorKnnCandidateCap`(端侧调优属配置职责),本入参不暴露。
+ */
+export interface RecallByVectorOptions {
+  /** 按 kind 分路(承 §5.9 缺口④);省略 = 全 kind。 */
+  readonly kindOptions?: RecallKindOptions;
+}
+
+/**
  * 记忆存储接缝(承 §3.1):cognition/runtime 只依赖本接口,不碰具体实现内部。
  * 内存实现与 SQLite 实现满足同一契约、可互换;同步签名(本地毫秒级读 + 同步驱动)。
  */
@@ -201,8 +230,13 @@ export interface MemoryStore {
    * 读失败优雅降级为空数组(承 §3.2),不抛。
    */
   messagesForSession(sessionId: string, limit?: number): readonly ChatMessage[];
-  /** ADD 一条记忆条目(带去重)。 */
-  addMemory(rec: MemoryInput): void;
+  /**
+   * ADD 一条记忆条目(带去重),返回该记忆的 id(承 §5.6:供编排层随后 `setEmbedding` 补嵌)。
+   * 去重命中既有等价记忆时返回**被强化的那条**的 id(不新建)。
+   * **向后兼容**:返回类型从 `void → number`,现有忽略返回值的调用方不受影响。
+   * 写失败优雅降级(返回 -1,不抛,§3.2)。
+   */
+  addMemory(rec: MemoryInput): number;
   /**
    * 关键词召回(P1 关键词级;语义/向量属 P2)。
    * 排序用混合归一得分(关键词归一 + 记忆强度 + 可选情感共振,§5.5)。
@@ -241,6 +275,37 @@ export interface MemoryStore {
    * 闭合是轻量状态字段更新(同 pinned 列),非记忆内容 update/delete,故走热路径而非离线巩固。
    */
   closeThread(id: number): void;
+  /**
+   * 写入一条记忆的向量(承 §5.6 接缝 7 / §5.9 接缝预留⑤):**Float32 BLOB 不透明存储** + 维度。
+   * 由**调用方传入** `number[]`(memory 不依赖 embedder、不发网络/不异步);供换 embedder 后台 re-embed 写回同列。
+   * 对不存在 id **幂等不抛**(命中 0 行,无副作用);写失败优雅降级(不抛,§3.2)。
+   */
+  setEmbedding(id: number, vector: readonly number[]): void;
+  /**
+   * 同步向量 KNN(承 §5.6 接缝 7 / §5.5 语义检索一路):对**有 embedding** 的记忆做 JS 暴力 cosine,
+   * 按相似度降序返回前 `limit` 条(省略用配置 `recallLimit`)。候选封顶 `vectorKnnCandidateCap`(不卡事件循环)。
+   * `query` 向量由调用方传入;**维度不一致的行跳过(不抛)**。读失败优雅降级为空数组(§3.2)。
+   * 同步契约(沿用 `recall`):语义期的异步 query embedding 由编排层在调用前算好(承 §5.5 末「🔴 非阻塞召回」)。
+   */
+  recallByVector(
+    vector: readonly number[],
+    limit?: number,
+    opts?: RecallByVectorOptions,
+  ): readonly MemoryRecord[];
+  /**
+   * 同步混合召回(承 §5.5 末「🔴 非阻塞召回」/ §5.9「RRF 混合检索」):
+   * - **无 `opts.queryVector` → 行为等同 `recall(query, limit, pad, kindOptions)`**(关键词快路径,逐字复用)。
+   * - **有 `opts.queryVector` → 关键词路 + 向量 KNN 路用 RRF(k=配置 `rrfK`)按名次融合**得到候选,
+   *   再接既有联想扩散 + min-max 归一 + kind 加权(复用同一套打分,不另起第二套)。
+   *   保持 §5.5 规则:**情感/关键词单路也能入候选池**,RRF 只融合"关键词 vs 向量"两路的名次,不硬门控丢项。
+   * 同步契约;query 向量由调用方在调用前异步算好后传入(承本切片硬约束)。读失败优雅降级为空数组(§3.2)。
+   */
+  recallHybrid(query: string, opts?: RecallHybridOptions): readonly MemoryRecord[];
+  /**
+   * 列出 embedding 为 NULL(尚未嵌入)的记忆(承 §5.6「写侧 embedding 走后台」),供编排层后台补嵌。
+   * 返回 `{ id, text }`,数量受 `limit` 约束(省略用配置 `recallLimit`)。读失败优雅降级为空数组(§3.2)。
+   */
+  memoriesNeedingEmbedding(limit?: number): readonly { readonly id: number; readonly text: string }[];
   /** 通用状态 KV 读(真相源持久化原语;persona 状态等复用)。无则 undefined。 */
   getState(key: string): string | undefined;
   /** 通用状态 KV 写(同 key 覆盖)。 */
