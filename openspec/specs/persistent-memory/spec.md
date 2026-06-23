@@ -61,29 +61,39 @@ TBD - created by archiving change sqlite-memory. Update Purpose after archive.
 
 ### Requirement: 关键词召回
 
-系统 SHALL 支持按关键词召回记忆（P1 关键词级；语义/向量检索属 P2，不在本能力范围）。召回结果 MUST 只包含命中查询关键词的记忆，数量受可配置上限约束。召回排序 SHALL 按**融合得分** `score = importance × decay`(单一权威衰减 + 重要性,承 §5.5)降序返回,得分相同时用确定性次级键(命中度、id)兜底;不再单纯按近因/命中度排序。
+系统 SHALL 支持按关键词召回记忆(P1 关键词级;语义/向量检索属 P2,不在本能力范围)。召回结果 MUST 只包含命中查询关键词的记忆,数量受可配置上限约束。召回排序 SHALL 按**混合归一得分**降序返回:混合得分由若干信号路融合而成——至少包含**关键词归一分**与**记忆强度分**(`importance × decay`,承单一权威衰减/重要性公式),可选包含**情感共振分**(见"情感共振重排"需求);得分相同时 MUST 用确定性次级键(命中度、id)兜底。**关键词原始分**(命中查询 token 的去重数)MUST 经**查询长度自适应 sigmoid** 归一到 [0,1] 后参与融合,使无界原始分不压垮其它 [0,1] 信号。混合 MUST 用**自适应分母**(只除以"在场信号数",缺席信号不计入分母),保证某路信号缺席时记忆不被人为稀释。混合得分 MUST 收敛进**单一权威公式**,两实现(InMemory / SQLite)调用同一公式,不得引入第二套打分。
 
-召回 SHALL 跨主语进行：一次 `recall` MUST 覆盖 `person`、`agent`、`shared` 三类主语的命中记忆，不按主语过滤丢弃，使上层在同一次召回中同时得到"关于当前说话人"、"Agent 关于自己确立过的"、"共同经历"，以防自相矛盾（承 §5.3 末条）。返回的每条 `MemoryRecord` MUST 带 `subject` 与 `personId` 标签，供上层按主语分桶注入。
+召回 SHALL 跨主语进行:一次 `recall` MUST 覆盖 `person`、`agent`、`shared` 三类主语的命中记忆,不按主语过滤丢弃。返回的每条 `MemoryRecord` MUST 带 `subject` 与 `personId` 标签。`recall` 的公共方法签名 MUST 保持向后兼容(融合所需的 PAD 等为**可选**入参,缺省时不改变既有排序行为)。
 
 #### Scenario: 命中关键词的被召回
 
-- **WHEN** 存储中有包含某关键词的记忆，以该关键词召回
-- **THEN** 返回结果包含该记忆，且不包含与关键词无关的记忆
+- **WHEN** 存储中有包含某关键词的记忆,以该关键词召回
+- **THEN** 返回结果包含该记忆,且不包含与关键词无关的记忆
 
 #### Scenario: 召回条数受上限约束
 
 - **WHEN** 命中记忆数超过配置的召回上限 N
-- **THEN** 最多返回 N 条，按融合得分取前 N
+- **THEN** 最多返回 N 条,按混合归一得分取前 N
 
 #### Scenario: 一次召回跨三类主语
 
-- **WHEN** 存储中分别有命中同一关键词的 `person`、`agent`、`shared` 记忆，以该关键词召回（上限足够）
-- **THEN** 返回结果同时包含三类主语的记忆，每条带正确的 `subject` 标签，不因主语而被过滤
+- **WHEN** 存储中分别有命中同一关键词的 `person`、`agent`、`shared` 记忆,以该关键词召回(上限足够)
+- **THEN** 返回结果同时包含三类主语的记忆,每条带正确的 `subject` 标签,不因主语而被过滤
 
-#### Scenario: 按融合得分排序
+#### Scenario: 多关键词命中更多者排更前
 
-- **WHEN** 多条命中同一关键词的记忆其重要性与时间衰减不同，以该关键词召回
-- **THEN** 返回按 `importance × decay` 降序排列，重要且新近者在前；得分相同按确定性次级键稳定排序
+- **WHEN** 一个多 token 查询下,记忆甲命中其中多个 token、记忆乙只命中一个 token,且两者记忆强度相同
+- **THEN** 关键词归一分使甲排在乙之前(命中度经自适应 sigmoid 归一后参与混合)
+
+#### Scenario: 单关键词查询排序仍由记忆强度驱动(向后兼容)
+
+- **WHEN** 一个单 token 查询下多条记忆均命中该 token、但记忆强度(importance×decay)不同
+- **THEN** 所有候选关键词归一分相同,排序仍由记忆强度决定,结果与未引入关键词归一前一致
+
+#### Scenario: 缺席信号不稀释得分(自适应分母)
+
+- **WHEN** 召回未传入 PAD(情感共振路缺席)
+- **THEN** 混合得分只对在场信号(关键词 + 记忆强度)取平均,情感路不计入分母,记忆得分不被一个不存在的信号压低
 
 ### Requirement: schema 版本化与迁移骨架
 
@@ -187,16 +197,16 @@ TBD - created by archiving change sqlite-memory. Update Purpose after archive.
 
 ### Requirement: 记忆重要性打分与融合排序
 
-记忆条目 SHALL 携带**重要性** `importance`(数值,初值外置为可配置默认,承 §3.2)。召回排序 MUST 将重要性与时间衰减融合为**单一权威得分** `score = importance × decay`,并按 `score` 降序返回;得分相同时 MUST 用确定性次级键(命中度、id)兜底,保证排序在两实现与重跑间完全确定。`MemoryRecord` MUST 携带 `importance`(及 `accessCount`、`pinned`),为**纯加法**字段,不破坏现有消费者(只读 `text/kind/subject/hits/personId`)。
+记忆条目 SHALL 携带**重要性** `importance`(数值,初值外置为可配置默认,承 §3.2)。召回排序 MUST 将重要性与时间衰减融合为**记忆强度分** `importance × decay`,作为混合归一得分的一路在场信号(承"关键词召回"需求的混合打分);得分相同时 MUST 用确定性次级键(命中度、id)兜底,保证排序在两实现与重跑间完全确定。`MemoryRecord` MUST 携带 `importance`(及 `accessCount`、`pinned`),为**纯加法**字段,不破坏现有消费者。记忆强度公式 MUST 沿用既有单一权威 `decay = 0.5^(days/H)` 与 `importance × decay`,本变更 MUST NOT 引入第二套衰减/重要性公式。
 
 #### Scenario: 重要性高者排序更前
 
-- **WHEN** 两条命中同一关键词、时间衰减相同的记忆,其一 importance 更高,以该关键词召回
+- **WHEN** 两条命中同一关键词、时间衰减相同、关键词归一分相同的记忆,其一 importance 更高,以该关键词召回
 - **THEN** importance 更高者排在更前
 
 #### Scenario: 得分相同按确定性次级键排序
 
-- **WHEN** 两条记忆的融合得分相同
+- **WHEN** 两条记忆的混合得分相同
 - **THEN** 按命中度、id 等确定性次级键稳定排序,两实现(InMemory / SQLite)与重复运行结果一致
 
 ### Requirement: 检索即强化
@@ -217,4 +227,42 @@ TBD - created by archiving change sqlite-memory. Update Purpose after archive.
 
 - **WHEN** 检索即强化的写入在某次召回中失败
 - **THEN** 召回仍正常返回命中结果,错误被记录而非抛出
+
+### Requirement: 混合召回零信号门控
+
+召回的候选过滤 MUST 只对"**全部在场信号均为 0**"的候选生效——即一个候选仅当其所有在场信号(关键词归一分、记忆强度分、可选情感共振分)都为 0 时才被丢弃。系统 MUST NOT 因某**单路**信号低或缺席而硬丢候选:关键词非零或情感共振非零(任一单路)即足以让候选进入候选池并参与排序(承 §5.5,避开 mem0 语义门控硬丢"语义不相关但情感强共振"记忆的反面教训)。该门控行为对 InMemory 与 SQLite 两实现 MUST 一致。
+
+#### Scenario: 单路非零即进候选池
+
+- **WHEN** 某候选的关键词分为 0、但情感共振分非零(启用情感共振时)
+- **THEN** 该候选不被门控丢弃,以其在场信号参与混合排序
+
+#### Scenario: 全零候选被丢弃
+
+- **WHEN** 某候选的所有在场信号均为 0
+- **THEN** 该候选被门控丢弃,不出现在召回结果中
+
+### Requirement: 情感共振重排(可选)
+
+召回 SHALL 支持基于当前 PAD 情感状态对候选做**情感共振**重排,作为混合归一得分的一路信号。该能力 MUST 经 `recall` 的**可选**入参(PAD)启用:**未传入 PAD 时 MUST 不启用情感共振**(混合得分只含关键词 + 记忆强度),保持 `recall` 签名向后兼容、排序行为与未引入情感共振前一致。启用时,系统 MUST 用 PAD/Russell 扇区**常量矩阵**(O(1) 查表)算出共振系数 ∈ [0,1],作为一路在场信号融入自适应分母混合式;情感共振 MUST NOT 单独主导排序(等权融入,避免"情感强但完全跑题"的记忆霸榜)。常量矩阵与陡度/中点等参数 MUST 外置(行为即配置,无 magic number)。PAD 类型 MUST 为 memory 包本地定义,MUST NOT 跨包 import persona(§3.1)。该能力对两实现 MUST 行为一致。
+
+#### Scenario: 默认不启用情感共振
+
+- **WHEN** 调用 `recall` 不传入 PAD
+- **THEN** 混合得分只由关键词归一分与记忆强度分构成,排序与未引入情感共振前一致
+
+#### Scenario: 传入 PAD 启用扇区矩阵重排
+
+- **WHEN** 调用 `recall` 传入某 PAD 状态,候选记忆分属不同情感扇区
+- **THEN** 与当前 PAD 同扇区/高共振的记忆获得更高情感共振分,在等其它信号下排序更前
+
+#### Scenario: 情感共振不主导排序
+
+- **WHEN** 某记忆情感共振分很高但关键词与记忆强度分很低
+- **THEN** 其混合得分仍受自适应分母平均约束,不因单路情感分高而霸占榜首
+
+#### Scenario: 两实现情感共振一致
+
+- **WHEN** 同一 PAD 与同一组候选分别对 InMemory 与 SQLite 实现召回
+- **THEN** 两实现的情感共振分与最终排序一致
 
