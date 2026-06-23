@@ -6,3 +6,5 @@ export * from './decision-trace';
 export * from './sqlite-decision-trace';
 export * from './decision-trace-reader';
 export * from './decision-trace-stats';
+export * from './sqlite-span-trace';
+export * from './sqlite-span-processor';

@@ -3,7 +3,9 @@ import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import {
   ConsoleSpanExporter,
   SimpleSpanProcessor,
+  AlwaysOnSampler,
   type SpanProcessor,
+  type Sampler,
 } from '@opentelemetry/sdk-trace-base';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
@@ -14,8 +16,18 @@ export interface InitTelemetryOptions {
   readonly serviceName?: string;
   /** 是否加控制台 exporter;省略时:无其它 processor 才默认开,有则不加噪。 */
   readonly console?: boolean;
-  /** 注入额外 SpanProcessor(测试用 InMemory;未来落 SQLite 决策 trace 的 processor)。 */
+  /** 注入额外 SpanProcessor(测试用 InMemory;落 SQLite 的 SqliteSpanProcessor)。 */
   readonly spanProcessors?: readonly SpanProcessor[];
+  /**
+   * 采样器(§8.1 两侧分治采样)。**省略时默认 `AlwaysOnSampler`(全采)**——
+   * 这保证自定义 SpanProcessor(落 SQLite 决策真相源)在 `onEnd` 能拿到**全量** span,
+   * 即「SQLite 侧不采样」。
+   *
+   * ⚠️ provider sampler 一旦设为非全采,被采掉的 span 不会触发 `onEnd`,SQLite 会随之缺失该 span。
+   * 故 OTel 侧若要降噪,应放在**导出/传输链路**(如对接 OTLP 时的 BatchProcessor/采样导出),
+   * 而**不要**用 provider sampler 饿死 SQLite 真相源。
+   */
+  readonly sampler?: Sampler;
   /** shutdown 硬超时(ms):树莓派上 flush/shutdown 可能卡(§8.1),默认 3000。 */
   readonly shutdownTimeoutMs?: number;
 }
@@ -47,6 +59,8 @@ export function initTelemetry(opts: InitTelemetryOptions = {}): TelemetryHandle 
   const provider = new NodeTracerProvider({
     resource: resourceFromAttributes({ [ATTR_SERVICE_NAME]: opts.serviceName ?? SERVICE_NAME }),
     spanProcessors: processors,
+    // 默认全采:不采样,保证 SQLite 决策真相源拿到全量 span(§8.1 两侧分治采样)。
+    sampler: opts.sampler ?? new AlwaysOnSampler(),
   });
   provider.register();
   active = provider;
@@ -69,7 +83,14 @@ function makeHandle(provider: NodeTracerProvider, timeoutMs: number): TelemetryH
         // shutdown 自身异常吞掉:可观测性不得拖垮主流程(§3.2)。
       } finally {
         if (timer !== undefined) clearTimeout(timer);
-        if (active === provider) active = undefined;
+        if (active === provider) {
+          active = undefined;
+          // 还原全局 trace API 为 no-op,**解除已注册的全局 proxy**(与 metrics.ts 的
+          // `metrics.disable()` 同构)。否则下次 `initTelemetry` 的 `register()` 因
+          // 全局 proxy 已注册而返回 false、不重设 delegate,新 provider 的 SpanProcessor
+          // 不会生效(span 仍走已关闭的旧 provider)。
+          trace.disable();
+        }
       }
     },
   };
