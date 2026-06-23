@@ -128,10 +128,10 @@ describe('createStt(工厂按判别联合切换)+ loadSttConfig', () => {
     expect(stt.id).toBe('groq-whisper');
   });
 
-  it('kind: whisper-local → 占位抛错(真引擎以后接)', () => {
-    expect(() => createStt({ kind: 'whisper-local', model: 'large-v3', device: 'cuda', computeType: 'float16' })).toThrow(
-      /whisper-local STT 尚未接入/,
-    );
+  it('kind: whisper-local 未注入 spawn → 明确报错"需运行时端口"(非崩,非"尚未接入")', () => {
+    expect(() =>
+      createStt({ kind: 'whisper-local', model: 'large-v3', device: 'cuda', computeType: 'float16' }),
+    ).toThrow(/需运行时提供 spawn 端口/);
   });
 
   it('未知 kind → 抛错并列出已注册项', () => {
