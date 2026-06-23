@@ -19,6 +19,7 @@
     "@chat-a/persona": "workspace:*",
     "@chat-a/protocol": "workspace:*",
     "@chat-a/providers": "workspace:*",
+    "@chat-a/voice-detect": "workspace:*",
     "@opentelemetry/api": "^1.9.1"
   },
   "devDependencies": {
