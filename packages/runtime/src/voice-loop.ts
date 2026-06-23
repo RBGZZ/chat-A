@@ -1,0 +1,434 @@
+/**
+ * VoiceLoop v1 —— 端到端语音回合编排器（runtime 薄外壳）。
+ *
+ * 设计依据：`docs/superpowers/specs/2026-06-23-voiceloop-skeleton-design.md`（§1~§5）
+ * 与实现计划 `docs/superpowers/plans/2026-06-23-voiceloop-skeleton.md` Task 4。
+ *
+ * 职责（半双工、事件驱动、一轮 = 一个可作废 generation）：
+ *   听 → 想（注入的 `send(text, onToken)`）→ 说，含核心打断 + 被打断半句写回记忆。
+ *
+ * 关键设计：
+ * - **零改 Conversation**：只经注入的 `send: (text, onToken) => Promise<string>` 消费，
+ *   不直接依赖 `Conversation` 类（调用方传 `conversation.send.bind(conversation)`）。
+ * - **状态机**：单一四态 + 瞬态（voice-turn-state.ts）；迁移集中在 `#go(event)`，
+ *   合法则 emit 对应 BusEvent + 设态，非法记 warn 不抛（§3.2 优雅降级）。
+ * - **generation 自检作废**：持单调 `#gen`；每次喂 TTS / sendAudio 前自检 `gen === #gen`，
+ *   不等即不发（单消费者单生产者，自检即足）。打断 = `#gen++` 使在途 onToken/#speak 变 no-op。
+ * - **协作式放弃**（§4 限制）：`send` 不可取消（零改签名），打断后在途 send 在后台跑完但
+ *   输出被忽略（Fake 即时无浪费，真 LLM 浪费尾部 token —— 后续加 AbortSignal 切片解决）。
+ * - 全程容错：任一步抛错被 catch，回 listening，永不崩（§3.2）。
+ */
+import type { AudioFrame, AudioTransport, Unsubscribe } from '@chat-a/protocol';
+import { makeBusEvent, makeDataFrame, type PcmFrame } from '@chat-a/protocol';
+import type { VadDetector, TurnDetector } from '@chat-a/voice-detect';
+import type { SttProvider, TtsProvider, PcmChunk } from '@chat-a/providers';
+import type { MemoryStore } from '@chat-a/memory';
+import type { LightVoiceBus } from './bus';
+import { SentenceSplitter } from './sentence-splitter';
+import { nextState, type VoiceBusEvent, type VoiceState } from './voice-turn-state';
+
+/** 被打断半句写回记忆时拼接的尾标（承 OLV：小雪记得在哪被打断）。 */
+const INTERRUPT_MARK = '[被用户打断]';
+
+/** TurnDetector 选阈值用的语种码（v1 固定中文；后续可由 STT detected language 驱动）。 */
+const DEFAULT_LANG = 'zh';
+
+/**
+ * VoiceLoop 依赖注入（全经接口/接缝，确定性可测）。
+ * `send` 由调用方传 `conversation.send.bind(conversation)`；`clock` 缺省用 `Date.now`。
+ */
+export interface VoiceLoopDeps {
+  readonly transport: AudioTransport;
+  readonly vad: VadDetector;
+  readonly turnDetector: TurnDetector;
+  readonly stt: SttProvider;
+  readonly tts: TtsProvider;
+  /** 想：吃用户文本 + onToken（逐 token 回调），resolve 完整回复。零改 Conversation。 */
+  readonly send: (text: string, onToken: (t: string) => void) => Promise<string>;
+  /** 半句写回只用到 appendMessage（最小面，§4 半句写回）。 */
+  readonly memory: Pick<MemoryStore, 'appendMessage'>;
+  readonly bus: LightVoiceBus;
+  readonly sessionId: string;
+  /** 注入时钟（测试确定性）；缺省 `Date.now`。 */
+  readonly clock?: () => number;
+}
+
+export class VoiceLoop {
+  readonly #transport: AudioTransport;
+  readonly #vad: VadDetector;
+  readonly #turnDetector: TurnDetector;
+  readonly #stt: SttProvider;
+  readonly #tts: TtsProvider;
+  readonly #send: (text: string, onToken: (t: string) => void) => Promise<string>;
+  readonly #memory: Pick<MemoryStore, 'appendMessage'>;
+  readonly #bus: LightVoiceBus;
+  readonly #sessionId: string;
+  readonly #now: () => number;
+
+  /** 当前状态（稳定四态 + 瞬态）。 */
+  #state: VoiceState = 'listening';
+  /** 回合令牌：单调 +1/回合；打断/换回合自增使在途 TTS/onToken 自检失败而作废。 */
+  #gen = 0;
+  /** 本回合已累积的回复文本（用于打断时半句写回）。 */
+  #replyAccum = '';
+  /** endpointing 期累积的用户音频帧（喂 TurnDetector / STT）。 */
+  #audioBuf: PcmFrame[] = [];
+  /** 下行 tts:chunk 单调序号（终端据此丢弃迟到块，对齐 generation 打断）。 */
+  #ttsSeq = 0;
+  /** 最近一次「说话中」帧的真实时刻（ms）；用于据帧时间戳算静音时长喂 TurnDetector。 */
+  #lastVoiceAtMs = 0;
+  /** transport.onAudio 注销句柄。 */
+  #unsub: Unsubscribe | null = null;
+  /** 当前回合的 send 链（仅用于内部追踪，不阻塞）。 */
+  #currentTurn: Promise<void> | null = null;
+
+  constructor(deps: VoiceLoopDeps) {
+    this.#transport = deps.transport;
+    this.#vad = deps.vad;
+    this.#turnDetector = deps.turnDetector;
+    this.#stt = deps.stt;
+    this.#tts = deps.tts;
+    this.#send = deps.send;
+    this.#memory = deps.memory;
+    this.#bus = deps.bus;
+    this.#sessionId = deps.sessionId;
+    this.#now = deps.clock ?? Date.now;
+  }
+
+  /** 当前状态（供测试断言）。 */
+  get state(): VoiceState {
+    return this.#state;
+  }
+
+  /** 启动：订阅上行音频，进入 listening。重复 start 幂等（先退订旧的）。 */
+  start(): void {
+    this.stop();
+    this.#state = 'listening';
+    this.#unsub = this.#transport.onAudio((frame) => this.#onAudio(frame));
+  }
+
+  /** 停止：退订上行 + 作废当前回合（在途 send 输出被忽略，协作式放弃）。 */
+  stop(): void {
+    if (this.#unsub !== null) {
+      this.#unsub();
+      this.#unsub = null;
+    }
+    this.#gen++; // 作废在途回合（onToken/#speak 自检失败而 no-op）
+    this.#replyAccum = '';
+    this.#audioBuf = [];
+  }
+
+  // ───────────────────────────── 状态迁移 ─────────────────────────────
+
+  /**
+   * 集中迁移：查 `nextState`，合法则 emit 对应 BusEvent + 设态；非法记 warn 不抛（§3.2）。
+   * `atMs` 缺省取注入时钟（emit 的 BusEvent 数据载荷需要）。
+   */
+  #go(event: VoiceBusEvent, opts?: { readonly text?: string; readonly reason?: string }): boolean {
+    const to = nextState(this.#state, event);
+    if (to === null) {
+      console.warn(`[VoiceLoop] 非法迁移：${this.#state} --${event}--> (忽略,不抛)`);
+      return false;
+    }
+    this.#state = to;
+    try {
+      this.#emit(event, opts);
+    } catch (err) {
+      // emit 失败不应打断回合推进（总线问题不致命,§3.2）
+      console.warn('[VoiceLoop] emit BusEvent 抛错(已捕获):', err);
+    }
+    return true;
+  }
+
+  /** 把 VoiceBusEvent 桥接为 protocol BusEvent（各 action 的 data 载荷形状不同）。 */
+  #emit(event: VoiceBusEvent, opts?: { readonly text?: string; readonly reason?: string }): void {
+    const corr = this.#bus.currentCorrelationId() ?? `${this.#sessionId}/voice/${this.#gen}`;
+    const at = this.#now();
+    switch (event) {
+      case 'vad:speech_start':
+        this.#bus.emit(makeBusEvent('vad:speech_start', { atMs: at }, corr));
+        return;
+      case 'vad:speech_end':
+        this.#bus.emit(makeBusEvent('vad:speech_end', { atMs: at }, corr));
+        return;
+      case 'stt:final':
+        this.#bus.emit(makeBusEvent('stt:final', { text: opts?.text ?? '' }, corr));
+        return;
+      case 'tts:first_audio':
+        this.#bus.emit(makeBusEvent('tts:first_audio', { atMs: at }, corr));
+        return;
+      case 'turn:end':
+        this.#bus.emit(makeBusEvent('turn:end', { reason: 'completed', atMs: at }, corr));
+        return;
+      case 'turn:interrupt':
+        this.#bus.emit(makeBusEvent('turn:interrupt', { reason: opts?.reason ?? 'barge_in' }, corr));
+        return;
+    }
+  }
+
+  // ───────────────────────────── 上行：听 ─────────────────────────────
+
+  /** transport 上行回调：只处理 `audio:input`（下行 tts:chunk 经同一 transport 回环时忽略）。 */
+  #onAudio(frame: AudioFrame): void {
+    if (frame.type !== 'audio:input') return; // 只消费上行麦克风帧
+    try {
+      const pcm = frame.payload.audio; // payload.audio 本就是 PcmFrame，直接喂 VAD
+      const result = this.#vad.pushFrame(pcm);
+      const evt = result.event;
+
+      // listening：检出语音起点 → endpointing，开始累积
+      if (this.#state === 'listening') {
+        if (evt?.type === 'speech_start') {
+          this.#audioBuf = [pcm];
+          this.#lastVoiceAtMs = pcm.timestampMs;
+          this.#go('vad:speech_start');
+        }
+        return;
+      }
+
+      // endpointing：累积音频；据 TurnDetector（静音时长）判「说完」→ thinking
+      if (this.#state === 'endpointing') {
+        this.#audioBuf.push(pcm);
+        // 仍在「说话中」：刷新最近有声时刻，静音时长归零，不接话
+        if (result.speaking) {
+          this.#lastVoiceAtMs = pcm.timestampMs;
+          return;
+        }
+        // 静音中：据帧时间戳算静音时长喂 TurnDetector（确定性，不读真实时间）
+        const silenceMs = Math.max(0, pcm.timestampMs - this.#lastVoiceAtMs);
+        if (this.#shouldEndpoint(silenceMs)) {
+          this.#beginThinking(); // → thinking（STT + send）
+        }
+        return;
+      }
+
+      // speaking：检出语音起点 → barge_in_pending → v1 即时打断
+      if (this.#state === 'speaking') {
+        if (evt?.type === 'speech_start') {
+          if (this.#go('vad:speech_start')) {
+            this.#interrupt(); // barge_in_pending → listening
+          }
+        }
+        return;
+      }
+
+      // thinking / barge_in_pending：上行音频暂不驱动迁移（v1）
+    } catch (err) {
+      // 上行处理任何异常都不应崩；回 listening 兜底
+      console.warn('[VoiceLoop] onAudio 抛错(已捕获,回 listening):', err);
+      this.#resetToListening();
+    }
+  }
+
+  /** 问 TurnDetector 当前是否该接话（endpointing 期）。 */
+  #shouldEndpoint(silenceMs: number): boolean {
+    try {
+      const decision = this.#turnDetector.step({
+        window: this.#audioBuf,
+        silenceMs,
+        lang: DEFAULT_LANG,
+      });
+      return decision.shouldEndpoint;
+    } catch (err) {
+      console.warn('[VoiceLoop] turnDetector.step 抛错(视作未说完):', err);
+      return false;
+    }
+  }
+
+  /** endpointing → thinking：先迁移（emit stt:final 在 #startThinking 内做，带真转写文本）。 */
+  #beginThinking(): void {
+    void this.#startThinking();
+  }
+
+  // ───────────────────────────── 想：STT + send ─────────────────────────────
+
+  /**
+   * 起一个回合：STT 转写累积音频 → send（onToken 流式凑句喂 TTS）。
+   * 空文本/异常 → 回 listening（降级）。
+   */
+  async #startThinking(): Promise<void> {
+    const gen = ++this.#gen; // 捕获本回合令牌
+    const buf = this.#audioBuf;
+    this.#audioBuf = [];
+
+    let text: string;
+    try {
+      text = await this.#transcribe(buf);
+    } catch (err) {
+      console.warn('[VoiceLoop] STT 抛错(降级回 listening):', err);
+      this.#resetToListening();
+      return;
+    }
+    if (gen !== this.#gen) return; // 转写期间被打断/换回合
+    if (text.trim().length === 0) {
+      // 空转写：降级回 listening（仍在 endpointing 态，用 vad:speech_end 合法迁移）
+      this.#resetToListening();
+      return;
+    }
+
+    // endpointing → thinking（emit stt:final 带真转写文本）
+    if (this.#state !== 'endpointing') {
+      // 状态已变（如被打断),放弃本回合
+      return;
+    }
+    if (!this.#go('stt:final', { text })) {
+      this.#resetToListening();
+      return;
+    }
+
+    // 起想：onToken 凑句**串行**喂 #speak（保句序 + 便于在 send 完成后等全部出尽再收尾）。
+    this.#replyAccum = '';
+    const splitter = new SentenceSplitter();
+    // 串行说话链:每句接在上一句之后,保证下行 tts:chunk 顺序与句序一致。
+    let speakChain: Promise<void> = Promise.resolve();
+    const enqueueSpeak = (sentence: string): void => {
+      speakChain = speakChain.then(() => this.#speak(sentence, gen));
+    };
+    const onToken = (tok: string): void => {
+      if (gen !== this.#gen) return; // 作废：本回合已被打断/替换
+      this.#replyAccum += tok;
+      for (const sentence of splitter.push(tok)) enqueueSpeak(sentence);
+    };
+
+    this.#currentTurn = this.#send(text, onToken)
+      .then(async (full) => {
+        if (gen !== this.#gen) return; // 已被打断：忽略输出（协作式放弃）
+        // 累积以 send 返回的完整回复为准(onToken 可能漏拼)
+        if (full.length >= this.#replyAccum.length) this.#replyAccum = full;
+        const tail = splitter.flush();
+        if (tail !== null) enqueueSpeak(tail);
+        await speakChain; // 等所有句出尽(首句已触发 thinking→speaking)再收尾
+        this.#finishTurn(gen);
+      })
+      .catch((err) => {
+        console.warn('[VoiceLoop] send 抛错(回 listening):', err);
+        if (gen === this.#gen) this.#resetToListening();
+      });
+  }
+
+  /**
+   * 收尾：send 完成后置 turn:end → listening。
+   * v1 简化：不等播放真正排空（Fake TTS 同步出尽）；gen 失配即不收尾（已被打断）。
+   */
+  #finishTurn(gen: number): void {
+    if (gen !== this.#gen) return;
+    // 仍在 speaking 才合法迁移 turn:end;若从未进 speaking(无音频)则直接回 listening
+    if (this.#state === 'speaking') {
+      this.#go('turn:end');
+    } else {
+      this.#resetToListening();
+    }
+    this.#replyAccum = '';
+  }
+
+  /** 把累积音频帧转 PcmChunk 流喂 STT，取最后一条 final 文本（无 final 取最后一条）。 */
+  async #transcribe(buf: readonly PcmFrame[]): Promise<string> {
+    const self = this;
+    async function* toChunks(): AsyncIterable<PcmChunk> {
+      for (const f of buf) yield self.#toPcmChunk(f);
+    }
+    let lastFinal = '';
+    let lastAny = '';
+    for await (const r of this.#stt.transcribe(toChunks())) {
+      lastAny = r.text;
+      if (r.isFinal) lastFinal = r.text;
+    }
+    return lastFinal.length > 0 ? lastFinal : lastAny;
+  }
+
+  // ───────────────────────────── 说：TTS 下行 ─────────────────────────────
+
+  /**
+   * 合成并下行一句：逐 chunk 自检 `gen === #gen`，通过则转 tts:chunk 帧 sendAudio。
+   * 首个下行 chunk 触发 tts:first_audio（thinking → speaking）。
+   */
+  async #speak(sentence: string, gen: number): Promise<void> {
+    if (gen !== this.#gen) return; // 进入即自检（本回合已作废）
+    try {
+      for await (const chunk of this.#tts.synthesize(sentence)) {
+        if (gen !== this.#gen) return; // 每 chunk 再自检：打断后旧 gen 帧不再下行
+        // 首音频：thinking → speaking（仅在 thinking 态时迁移,幂等）
+        if (this.#state === 'thinking') {
+          this.#go('tts:first_audio');
+        }
+        this.#transport.sendAudio(this.#toTtsFrame(chunk));
+      }
+    } catch (err) {
+      console.warn('[VoiceLoop] TTS 合成抛错(跳过本句):', err);
+    }
+  }
+
+  // ───────────────────────────── 打断 ─────────────────────────────
+
+  /**
+   * 核心打断（barge_in_pending → listening，§4）：
+   *   1. `#gen++` 作废在途 TTS/onToken；
+   *   2. transport.clearBuffer() 排空已下发未播音频；
+   *   3. 半句写回（`#replyAccum + [被用户打断]`，仅非空时）；
+   *   4. 清状态、回 listening。send 不取消（协作式放弃,§4 限制）。
+   */
+  #interrupt(): void {
+    this.#gen++; // 在途旧 TTS 帧/onToken 立即作废
+    try {
+      this.#transport.clearBuffer();
+    } catch (err) {
+      console.warn('[VoiceLoop] clearBuffer 抛错(已捕获):', err);
+    }
+    const half = this.#replyAccum.trim();
+    if (half.length > 0) {
+      try {
+        this.#memory.appendMessage({
+          sessionId: this.#sessionId,
+          turnId: 'interrupted',
+          role: 'assistant',
+          content: this.#replyAccum + INTERRUPT_MARK,
+          createdAtMs: this.#now(),
+        });
+      } catch (err) {
+        console.warn('[VoiceLoop] 半句写回抛错(已捕获):', err);
+      }
+    }
+    this.#replyAccum = '';
+    this.#audioBuf = [];
+    this.#go('turn:interrupt'); // barge_in_pending → listening
+  }
+
+  // ───────────────────────────── 兜底 ─────────────────────────────
+
+  /**
+   * 强制回 listening（降级兜底）：若当前态有合法路径就走（emit 对应事件），
+   * 否则直接硬置 listening（不 emit，避免非法迁移 warn 噪声）。
+   */
+  #resetToListening(): void {
+    if (this.#state === 'listening') return;
+    // 优先走合法迁移以保持 BusEvent 可追溯
+    if (this.#state === 'endpointing') {
+      this.#audioBuf = [];
+      this.#go('vad:speech_end');
+      return;
+    }
+    if (this.#state === 'speaking') {
+      this.#go('turn:end');
+      return;
+    }
+    // thinking / barge_in_pending：无直达 listening 的合法事件 → 硬置（瞬态降级,不 emit）
+    this.#state = 'listening';
+    this.#audioBuf = [];
+  }
+
+  // ───────────────────────────── 类型桥接 ─────────────────────────────
+
+  /** PcmFrame → PcmChunk（STT 输入）：同为 samples + sampleRate + channels。 */
+  #toPcmChunk(frame: PcmFrame): PcmChunk {
+    return { samples: frame.samples, sampleRate: frame.sampleRate, channels: frame.channels };
+  }
+
+  /** PcmChunk → 下行 tts:chunk AudioFrame（DataFrame，打断时丢弃语义）。 */
+  #toTtsFrame(chunk: PcmChunk): AudioFrame {
+    return makeDataFrame('tts:chunk', {
+      format: { sampleRate: chunk.sampleRate, channels: chunk.channels, sampleFormat: 's16le' },
+      samples: chunk.samples,
+      seq: this.#ttsSeq++,
+    });
+  }
+}

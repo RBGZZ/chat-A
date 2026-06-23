@@ -142,6 +142,9 @@ importers:
       '@chat-a/providers':
         specifier: workspace:*
         version: link:../providers
+      '@chat-a/voice-detect':
+        specifier: workspace:*
+        version: link:../voice-detect
       '@opentelemetry/api':
         specifier: ^1.9.1
         version: 1.9.1
