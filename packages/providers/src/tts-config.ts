@@ -10,6 +10,8 @@
  * - fake:确定性桩。
  * 加新引擎 = 加分支 + 在 tts-registry 注册,**createTts 核心零改动**。
  */
+import type { Device, ComputeType } from './hardware';
+
 export type TtsConfig =
   | FakeTtsConfig
   | EdgeTtsConfig
@@ -62,6 +64,12 @@ export interface KokoroTtsConfig {
   readonly sampleRate?: number;
   /** 语种(如 'en-us')。 */
   readonly lang?: string;
+  /** 设备(本地引擎据此选 CPU/GPU;共享 {@link Device},§5.10 C1;纯加法、省略时行为不变)。 */
+  readonly device?: Device;
+  /** 计算精度 / 量化档(本地引擎用;共享 {@link ComputeType},绑 profile 非 backend,§5.10 C1)。 */
+  readonly computeType?: ComputeType;
+  /** 是否要求 CUDA(能力位,§4.3 能力门 / §5.6;缺省视为不要求)。 */
+  readonly requiresCuda?: boolean;
   readonly languages?: readonly string[];
 }
 
@@ -119,6 +127,12 @@ export interface GptSovitsTtsConfig {
   readonly sampleRate?: number;
   /** 预注册复刻音色 id 列表(能力位 voiceId;选用免传 refAudio)。 */
   readonly voiceId?: readonly string[];
+  /** 设备(GPT-SoVITS 本地推理据此选 CPU/GPU;共享 {@link Device},§5.10 C1;纯加法、省略时行为不变)。 */
+  readonly device?: Device;
+  /** 计算精度 / 量化档(共享 {@link ComputeType},绑 profile 非 backend,§5.10 C1)。 */
+  readonly computeType?: ComputeType;
+  /** 是否要求 CUDA(GPT-SoVITS 常需 GPU;能力位,§4.3 能力门 / §5.6;缺省视为不要求)。 */
+  readonly requiresCuda?: boolean;
   readonly languages?: readonly string[];
 }
 

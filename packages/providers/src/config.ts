@@ -1,3 +1,5 @@
+import type { Device, ComputeType } from './hardware';
+
 /**
  * LLM 配置(行为即配置,§3.2)。`provider` 为**开放字符串**——加新厂商无需改此类型。
  * 由 createLlm(registry)解析为具体实现;系统其余部分对厂商/模型无感。
@@ -7,6 +9,15 @@ export interface LlmConfig {
   readonly model: string;
   readonly apiKey?: string;
   readonly maxTokens?: number;
+  /**
+   * 设备(端侧本地 LLM 如 rkllama/llama.cpp 据此选 CPU/GPU;共享 {@link Device},§5.10 C1/C2)。
+   * 纯加法、省略时行为不变(云端厂商忽略此位)。
+   */
+  readonly device?: Device;
+  /** 计算精度 / 量化档(端侧本地 LLM 用;共享 {@link ComputeType},绑 profile 非 backend,§5.10 C1)。 */
+  readonly computeType?: ComputeType;
+  /** 是否要求 CUDA(能力位,§4.3 能力门 / §5.6;缺省视为不要求)。 */
+  readonly requiresCuda?: boolean;
 }
 
 /**

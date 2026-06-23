@@ -8,6 +8,8 @@
  * - fake:确定性桩。
  * 加新引擎 = 加一个分支 + 在 stt-registry 注册,**createStt 核心零改动**。
  */
+import type { Device, ComputeType } from './hardware';
+
 export type SttConfig = FakeSttConfig | OpenAiCompatSttConfig | WhisperLocalSttConfig;
 
 /** 确定性桩(无依赖、可复现;对应 LLM 侧 fake)。 */
@@ -56,10 +58,15 @@ export interface WhisperLocalSttConfig {
   readonly id?: string;
   /** 模型大小或路径(faster-whisper `model_size_or_path`,如 'large-v3' / 'distil-medium.en')。 */
   readonly model: string;
-  /** 设备('auto'|'cpu'|'cuda',faster-whisper `device`)。 */
-  readonly device?: 'auto' | 'cpu' | 'cuda';
-  /** 计算精度('int8'|'float16'|'float32',faster-whisper `compute_type`)。 */
-  readonly computeType?: 'int8' | 'float16' | 'float32';
+  /** 设备(faster-whisper `device`;共享 {@link Device}:'cpu'|'cuda'|'auto')。 */
+  readonly device?: Device;
+  /** 计算精度(faster-whisper `compute_type`;共享 {@link ComputeType},绑 profile 非 backend,§5.10 C1)。 */
+  readonly computeType?: ComputeType;
+  /**
+   * 是否要求 CUDA(能力位,§4.3 能力门 / §5.6 profile gate)。
+   * 缺省视为不要求;raspberry/browser 档据此 fail-fast 排除需 GPU 的档位。
+   */
+  readonly requiresCuda?: boolean;
   /** 目标语种(ISO-639-1);省略 = 自动检测。 */
   readonly language?: string;
   /** beam search 宽度(faster-whisper `beam_size`,1=贪心 / 5=beam);默认引擎决定。 */
@@ -130,15 +137,14 @@ export function loadSttConfig(env: NodeJS.ProcessEnv = process.env): SttConfig {
       kind: 'whisper-local',
       model: model ?? '',
       ...(env['CHAT_A_STT_ID'] ? { id: env['CHAT_A_STT_ID'] } : {}),
-      ...(env['CHAT_A_STT_DEVICE']
-        ? { device: env['CHAT_A_STT_DEVICE'] as 'auto' | 'cpu' | 'cuda' }
-        : {}),
+      ...(env['CHAT_A_STT_DEVICE'] ? { device: env['CHAT_A_STT_DEVICE'] as Device } : {}),
       ...(env['CHAT_A_STT_COMPUTE_TYPE']
-        ? { computeType: env['CHAT_A_STT_COMPUTE_TYPE'] as 'int8' | 'float16' | 'float32' }
+        ? { computeType: env['CHAT_A_STT_COMPUTE_TYPE'] as ComputeType }
         : {}),
       ...(language ? { language } : {}),
       ...(beamSize !== undefined ? { beamSize } : {}),
       ...(env['CHAT_A_STT_VAD_FILTER'] === 'true' ? { vadFilter: true } : {}),
+      ...(env['CHAT_A_STT_REQUIRES_CUDA'] === 'true' ? { requiresCuda: true } : {}),
       ...(sampleRate !== undefined ? { sampleRate } : {}),
     };
   }
