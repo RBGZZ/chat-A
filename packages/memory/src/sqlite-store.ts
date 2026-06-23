@@ -7,9 +7,13 @@ import type {
   MemorySubject,
   Pad,
   Person,
+  RecallContextOptions,
+  RecallWithContext,
+  RecalledMemory,
   StoredMessage,
 } from './types';
 import {
+  anchorIndex,
   decayFactor,
   emotionResonance,
   keywordScore,
@@ -20,6 +24,7 @@ import {
   resolveAttribution,
   resolveMemoryConfig,
   tokenize,
+  windowRange,
   type MemoryConfig,
   type RecallSignal,
 } from './config';
@@ -371,6 +376,47 @@ export class SqliteMemoryStore implements MemoryStore {
     } catch (err) {
       this.#onError(err, 'reinforce');
     }
+  }
+
+  recallWithContext(query: string, opts: RecallContextOptions = {}): RecallWithContext {
+    // 复用 recall 的召回/排序/检索即强化(纯加法,不另起第二套打分);命中顺序即 recall 顺序。
+    const hits = this.recall(query, opts.limit, opts.pad);
+    const n = opts.windowSize ?? this.#cfg.contextWindowSize;
+    // 取全局 messages 时序(ORDER BY id = 写入序 = 对话时序),JS 层就近锚定+切窗(与内存零漂移)。
+    // 读失败优雅降级:窗口为空、不抛、召回主结果仍返回(§3.2)。
+    let timeline: { createdAtMs: number; msg: ChatMessage }[] = [];
+    try {
+      const rows = this.#db
+        .prepare(`SELECT created_at, role, content FROM messages ORDER BY id ASC`)
+        .all();
+      timeline = rows.map((r) => ({
+        createdAtMs: asNumber(r['created_at']),
+        msg: {
+          role: asString(r['role']) as ChatMessage['role'],
+          content: asString(r['content']),
+        },
+      }));
+    } catch (err) {
+      this.#onError(err, 'recallWithContext');
+      timeline = [];
+    }
+    const timestamps = timeline.map((t) => t.createdAtMs);
+    const total = timeline.length;
+    const memories: RecalledMemory[] = [];
+    // 跨命中去重:合并窗口按全局时序、同一条消息(按下标=稳定身份)只一次。
+    const mergedIdx = new Set<number>();
+    for (const record of hits) {
+      const anchor = anchorIndex(timestamps, record.createdAtMs);
+      const { start, end } = windowRange(anchor, total, n);
+      const window: ChatMessage[] = [];
+      for (let i = start; i < end; i++) {
+        window.push(timeline[i]!.msg);
+        mergedIdx.add(i);
+      }
+      memories.push({ record, contextWindow: window });
+    }
+    const merged: ChatMessage[] = [...mergedIdx].sort((a, b) => a - b).map((i) => timeline[i]!.msg);
+    return { memories, mergedContext: merged };
   }
 
   getState(key: string): string | undefined {
