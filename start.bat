@@ -26,6 +26,8 @@ REM Distinct from CHAT_A_TRACE (OTel console spans); stitched by same trace_id/s
 REM
 REM Persona evolution (§6.1): CHAT_A_OCEAN_EVOLVE=llm lets her personality drift
 REM slowly over many turns (LLM, every N turns, default off).
+REM Stance evolution (§7#3): CHAT_A_SELF_NOTIONS_EVOLVE=llm lets her convictions
+REM strengthen over conversation (persisted; default off).
 REM Agent loop (§3.3/§12.2): CHAT_A_STRATEGY=tools lets her call local actions
 REM (e.g. current_time) via a tool-use loop; falls back to single-shot if the
 REM provider has no tool support. Default = single-shot.

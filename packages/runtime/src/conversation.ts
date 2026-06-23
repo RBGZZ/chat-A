@@ -21,11 +21,13 @@ import {
   PersonaEngine,
   XIAOXUE_SEED,
   DefaultStanceDetector,
+  SelfNotionsManager,
+  createKvSelfNotionStore,
   type Appraiser,
   type OceanEvolver,
   type PersonaSeed,
   type PersonaStore,
-  type SelfNotion,
+  type SelfNotionEvolver,
   type StanceDetector,
 } from '@chat-a/persona';
 import { getTracer, GENAI, CHAT_A, NoopDecisionTraceSink, type DecisionTraceSink } from '@chat-a/observability';
@@ -51,6 +53,8 @@ export interface ConversationDeps {
   readonly traceSink?: DecisionTraceSink;
   /** 二级 OCEAN 演化接缝(§6.1);默认不注入 = OCEAN 恒定(opt-in,失败降级)。 */
   readonly oceanEvolver?: OceanEvolver;
+  /** 立场强度演化接缝(§7#3);默认不注入 = 立场恒定(opt-in,失败降级)。 */
+  readonly selfNotionEvolver?: SelfNotionEvolver;
   /** 回合执行策略接缝(§9 P3 前置);默认 SingleShotStrategy(单趟流式回合)。 */
   readonly strategy?: TurnStrategy;
   readonly sessionId?: string;
@@ -69,7 +73,8 @@ export interface TurnDeps {
   readonly skeleton: string;
   readonly assembler: PromptAssembler;
   readonly stanceDetector: StanceDetector;
-  readonly selfNotions: readonly SelfNotion[];
+  /** 立场来源(§7#3):持久化 + opt-in 演化;每轮读 current()、收尾 advance()。 */
+  readonly selfNotionsManager: SelfNotionsManager;
   readonly assertiveness: number;
   readonly expressiveness: number;
   readonly extractor: MemoryExtractor;
@@ -90,6 +95,8 @@ export interface TurnContext {
   readonly turnSpan: Span;
   /** turn:start 时间戳,latency 基线。 */
   readonly turnStartMs: number;
+  /** 会话内回合序号(§7#3 演化轮次,供 selfNotionsManager.advance)。 */
+  readonly turn: number;
   readonly deps: TurnDeps;
 }
 
@@ -111,7 +118,7 @@ export interface TurnStrategy {
  */
 export class SingleShotStrategy implements TurnStrategy {
   async run(ctx: TurnContext): Promise<string> {
-    const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs } = ctx;
+    const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs, turn } = ctx;
     // 回合前:读当前心情渲染本轮 tone(不改状态;情绪推进留到回合后,保首字零额外延迟)。
     const mood = deps.persona.tone();
     turnSpan.setAttribute('chat_a.emotion', mood.emotion);
@@ -157,6 +164,7 @@ export class SingleShotStrategy implements TurnStrategy {
       stance,
       system,
       messages,
+      turn,
     });
     return reply;
   }
@@ -180,9 +188,14 @@ export class Conversation {
     const memory = deps.memory ?? new InMemoryMemoryStore();
     const seed = deps.personaSeed ?? XIAOXUE_SEED;
     const skeleton = buildSystemPrompt(seed);
-    // 分歧检测(§7#3):默认确定性话题命中;selfNotions/assertiveness 取自种子。
+    // 分歧检测(§7#3):默认确定性话题命中;assertiveness 取自种子。
     const stanceDetector = deps.stanceDetector ?? new DefaultStanceDetector();
-    const selfNotions = seed.selfNotions ?? [];
+    // 立场来源(§7#3):持久化(复用 memory 的 KV)+ opt-in 演化;默认 current()==种子(等价当前)。
+    const selfNotionsManager = new SelfNotionsManager({
+      seedNotions: seed.selfNotions ?? [],
+      store: createKvSelfNotionStore(memory),
+      ...(deps.selfNotionEvolver ? { evolver: deps.selfNotionEvolver } : {}),
+    });
     const assertiveness = seed.dials.assertiveness;
     // 风格 steer 强度(§7#4):由 expressiveness 旋钮微调 StyleDisciplineContributor。
     const expressiveness = seed.dials.expressiveness;
@@ -215,7 +228,7 @@ export class Conversation {
       skeleton,
       assembler,
       stanceDetector,
-      selfNotions,
+      selfNotionsManager,
       assertiveness,
       expressiveness,
       extractor,
@@ -246,6 +259,7 @@ export class Conversation {
             correlationId,
             turnSpan,
             turnStartMs,
+            turn: this.#turnSeq,
             deps: this.#deps,
           });
           this.#bus.emit(makeBusEvent('turn:end', { reason: 'completed', atMs: Date.now() }, correlationId));

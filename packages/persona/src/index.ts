@@ -13,5 +13,6 @@ export * from './card-loader';
 export * from './seed-memories';
 export * from './posture';
 export * from './self-notions';
+export * from './llm-self-notion-evolver';
 export * from './stance';
 export * from './config-loader';

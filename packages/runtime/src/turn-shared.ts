@@ -53,7 +53,9 @@ export function composeSystem(
 export async function detectStance(deps: TurnDeps, userText: string): Promise<StanceInput> {
   const assertiveness = deps.assertiveness;
   try {
-    const res = await deps.stanceDetector.detect({ userText, selfNotions: deps.selfNotions, assertiveness });
+    // 立场取 manager.current()(反映已演化强度);默认(无 evolver)即种子。
+    const selfNotions = deps.selfNotionsManager.current();
+    const res = await deps.stanceDetector.detect({ userText, selfNotions, assertiveness });
     return { assertiveness, notions: res.notions.map((n) => n.position) };
   } catch {
     return { assertiveness, notions: [] };
@@ -92,6 +94,8 @@ export async function finalizeTurn(
     readonly stance: StanceInput;
     readonly system: string;
     readonly messages: readonly { readonly role: string; readonly content: string }[];
+    /** 会话内回合序号(§7#3 立场演化轮次)。 */
+    readonly turn: number;
   },
 ): Promise<void> {
   const at = Date.now();
@@ -116,6 +120,12 @@ export async function finalizeTurn(
     await deps.persona.advance(args.userText);
   } catch {
     /* 心情本轮不更新,回合继续 */
+  }
+  // 立场强度演化(§7#3,opt-in;无 evolver = no-op);manager 内部已降级,再兜一层不打断回合。
+  try {
+    await deps.selfNotionsManager.advance(args.userText, args.turn);
+  } catch {
+    /* 立场本轮不演化,回合继续 */
   }
   await writeMemories(deps, args.userText, args.reply, at);
   // 决策 trace 收尾落库(§8.1,失败自吞);trace_id/span_id 缝合 OTel。

@@ -7,7 +7,7 @@ import { createLlm, loadLlmConfig } from '@chat-a/providers';
 import { initTelemetry, createDecisionTraceSinkFromEnv } from '@chat-a/observability';
 import { createMemoryStoreFromEnv, LlmMemoryExtractor, LlmReflector, NoopReflector } from '@chat-a/memory';
 import type { Reflector } from '@chat-a/memory';
-import { loadPersonaFromEnv, seedPersonaMemories, createKvPersonaStore, LlmAppraiser, LlmStanceDetector, LlmOceanEvolver } from '@chat-a/persona';
+import { loadPersonaFromEnv, seedPersonaMemories, createKvPersonaStore, LlmAppraiser, LlmStanceDetector, LlmOceanEvolver, LlmSelfNotionEvolver } from '@chat-a/persona';
 
 /**
  * chat-A 文字版 MVP REPL(瘦客户端的文字形态,承 §9)。
@@ -44,6 +44,9 @@ async function main(): Promise<void> {
   // 二级 OCEAN 演化(§6.1,默认关):CHAT_A_OCEAN_EVOLVE=llm 每 N 轮让 LLM 微调人格(失败降级)。
   const evolveMode = (env['CHAT_A_OCEAN_EVOLVE'] ?? 'off').toLowerCase();
   const oceanEvolver = evolveMode === 'llm' ? new LlmOceanEvolver({ provider: llm }) : undefined;
+  // 立场强度演化(§7#3,默认关):CHAT_A_SELF_NOTIONS_EVOLVE=llm 让 LLM 据对话强化立场(失败降级)。
+  const notionEvolveMode = (env['CHAT_A_SELF_NOTIONS_EVOLVE'] ?? 'off').toLowerCase();
+  const selfNotionEvolver = notionEvolveMode === 'llm' ? new LlmSelfNotionEvolver({ provider: llm }) : undefined;
   // 回合策略(§3.3/§12.2 Agent loop,默认单趟):CHAT_A_STRATEGY=tools 启用本地动作工具循环
   // (Provider 不支持工具/空注册表时自动降级回单趟)。
   const actionRegistry = buildDefaultRegistry();
@@ -67,6 +70,7 @@ async function main(): Promise<void> {
     ...(memoryExtractor ? { memoryExtractor } : {}),
     ...(stanceDetector ? { stanceDetector } : {}),
     ...(oceanEvolver ? { oceanEvolver } : {}),
+    ...(selfNotionEvolver ? { selfNotionEvolver } : {}),
     ...(strategy ? { strategy } : {}),
   });
 
@@ -81,7 +85,7 @@ async function main(): Promise<void> {
   stdout.write(`认知: appraiser=${appraiser ? 'llm' : 'default'}  记忆抽取=${memoryExtractor ? 'llm' : 'off'}\n`);
   stdout.write(`立场: 分歧检测=${stanceDetector ? 'llm' : 'default'}  敢顶嘴(assertiveness)=${seed.dials.assertiveness}\n`);
   stdout.write(`决策trace: ${trace.enabled ? `on (${trace.dbPath})` : 'off'}\n`);
-  stdout.write(`沉淀: ${reflectMode === 'llm' ? 'llm (会话结束蒸馏)' : 'off'}  人格演化: ${oceanEvolver ? 'llm (每N轮)' : 'off'}\n`);
+  stdout.write(`沉淀: ${reflectMode === 'llm' ? 'llm (会话结束蒸馏)' : 'off'}  人格演化: ${oceanEvolver ? 'llm (每N轮)' : 'off'}  立场演化: ${selfNotionEvolver ? 'llm' : 'off'}\n`);
   stdout.write(`策略: ${useTools ? `tools (Agent loop, 动作=${actionRegistry.size})` : 'single (单趟)'}\n`);
   if (traceOn) stdout.write('(OTel trace 已开:每回合在控制台输出 turn→llm span。)\n');
   if (cfg.provider === 'fake') {

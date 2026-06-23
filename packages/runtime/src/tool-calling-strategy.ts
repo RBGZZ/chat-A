@@ -37,7 +37,7 @@ export class ToolCallingStrategy implements TurnStrategy {
   }
 
   async run(ctx: TurnContext): Promise<string> {
-    const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs } = ctx;
+    const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs, turn } = ctx;
     const tools = this.#registry.toolDefs();
     // 降级:Provider 不支持工具 / 未实现 completeWithTools / 空注册表 → 走单趟(§3.2)。
     if (deps.llm.supportsTools !== true || typeof deps.llm.completeWithTools !== 'function' || tools.length === 0) {
@@ -98,6 +98,7 @@ export class ToolCallingStrategy implements TurnStrategy {
       stance,
       system,
       messages: working.map((m) => ({ role: m.role, content: m.content })),
+      turn,
     });
     return reply;
   }
