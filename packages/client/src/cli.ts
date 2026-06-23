@@ -1,6 +1,8 @@
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
-import { stdin, stdout, env, argv } from 'node:process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import process, { stdin, stdout, env, argv, cwd } from 'node:process';
 import { Conversation, LightVoiceBus, ToolCallingStrategy } from '@chat-a/runtime';
 import { buildDefaultRegistry, createMemoryFactLookup } from '@chat-a/interaction';
 import { createLlm, loadLlmConfig, createEmbedder, loadEmbedderConfig } from '@chat-a/providers';
@@ -9,12 +11,32 @@ import { createMemoryStoreFromEnv, LlmMemoryExtractor, LlmReflector, NoopReflect
 import type { Reflector } from '@chat-a/memory';
 import { loadPersonaFromEnv, seedPersonaMemories, createKvPersonaStore, LlmAppraiser, LlmStanceDetector, LlmOceanEvolver, LlmSelfNotionEvolver } from '@chat-a/persona';
 import { startVoiceMode, type VoiceModeHandle } from './cli-voice';
+import { parseDotEnv, applyDotEnv } from './env-file';
+import { parseCommand, renderHelp, renderPersona, renderBanner } from './commands';
 
 /**
- * chat-A 文字版 MVP REPL(瘦客户端的文字形态,承 §9)。
- * 用 node:readline 异步迭代行;stdin EOF 时优雅退出(便于非交互冒烟)。
+ * chat-A 文字版 MVP REPL —— 面向用户的交互式终端前端(瘦客户端的文字形态,承 §9)。
+ * 用 node:readline 异步迭代行;stdin EOF / Ctrl+C / `/quit` 三种情况统一优雅收尾(§3.2)。
+ *
+ * 交互层(横幅/命令)的纯逻辑抽到 commands.ts、env-file.ts(可单测);本文件是装配 + 副作用薄壳。
  */
+
+/**
+ * 启动最前面加载项目根 `.env.local`(与 start.bat 行为一致):让 `pnpm dev` 直接拿到 key。
+ * 存在才读、解析为纯函数、注入不覆盖真实 env;文件缺失/读失败静默跳过,绝不崩(§3.2)。
+ */
+function loadEnvLocal(): void {
+  try {
+    const text = readFileSync(join(cwd(), '.env.local'), 'utf8');
+    applyDotEnv(parseDotEnv(text), env);
+  } catch {
+    // 文件不存在 / 读取失败 → 静默(用户可能直接用进程环境变量或 start.bat)。
+  }
+}
+
 async function main(): Promise<void> {
+  loadEnvLocal();
+
   const cfg = loadLlmConfig();
   const llm = createLlm(cfg);
   const bus = new LightVoiceBus();
@@ -60,8 +82,8 @@ async function main(): Promise<void> {
   const useTools = (env['CHAT_A_STRATEGY'] ?? 'single').toLowerCase() === 'tools';
   const strategy = useTools ? new ToolCallingStrategy({ registry: actionRegistry }) : undefined;
   // 会话沉淀(§5/§6.1 Reflection,默认关):CHAT_A_REFLECTION=llm 用 LLM 在会话结束蒸馏高层记忆+第一人称自传。
-  // sessionId 在此生成并贯穿 Conversation 与退出收尾的 reflect,保证沉淀只针对本会话消息。
-  const sessionId = randomUUID().slice(0, 8);
+  // sessionId 贯穿 Conversation 与退出收尾的 reflect,保证沉淀只针对本会话消息;`/reset` 会换新 sessionId。
+  let sessionId = randomUUID().slice(0, 8);
   const reflectMode = (env['CHAT_A_REFLECTION'] ?? 'off').toLowerCase();
   const reflector: Reflector =
     reflectMode === 'llm' ? new LlmReflector({ provider: llm, store: mem.store }) : new NoopReflector();
@@ -69,42 +91,51 @@ async function main(): Promise<void> {
   // recallHybrid(关键词+向量加权归一)+ 回合收尾后台写侧嵌入。缺省=纯关键词召回,零额外开销。
   const embedderMode = (env['CHAT_A_EMBEDDER'] ?? '').trim();
   const embedder = embedderMode.length > 0 ? createEmbedder(loadEmbedderConfig(env)) : undefined;
-  const convo = new Conversation({
-    bus,
-    llm,
-    memory: mem.store,
-    personaSeed: seed,
-    personaStore,
-    traceSink: trace.sink,
-    sessionId,
-    ...(appraiser ? { appraiser } : {}),
-    ...(memoryExtractor ? { memoryExtractor } : {}),
-    ...(stanceDetector ? { stanceDetector } : {}),
-    ...(oceanEvolver ? { oceanEvolver } : {}),
-    ...(selfNotionEvolver ? { selfNotionEvolver } : {}),
-    ...(strategy ? { strategy } : {}),
-    ...(embedder ? { embedder } : {}),
-  });
+
+  // Conversation 工厂:`/reset` 需用新 sessionId 重建一个全新上下文(同一套依赖装配)。
+  const makeConvo = (sid: string): Conversation =>
+    new Conversation({
+      bus,
+      llm,
+      memory: mem.store,
+      personaSeed: seed,
+      personaStore,
+      traceSink: trace.sink,
+      sessionId: sid,
+      ...(appraiser ? { appraiser } : {}),
+      ...(memoryExtractor ? { memoryExtractor } : {}),
+      ...(stanceDetector ? { stanceDetector } : {}),
+      ...(oceanEvolver ? { oceanEvolver } : {}),
+      ...(selfNotionEvolver ? { selfNotionEvolver } : {}),
+      ...(strategy ? { strategy } : {}),
+      ...(embedder ? { embedder } : {}),
+    });
+  let convo = makeConvo(sessionId);
 
   // OTel 追踪骨架(§8.1):默认不开以免刷屏;设 CHAT_A_TRACE=1 打开控制台 span 树。
   const traceOn = (env['CHAT_A_TRACE'] ?? '').length > 0;
   const telemetry = traceOn ? initTelemetry({ console: true }) : undefined;
 
-  stdout.write(`chat-A · 文字版 MVP  [provider=${cfg.provider} model=${cfg.model}]\n`);
-  stdout.write(`记忆: ${mem.backend}${mem.dbPath ? ` (${mem.dbPath})` : ''}\n`);
-  stdout.write(`人格: ${seed.name}  [暖=${seed.dials.baselineWarmth} 外显=${seed.dials.expressiveness} 波动=${seed.dials.emotionalVolatility}]\n`);
-  stdout.write(`来源: ${personaSource}${personaEnvOverride ? ' + env 覆盖' : ''}  lore=${seeded.lore} 画像=${seeded.userProfile} 观点=${seeded.selfNotions}\n`);
-  stdout.write(`认知: appraiser=${appraiser ? 'llm' : 'default'}  记忆抽取=${memoryExtractor ? 'llm' : 'off'}\n`);
-  stdout.write(`立场: 分歧检测=${stanceDetector ? 'llm' : 'default'}  敢顶嘴(assertiveness)=${seed.dials.assertiveness}\n`);
-  stdout.write(`决策trace: ${trace.enabled ? `on (${trace.dbPath})` : 'off'}\n`);
-  stdout.write(`语义召回: ${embedder ? `on (${embedder.id}, dim=${embedder.dimension})` : 'off (纯关键词)'}\n`);
-  stdout.write(`沉淀: ${reflectMode === 'llm' ? 'llm (会话结束蒸馏)' : 'off'}  人格演化: ${oceanEvolver ? 'llm (每N轮)' : 'off'}  立场演化: ${selfNotionEvolver ? 'llm' : 'off'}\n`);
-  stdout.write(`策略: ${useTools ? `tools (Agent loop, 动作=${actionRegistry.size})` : 'single (单趟)'}\n`);
-  if (traceOn) stdout.write('(OTel trace 已开:每回合在控制台输出 turn→llm span。)\n');
-  if (cfg.provider === 'fake') {
-    stdout.write('(未检测到 ANTHROPIC_API_KEY → FakeLLM 占位。设 ANTHROPIC_API_KEY 用真 Claude;\n');
-    stdout.write(' 或用 CHAT_A_LLM_PROVIDER / CHAT_A_LLM_MODEL 自选模型。)\n');
-  }
+  // ── 友好横幅(面向用户)+ 开发者向的精简状态行(可一眼看出各能力开关) ──
+  stdout.write(
+    renderBanner({
+      name: seed.name,
+      provider: cfg.provider,
+      model: cfg.model,
+      memoryBackend: `${mem.backend}${mem.dbPath ? ` (${mem.dbPath})` : ''}`,
+      warmth: seed.dials.baselineWarmth,
+      expressiveness: seed.dials.expressiveness,
+      volatility: seed.dials.emotionalVolatility,
+      isFake: cfg.provider === 'fake',
+    }) + '\n',
+  );
+  // 精简状态行:仅在偏离默认时点亮,避免刷屏(默认全关/默认值时这几行多为 default/off)。
+  stdout.write(
+    `状态: 人格来源=${personaSource}${personaEnvOverride ? '+env' : ''} | 认知 appraiser=${appraiser ? 'llm' : 'default'} 抽取=${memoryExtractor ? 'llm' : 'off'} | ` +
+      `分歧=${stanceDetector ? 'llm' : 'default'} | 策略=${useTools ? `tools(${actionRegistry.size})` : 'single'} | 语义召回=${embedder ? embedder.id : 'off'} | ` +
+      `沉淀=${reflectMode === 'llm' ? 'on' : 'off'} trace=${trace.enabled ? 'on' : 'off'}\n`,
+  );
+
   // 语音模式(R2,默认关):`--voice` 或 CHAT_A_VOICE=1 切语音;文字模式默认不变。
   // 装配 AudioDevice(真/Fake)→ InProcessAudioTransport → VoiceLoop;send 注入 convo.send(零改 Conversation)。
   const voiceOn = argv.includes('--voice') || (env['CHAT_A_VOICE'] ?? '').length > 0;
@@ -112,7 +143,8 @@ async function main(): Promise<void> {
   if (voiceOn) {
     try {
       voice = await startVoiceMode({
-        send: convo.send.bind(convo),
+        // 语音用一个稳定的 send 适配器,内部读当前 convo(/reset 后也能拿到新上下文)。
+        send: (text, onToken) => convo.send(text, onToken),
         memory: mem.store,
         bus,
         sessionId,
@@ -122,41 +154,105 @@ async function main(): Promise<void> {
     } catch (err) {
       stdout.write(`语音: 启动失败(回落纯文字):${err instanceof Error ? err.message : String(err)}\n`);
     }
-  } else {
-    stdout.write('语音: off (--voice 或 CHAT_A_VOICE=1 启用)\n');
   }
-  stdout.write('和小雪打字对话,Ctrl+C 退出。\n\n');
+  stdout.write('\n');
+
+  // ── 统一优雅收尾(EOF / Ctrl+C / /quit 共用;幂等,多次触发只跑一次) ──
+  let cleaned = false;
+  const cleanup = async (): Promise<void> => {
+    if (cleaned) return;
+    cleaned = true;
+    // 语音模式收尾:停采集/loop/设备(幂等;无语音则 no-op)。
+    voice?.stop();
+    // 会话结束的夜间沉淀(§5/§6.1):在关库之前异步蒸馏一次;幂等 + 全程降级,失败吞掉不影响退出。
+    await reflector.reflect(sessionId).catch(() => {});
+    try {
+      mem.store.close();
+    } catch {
+      /* 关库失败不影响退出 */
+    }
+    try {
+      trace.sink.close();
+    } catch {
+      /* 同上 */
+    }
+    await telemetry?.shutdown().catch(() => {});
+  };
 
   const rl = createInterface({ input: stdin, output: stdout });
   let closed = false;
   rl.on('close', () => {
     closed = true;
   });
+
+  // Ctrl+C:打印告别 → 收尾 → 退出,不抛栈(§3.2 优雅退出)。
+  // readline 默认把 SIGINT 转成 'SIGINT' 事件;我们接管它做优雅收尾。
+  rl.on('SIGINT', () => {
+    stdout.write('\n小雪: 先到这儿,下次见。\n');
+    rl.close();
+    void cleanup().then(() => process.exit(0));
+  });
+
   rl.setPrompt('你 › ');
   rl.prompt();
   for await (const line of rl) {
-    const text = line.trim();
-    if (text.length === 0) {
-      rl.prompt();
-      continue;
+    const parsed = parseCommand(line);
+    switch (parsed.kind) {
+      case 'empty':
+        rl.prompt();
+        continue;
+      case 'quit':
+        rl.close();
+        continue; // 跳出循环由 rl.close 触发(下一次迭代结束)
+      case 'help':
+        stdout.write(renderHelp() + '\n\n');
+        if (!closed) rl.prompt();
+        continue;
+      case 'persona':
+        stdout.write(
+          renderPersona({
+            name: seed.name,
+            identity: seed.identity,
+            warmth: seed.dials.baselineWarmth,
+            expressiveness: seed.dials.expressiveness,
+            volatility: seed.dials.emotionalVolatility,
+            assertiveness: seed.dials.assertiveness,
+          }) + '\n\n',
+        );
+        if (!closed) rl.prompt();
+        continue;
+      case 'clear':
+        // 清屏(ANSI);非 TTY(管道)下也无害。
+        stdout.write('\x1b[2J\x1b[H');
+        if (!closed) rl.prompt();
+        continue;
+      case 'reset':
+        sessionId = randomUUID().slice(0, 8);
+        convo = makeConvo(sessionId);
+        stdout.write('(已开新一段对话,之前的上下文不再带入。长期记忆仍保留。)\n\n');
+        if (!closed) rl.prompt();
+        continue;
+      case 'unknown':
+        stdout.write(`未知命令:${parsed.name}。输入 /help 查看可用命令。\n\n`);
+        if (!closed) rl.prompt();
+        continue;
+      case 'chat': {
+        stdout.write('小雪 › ');
+        try {
+          await convo.send(parsed.text, (token) => stdout.write(token));
+        } catch (err) {
+          // §3.2 永不崩永不哑:友好中文降级,会话继续。
+          const detail = err instanceof Error ? err.message : String(err);
+          stdout.write(`\n(小雪一时没接上话——可能是网络或模型出了点问题,稍后再试。)\n[${detail}]`);
+        }
+        stdout.write('\n\n');
+        if (!closed) rl.prompt();
+        continue;
+      }
     }
-    stdout.write('小雪 › ');
-    try {
-      await convo.send(text, (token) => stdout.write(token));
-    } catch (err) {
-      stdout.write(`\n[出错: ${err instanceof Error ? err.message : String(err)}]`);
-    }
-    stdout.write('\n\n');
-    if (!closed) rl.prompt();
   }
 
-  // 语音模式收尾:停采集/loop/设备(幂等;无语音则 no-op)。
-  voice?.stop();
-  // 会话结束的夜间沉淀(§5/§6.1):在关库之前异步蒸馏一次;幂等 + 全程降级,失败吞掉不影响退出。
-  await reflector.reflect(sessionId).catch(() => {});
-  mem.store.close();
-  trace.sink.close();
-  await telemetry?.shutdown();
+  await cleanup();
 }
 
 await main();
