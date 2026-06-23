@@ -31,3 +31,32 @@ export const CHAT_A = {
   SESSION_ID: 'chat_a.session_id',
   TURN_ID: 'chat_a.turn_id',
 } as const;
+
+/**
+ * 延迟 metric 名(§8.1:延迟用 Histogram,仿 LiveKit `lk.agents.turn.*`)。
+ *
+ * 单一命名:metric 名与下面的维度键统一收敛到本文件,避免名字散落漂移(§3.2「单一权威」)。
+ * 命名沿 OTel 习惯:点分小写;单位走 Histogram 的 `unit` 字段(统一秒,见 metrics.ts)。
+ */
+export const METRIC = {
+  /** 回合级端到端延迟(从收到用户输入到回复就绪)。 */
+  TURN_DURATION: 'chat_a.turn.duration',
+  /** LLM 调用延迟(单次 chat/completion 往返)。 */
+  LLM_DURATION: 'chat_a.llm.duration',
+} as const;
+
+/**
+ * metric 维度(标签)键。⚠️ metric 标签**忌高基数**——故只放 provider/model/operation/emotion
+ * 这类低基数枚举,**绝不**放 correlation/session/turn id(那是 trace 侧的事)。
+ * provider/model/operation 复用 GenAI 同名键,保证 metric 与 trace 两侧标签可对齐。
+ */
+export const METRIC_ATTR = {
+  /** 厂商,如 'deepseek' / 'anthropic'(同 GENAI.PROVIDER_NAME)。 */
+  PROVIDER: GENAI.PROVIDER_NAME,
+  /** 请求模型串(同 GENAI.REQUEST_MODEL)。 */
+  MODEL: GENAI.REQUEST_MODEL,
+  /** 操作类型,如 'chat'(同 GENAI.OPERATION_NAME)。 */
+  OPERATION: GENAI.OPERATION_NAME,
+  /** 本回合情绪标签(chat-A 私有,低基数枚举,如 'content' / 'neutral')。 */
+  EMOTION: 'chat_a.emotion',
+} as const;
