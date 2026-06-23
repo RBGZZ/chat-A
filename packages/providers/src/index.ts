@@ -1,3 +1,4 @@
+export * from './hardware';
 export * from './llm';
 export * from './fake-llm';
 export * from './anthropic-llm';
