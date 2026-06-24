@@ -30,7 +30,6 @@ import {
   type TtsOptions,
   type TtsProvider,
 } from '@chat-a/providers';
-import { SentenceSplitter } from '@chat-a/runtime';
 import {
   IPC,
   StateTracker,
@@ -307,13 +306,14 @@ function makeSynthesize(
   };
 }
 
-/** 用 SentenceSplitter 把整段回复切成句数组(push 全文 + flush 残余)。 */
+/**
+ * 朗读分句:整段回复**一次合成**(不再逐句切)。
+ * 逐句=每句一个独立 WS 合成调用,复刻音色逐句音色漂移→听感「多个音色混杂」;qwen-tts-realtime 本就
+ * 流式(整段也边合边出音),整段一次合成既消除漂移/重叠,音色又一致。回复短(陪伴对话),一次合成首音延迟可接受。
+ */
 function splitReplySentences(text: string): readonly string[] {
-  const splitter = new SentenceSplitter();
-  const out = [...splitter.push(text)];
-  const tail = splitter.flush();
-  if (tail !== null) out.push(tail);
-  return out;
+  const t = text.trim();
+  return t.length > 0 ? [t] : [];
 }
 
 /**
