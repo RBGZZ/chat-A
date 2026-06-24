@@ -216,6 +216,42 @@ export interface RecallByVectorOptions {
 }
 
 /**
+ * 整块重写一条记忆的补丁(承 §5.10 B2② Letta 式整块重写 / §5.8 离线调和 update):
+ * 夜间巩固重生成 clean summary 覆盖记忆主体,而非外科打补丁。**纯加法可选字段**:
+ * 省略的字段不动(只覆盖给出的)。`text` 给出时连带刷新规范化文本/去重索引/联想边(单一权威重建)。
+ * core/pinned 记忆永不被 update(承 §5.4/§5.8 决策 3),实现侧豁免、返回 false 不改。
+ */
+export interface MemoryUpdate {
+  /** 新正文(整块重写覆盖);省略则不改正文。 */
+  readonly text?: string;
+  /** 新重要性(承 §5.5);落 [0,1],省略不改。 */
+  readonly importance?: number;
+  /** 新情景/语义分层(承 §5.9 缺口④);省略不改。 */
+  readonly memoryKind?: MemoryKind;
+  /** 覆盖"修改时刻"(注入时钟便于确定性测试,§3.2);省略用实现的"现在"。 */
+  readonly atMs?: number;
+}
+
+/**
+ * 一条巩固决策 trace(承 §8.1 可回放):记录每次离线调和的 diff、惊奇 gap、discard 理由,
+ * 使"为什么改/删了这条记忆"可重建。结构化落 SQLite(真相源),纯加法、与既有 trace 无关联耦合。
+ */
+export interface ConsolidationTrace {
+  /** 巩固单元标识(如 `session:s1` / `daily:2026-06-24`);幂等键的一部分。 */
+  readonly unit: string;
+  /** 决策类型:add/update/discard(delete 保守落为 discard)/surprise(惊奇 gap 蒸馏)/rewrite(整块重写)。 */
+  readonly kind: 'add' | 'update' | 'discard' | 'surprise' | 'rewrite';
+  /** 涉及的真实记忆 id(add/surprise 为新建 id;不涉及具体记忆时可省略)。 */
+  readonly memoryId?: number;
+  /** 决策的人类可读理由(LLM 给出的或代码归纳的;可重建"为什么")。 */
+  readonly reason: string;
+  /** 决策发生时刻(注入时钟,§3.2)。 */
+  readonly atMs: number;
+  /** 结构化补充(原文/gap/旧值新值等,JSON 序列化;可省略)。 */
+  readonly detail?: string;
+}
+
+/**
  * 记忆存储接缝(承 §3.1):cognition/runtime 只依赖本接口,不碰具体实现内部。
  * 内存实现与 SQLite 实现满足同一契约、可互换;同步签名(本地毫秒级读 + 同步驱动)。
  */
@@ -324,6 +360,39 @@ export interface MemoryStore {
    * `valencePos≤0` 时只刷新衰减基线(等价 `c'=c`,更新时间戳)。对未知 personId **幂等不抛**(§3.2)。
    */
   bumpCloseness(personId: string, valencePos: number, atMs: number): number;
+  /**
+   * 按 id 取一条记忆(承 §5.8 离线调和:Pass2 对标既有需读取候选明细)。
+   * 仅离线巩固路径用(非热路径);不触发检索即强化(读不写回污染,§5.5)。
+   * 不存在 / 读失败 → undefined(优雅降级,§3.2)。
+   */
+  getMemoryById(id: number): MemoryRecord | undefined;
+  /**
+   * 整块重写一条记忆(承 §5.10 B2② Letta 式 / §5.8 离线调和 update):**仅离线巩固后台调用**,
+   * 绝不在热路径决定 update(承 §5.8 避坑)。给出 `text` 时连带重建规范化文本/去重索引/联想边
+   * (单一权威重建,与 addMemory 同规则,零漂移)。
+   * **core/pinned 记忆永不被改**(承 §5.4/§5.8 决策 3):命中即跳过、返回 false。
+   * 改成功返回 true;不存在 / core/pinned 豁免 / 写失败 → false(不抛,§3.2)。
+   */
+  updateMemory(id: number, patch: MemoryUpdate): boolean;
+  /**
+   * 保守"删除"一条记忆(承 §5.8 决策 3:delete 保守 = 加速衰减,**默认不物理删**):
+   * 把 `last_seen_at` 推到远古 + importance 压到极低,令其在单一权威衰减公式下强度趋近 0、
+   * 自然淡出 recall——**不改 recall 热路径 SQL/逻辑**(承硬回归线),不引入新过滤列。
+   * **core/pinned 记忆永不参与**(承 §5.4):命中即跳过、返回 false。
+   * 成功返回 true;不存在 / core/pinned 豁免 / 写失败 → false(不抛,§3.2)。
+   * `atMs` 注入"现在"(确定性测试,§3.2);省略用实现时钟。
+   */
+  markDiscarded(id: number, atMs?: number): boolean;
+  /**
+   * 落一条巩固决策 trace(承 §8.1 可回放):结构化持久化"为什么改/删了这条记忆"。
+   * 仅离线巩固后台调用;写失败优雅降级(不抛,§3.2),不拖垮巩固主流程。
+   */
+  recordConsolidationTrace(trace: ConsolidationTrace): void;
+  /**
+   * 读巩固决策 trace(承 §8.1):省略 `unit` 取全部(按时序升序),给出则只取该单元。
+   * 供回放/审计/测试断言;读失败优雅降级为空数组(§3.2)。
+   */
+  consolidationTraces(unit?: string): readonly ConsolidationTrace[];
   /** 通用状态 KV 读(真相源持久化原语;persona 状态等复用)。无则 undefined。 */
   getState(key: string): string | undefined;
   /** 通用状态 KV 写(同 key 覆盖)。 */
