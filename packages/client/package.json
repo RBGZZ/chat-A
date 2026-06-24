@@ -10,6 +10,7 @@
   "dependencies": {
     "@chat-a/runtime": "workspace:*",
     "@chat-a/protocol": "workspace:*",
+    "@chat-a/gateway": "workspace:*",
     "@chat-a/voice-detect": "workspace:*",
     "@chat-a/interaction": "workspace:*",
     "@chat-a/providers": "workspace:*",

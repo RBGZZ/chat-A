@@ -14,6 +14,7 @@
  * 文字模式默认不变;`--voice` 或 `CHAT_A_VOICE=1` 才进本模式(见 cli.ts 分发)。
  */
 import { stdout, env as procEnv } from 'node:process';
+import { connectClientTransport } from '@chat-a/gateway';
 import { createStt, loadSttConfig, createTts, loadTtsConfig } from '@chat-a/providers';
 import type { MemoryStore } from '@chat-a/memory';
 import {
@@ -29,7 +30,23 @@ import type { AudioDevice } from './audio/audio-device';
 import { FakeAudioDevice } from './audio/fake-audio-device';
 import { NodeAudioDevice } from './audio/node-audio-device';
 import { createSherpaVadSession, createSherpaEouSession } from './audio/sherpa-vad-session';
-import { runVoiceLoop } from './audio/voice-runner';
+import { runVoiceLoop, runTerminalBridge } from './audio/voice-runner';
+
+/**
+ * 传输选择(行为即配置,§3.1):`CHAT_A_TRANSPORT=inprocess|websocket`,**缺省 inprocess**(逐字不变)。
+ *   - `inprocess`:设备↔InProcessAudioTransport↔VoiceLoop 全在本进程(单机形态,与本变更前一致)。
+ *   - `websocket`:终端只起 WS client transport + 设备桥;大脑/VoiceLoop 在另一进程
+ *     (经 `CHAT_A_GATEWAY_URL`,默认 `ws://127.0.0.1:8787`)。鉴权/WSS 为接缝预留未实装。
+ */
+export type TransportKind = 'inprocess' | 'websocket';
+
+/** 大脑侧默认地址(本地双进程手测);真部署经 CHAT_A_GATEWAY_URL 覆盖(WSS 见接缝预留)。 */
+export const DEFAULT_GATEWAY_URL = 'ws://127.0.0.1:8787';
+
+/** 解析传输档:仅识别 websocket;其它/缺省一律回落 inprocess(缺省零行为变更)。 */
+export function loadTransportKind(env: NodeJS.ProcessEnv): TransportKind {
+  return (env['CHAT_A_TRANSPORT'] ?? '').toLowerCase() === 'websocket' ? 'websocket' : 'inprocess';
+}
 
 /** 语音模式所需的、由 cli.ts 已装配好的依赖(复用文字链路的 convo/memory/bus/session)。 */
 export interface VoiceModeDeps {
@@ -53,6 +70,8 @@ export interface VoiceModeHandle {
     readonly tts: string;
     readonly vad: string;
     readonly eou: string;
+    /** 传输档(inprocess 缺省 / websocket);websocket 档下 stt/tts/vad/eou 标注「大脑侧」。 */
+    readonly transport: TransportKind;
   };
   stop(): void;
 }
@@ -130,6 +149,11 @@ export async function createAudioDevice(
 export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHandle> {
   const env = deps.env ?? procEnv;
 
+  // 传输档:缺省 inprocess(逐字不变);websocket 走终端桥(大脑/VoiceLoop 在另一进程)。
+  if (loadTransportKind(env) === 'websocket') {
+    return startTerminalWebsocketMode(deps, env);
+  }
+
   // STT / TTS 经配置工厂(缺省 Fake)。
   const sttCfg = loadSttConfig(env);
   const ttsCfg = loadTtsConfig(env);
@@ -173,7 +197,69 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
       tts: ttsCfg.kind,
       vad: detectors.vadKind,
       eou: detectors.eouKind,
+      transport: 'inprocess',
     },
     stop: () => handle.stop(),
+  };
+}
+
+/**
+ * 终端 WebSocket 模式(B 架构「终端」侧):本进程**只**起设备 + WS client transport + 设备桥,
+ * STT/TTS/VAD/EOU/VoiceLoop 全在**大脑侧另一进程**(故 info 中标「大脑侧」)。
+ *
+ * 大脑侧 server 进程如何起(本地双进程手测指引):
+ *   1. 另起一个 node 进程,用 `ws` 建 `WebSocketServer({ port: 8787 })`;
+ *   2. 在 `connection` 事件里 `acceptServerTransport(ws)` 得到大脑侧 transport;
+ *   3. 把它作为 `transport` 传给 `runVoiceLoop`(或直接喂 VoiceLoop),即得「大脑」。
+ *   (本 change 提供 transport 两端实现 + 单测;大脑侧进程脚手架与真机手测留主控/后续 change。)
+ * 终端经 `CHAT_A_GATEWAY_URL`(默认 {@link DEFAULT_GATEWAY_URL})连大脑;鉴权/WSS 为接缝预留未实装。
+ */
+async function startTerminalWebsocketMode(
+  deps: VoiceModeDeps,
+  env: NodeJS.ProcessEnv,
+): Promise<VoiceModeHandle> {
+  const url = env['CHAT_A_GATEWAY_URL'] ?? DEFAULT_GATEWAY_URL;
+
+  // 设备:真设备装不上则回落 Fake(明确提示,沿用 inprocess 范式)。
+  let device: AudioDevice;
+  let real: boolean;
+  try {
+    const made = await createAudioDevice(env);
+    device = made.device;
+    real = made.real;
+  } catch (err) {
+    stdout.write(
+      `[语音] 真实音频设备初始化失败,已回落 Fake 设备:${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    device = new FakeAudioDevice();
+    real = false;
+  }
+
+  // 终端侧 WS transport:连大脑;断网→指数重连(在 transport 内,绝不崩,§8)。
+  const transport = connectClientTransport(url, { sessionId: deps.sessionId });
+  stdout.write(`[语音] WebSocket 传输:连接大脑 ${url}(STT/TTS/VAD/EOU 在大脑侧)\n`);
+
+  const bridge = runTerminalBridge({ device, transport });
+
+  let stopped = false;
+  return {
+    info: {
+      device: `${device.id}${real ? '' : ' (占位/无真采集)'}`,
+      stt: '大脑侧',
+      tts: '大脑侧',
+      vad: '大脑侧',
+      eou: '大脑侧',
+      transport: 'websocket',
+    },
+    stop: () => {
+      if (stopped) return;
+      stopped = true;
+      bridge.stop();
+      try {
+        transport.close();
+      } catch {
+        /* ignore */
+      }
+    },
   };
 }
