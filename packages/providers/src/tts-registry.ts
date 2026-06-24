@@ -4,6 +4,8 @@ import { FakeTts } from './fake-tts';
 import { OpenAiCompatTts } from './openai-compat-tts';
 import { KokoroTts } from './kokoro-tts';
 import type { KokoroSession } from './kokoro-tts';
+import { QwenTtsRealtime } from './qwen-tts-realtime';
+import type { QwenWsFactory } from './qwen-tts-realtime';
 
 /**
  * 运行时注入的 TTS 端口(R1 注入式接缝)。
@@ -12,6 +14,11 @@ import type { KokoroSession } from './kokoro-tts';
 export interface TtsPorts {
   /** kokoro 的推理 session 端口;运行时包一层 onnxruntime-node / kokoro-js。 */
   readonly kokoroSession?: KokoroSession;
+  /**
+   * qwen-tts 的 WebSocket 工厂端口(可测性接缝);
+   * 缺省时 QwenTtsRealtime 懒加载 `ws` 包建真连接,测试经此注入 mock WS(不触网)。
+   */
+  readonly qwenWsFactory?: QwenWsFactory;
 }
 
 /** 后端工厂:某一 kind 的子配置(+ 注入端口) → 具体 TtsProvider。 */
@@ -74,6 +81,22 @@ const registry: { [K in TtsConfig['kind']]: TtsFactory<K> } = {
       `gpt-sovits TTS(zero-shot 复刻)尚未接入真实引擎;config 已就位:baseURL=${cfg.baseURL}`,
     );
   },
+  // qwen-tts:DashScope WebSocket 流式 TTS。缺 apiKey → 构造内 fail-fast(明确报错)。
+  // wsFactory 端口可注入(测试 mock WS);缺省时懒加载 `ws` 建真连接。
+  'qwen-tts': (cfg, ports) =>
+    new QwenTtsRealtime({
+      id: cfg.id ?? 'qwen-tts',
+      model: cfg.model,
+      apiKey: cfg.apiKey,
+      voice: cfg.voice,
+      ...(cfg.endpoint !== undefined ? { endpoint: cfg.endpoint } : {}),
+      ...(cfg.responseFormat !== undefined ? { responseFormat: cfg.responseFormat } : {}),
+      ...(cfg.mode !== undefined ? { mode: cfg.mode } : {}),
+      ...(cfg.instructions !== undefined ? { instructions: cfg.instructions } : {}),
+      ...(cfg.sampleRate !== undefined ? { sampleRate: cfg.sampleRate } : {}),
+      ...(cfg.languages !== undefined ? { languages: cfg.languages } : {}),
+      ...(ports.qwenWsFactory !== undefined ? { wsFactory: ports.qwenWsFactory } : {}),
+    }),
 };
 
 export function listTtsKinds(): readonly TtsConfig['kind'][] {

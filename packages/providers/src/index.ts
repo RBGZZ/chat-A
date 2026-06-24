@@ -23,5 +23,6 @@ export * from './tts';
 export * from './fake-tts';
 export * from './openai-compat-tts';
 export * from './kokoro-tts';
+export * from './qwen-tts-realtime';
 export * from './tts-config';
 export * from './tts-registry';

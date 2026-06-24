@@ -17,7 +17,8 @@ export type TtsConfig =
   | EdgeTtsConfig
   | KokoroTtsConfig
   | OpenAiCompatTtsConfig
-  | GptSovitsTtsConfig;
+  | GptSovitsTtsConfig
+  | QwenTtsRealtimeConfig;
 
 /** 确定性桩(无依赖、可复现;支持复刻路径供单测)。 */
 export interface FakeTtsConfig {
@@ -137,9 +138,38 @@ export interface GptSovitsTtsConfig {
 }
 
 /**
+ * Qwen(阿里 DashScope)qwen-tts-realtime —— WebSocket 流式 TTS(OpenAI-Realtime 风格)。
+ * 默认输出 PCM 24kHz/16bit/mono,直对齐 PcmChunk。内置音色,不支持 zero-shot 复刻。
+ * 协议详见 openspec/changes/qwen-tts-realtime/design.md;model id **用稳定别名、别写死日期快照**。
+ */
+export interface QwenTtsRealtimeConfig {
+  readonly kind: 'qwen-tts';
+  readonly id?: string;
+  /** 模型 id(如 'qwen3-tts-flash-realtime' / 'qwen3-tts-instruct-flash-realtime')。 */
+  readonly model: string;
+  /** DASHSCOPE_API_KEY(缺省时各 provider fail-fast)。 */
+  readonly apiKey: string;
+  /** 音色(如 'Cherry'/'Chelsie'/'Serena')。 */
+  readonly voice: string;
+  /** WebSocket 端点(默认北京区;海外区 dashscope-intl 可覆盖)。 */
+  readonly endpoint?: string;
+  /** 输出格式(默认 'PCM_24000HZ_MONO_16BIT')。 */
+  readonly responseFormat?: string;
+  /** 切分模式(默认 'server_commit')。 */
+  readonly mode?: 'server_commit' | 'commit';
+  /** 情感/风格指令(自然语言;仅 instruct 版生效)。 */
+  readonly instructions?: string;
+  /** 输出采样率(默认 24000)。 */
+  readonly sampleRate?: number;
+  readonly languages?: readonly string[];
+}
+
+/**
  * 从环境变量加载——用户自己选 TTS 引擎:
- *   CHAT_A_TTS_KIND      = fake | edge | kokoro | openai-compat | gpt-sovits
+ *   CHAT_A_TTS_KIND      = fake | edge | kokoro | openai-compat | gpt-sovits | qwen-tts
  *                          (默认:有 base URL+key+model 则 openai-compat,否则 fake)
+ *   qwen-tts 专有:CHAT_A_TTS_ENDPOINT / CHAT_A_TTS_MODE / CHAT_A_TTS_INSTRUCTIONS;
+ *                  apiKey 回落 CHAT_A_DASHSCOPE_API_KEY
  *   CHAT_A_TTS_VOICE / CHAT_A_TTS_MODEL / CHAT_A_TTS_API_KEY / CHAT_A_TTS_BASE_URL
  *   CHAT_A_TTS_SPEED / CHAT_A_TTS_RESPONSE_FORMAT / CHAT_A_TTS_LANGUAGE / CHAT_A_TTS_SAMPLE_RATE
  *   (各引擎专有字段见对应 config 接口)
@@ -205,6 +235,26 @@ export function loadTtsConfig(env: NodeJS.ProcessEnv = process.env): TtsConfig {
         ...(env['CHAT_A_TTS_STREAM'] === 'false' ? { stream: false } : {}),
         ...(sampleRate !== undefined ? { sampleRate } : {}),
       };
+    case 'qwen-tts': {
+      // apiKey 回落 DashScope 专用环境变量(CHAT_A_TTS_API_KEY 优先,缺省取 CHAT_A_DASHSCOPE_API_KEY)。
+      const dashKey = apiKey ?? env['CHAT_A_DASHSCOPE_API_KEY'];
+      const mode = env['CHAT_A_TTS_MODE'];
+      return {
+        kind: 'qwen-tts',
+        model: model ?? '',
+        apiKey: dashKey ?? '',
+        voice: voice ?? '',
+        ...(env['CHAT_A_TTS_ID'] ? { id: env['CHAT_A_TTS_ID'] } : {}),
+        ...(env['CHAT_A_TTS_ENDPOINT'] ? { endpoint: env['CHAT_A_TTS_ENDPOINT'] } : {}),
+        ...(env['CHAT_A_TTS_RESPONSE_FORMAT']
+          ? { responseFormat: env['CHAT_A_TTS_RESPONSE_FORMAT'] }
+          : {}),
+        ...(mode === 'server_commit' || mode === 'commit' ? { mode } : {}),
+        ...(env['CHAT_A_TTS_INSTRUCTIONS'] ? { instructions: env['CHAT_A_TTS_INSTRUCTIONS'] } : {}),
+        ...(sampleRate !== undefined ? { sampleRate } : {}),
+        ...(language ? { languages: [language] } : {}),
+      };
+    }
     case 'gpt-sovits':
       return {
         kind: 'gpt-sovits',
