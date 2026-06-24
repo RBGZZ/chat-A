@@ -28,7 +28,9 @@ import {
   loadVoiceProfile,
   QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL,
   type TtsOptions,
+  type TtsProvider,
 } from '@chat-a/providers';
+import { SentenceSplitter } from '@chat-a/runtime';
 import {
   IPC,
   StateTracker,
@@ -50,6 +52,14 @@ import {
   // —— 代理D:记忆面板纯格式化 ——
   toMemoryItems,
   type MemoryItem,
+  // —— 三语种 + 朗读(本批次) ——
+  runSpeakReply,
+  translateForSpeech,
+  isSpeakAvailable,
+  normalizeLangCode,
+  normalizeTtsLang,
+  type LangForm,
+  type TtsAudioChunk,
 } from './ipc-contract';
 
 let mainWindow: BrowserWindow | null = null;
@@ -62,6 +72,10 @@ let proactiveHandle: ProactiveBridgeHandle | undefined;
 function emit(channel: string, payload?: unknown): void {
   mainWindow?.webContents.send(channel, payload);
 }
+
+// —— 朗读(本批次):同一时刻只朗读一条 + 可干净打断;abort 时发 ttsAudioStop 清渲染层队列。
+// 在 bootstrap 里初始化(class 声明在下方,避免 TDZ);未初始化前的调用走空安全。
+let speakCtl: SpeakController | undefined;
 
 /** 组装 AppInfo(横幅用):从 llmConfig / memoryInfo / seed 取。 */
 function buildAppInfo(handle: AppHandle): AppInfo {
@@ -103,6 +117,10 @@ function cloneStatus(handle: AppHandle): VoiceCloneStatus {
 async function cloneVoiceViaDashScope(handle: AppHandle, input: VoiceCloneInput): Promise<string> {
   const apiKey = dashKey(handle);
   if (apiKey.length === 0) throw new Error(CLONE_NO_KEY_REASON);
+  // 注:复刻参考语种 CHAT_A_VOICE_CLONE_REF_LANG(语言面板可设)在 **qwen 云复刻(enrollment)** 里
+  // 语种中性——createVoice 不接受 prompt_lang,服务端自动处理。该值用于**即时复刻**(gpt-sovits 的
+  // refAudio.refLang)/ 未来 provider:经 loadVoiceProfile → buildVoiceTtsOptions 流入语音模式 TTS opts。
+  // 故此处不读它(读了也无处可传);语言面板设置它仍有效(供 voice-profile)。
   const configModel = (handle.env['CHAT_A_TTS_MODEL'] ?? '').trim();
   // 取合成 model(vc 模型)作 target_model 以保证两者同串;否则回落默认 vc 模型。
   const targetModel =
@@ -182,6 +200,171 @@ function persistPersona(form: PersonaForm): void {
   writeFileSync(path, text, 'utf8');
 }
 
+// ═══════════════════════════════ 三语种控制 + 朗读(本批次) ═══════════════════════════════
+//
+// 显示/合成/复刻三独立语种 + 朗读(文字回复 → 渲染层 Web Audio)。语种解析(follow/翻译/默认)
+// 在 ipc-contract 纯函数里钉死;main 只做编排:回合后据语种解耦合成 PCM 块,经 IPC.ttsAudio 推渲染层;
+// 用户发新消息 / 点停 / 新回合 → abort 在途合成 + 发 IPC.ttsAudioStop(渲染层立即停播清队列)。
+
+/** 朗读是否开启(env CHAT_A_DESKTOP_SPEAK=on/off);**默认值随 TTS 可用性**:可用→开,不可用→关。 */
+function isSpeakOn(handle: AppHandle): boolean {
+  const raw = (handle.env['CHAT_A_DESKTOP_SPEAK'] ?? '').trim().toLowerCase();
+  if (raw === 'on') return true;
+  if (raw === 'off') return false;
+  // 未配置 → 随可用性(默认:TTS 可用即开)。
+  return isSpeakAvailable(handle.ttsConfig.kind);
+}
+
+/** 朗读是否可用(TTS provider 非 fake)。 */
+function speakAvailable(handle: AppHandle): boolean {
+  return isSpeakAvailable(handle.ttsConfig.kind);
+}
+
+/** 当前三语种 + 朗读开关 + 可用性(供 lang:get 返回与初值回填)。 */
+function buildLangForm(handle: AppHandle): LangForm {
+  const env = handle.env;
+  return {
+    displayLang: normalizeLangCode(env['CHAT_A_DISPLAY_LANG']),
+    ttsLang: normalizeTtsLang(env['CHAT_A_TTS_LANG']),
+    cloneRefLang: normalizeLangCode(env['CHAT_A_VOICE_CLONE_REF_LANG']),
+    speak: isSpeakOn(handle),
+    speakAvailable: speakAvailable(handle),
+  };
+}
+
+/**
+ * 持久化三语种 + 朗读开关到项目根 .env.local(保留其它行;仿 persistPersona):
+ *   CHAT_A_DISPLAY_LANG / CHAT_A_TTS_LANG / CHAT_A_VOICE_CLONE_REF_LANG / CHAT_A_DESKTOP_SPEAK
+ *   + 同步 CHAT_A_VOICE_OUTPUT_LANG(供语音模式 voice-profile 读出输出语种,与显示语种对齐)。
+ * 运行时已由 handle.applyLang 即时生效;此处只为跨重启留存。写盘失败抛错由上层吞掉(§3.2)。
+ */
+function persistLang(form: LangForm): void {
+  const path = join(process.cwd(), '.env.local');
+  let text = '';
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    // 文件不存在 → 从空文本新建。
+  }
+  text = upsertEnvLocal(text, 'CHAT_A_DISPLAY_LANG', form.displayLang);
+  text = upsertEnvLocal(text, 'CHAT_A_TTS_LANG', form.ttsLang);
+  text = upsertEnvLocal(text, 'CHAT_A_VOICE_CLONE_REF_LANG', form.cloneRefLang);
+  text = upsertEnvLocal(text, 'CHAT_A_DESKTOP_SPEAK', form.speak ? 'on' : 'off');
+  // 语音模式输出语种与显示语种对齐(voice-profile 读 CHAT_A_VOICE_OUTPUT_LANG)。
+  text = upsertEnvLocal(text, 'CHAT_A_VOICE_OUTPUT_LANG', form.displayLang);
+  writeFileSync(path, text, 'utf8');
+}
+
+/**
+ * 朗读控制器:管在途合成的 AbortController,保证「同一时刻只朗读一条」+ 可干净打断。
+ * - `begin()`:abort 旧的、发 ttsAudioStop 清渲染层队列、起新 controller 并返回其 signal;
+ * - `stop()`:abort 当前 + 发 ttsAudioStop(用户点停 / 退出)。
+ */
+class SpeakController {
+  #ac: AbortController | undefined;
+  constructor(private readonly emitStop: () => void) {}
+  begin(): AbortSignal {
+    this.stop(); // 打断上一条在途朗读(新消息抢占)。
+    this.#ac = new AbortController();
+    return this.#ac.signal;
+  }
+  stop(): void {
+    if (this.#ac !== undefined) {
+      try {
+        this.#ac.abort();
+      } catch {
+        /* 幂等 */
+      }
+      this.#ac = undefined;
+      this.emitStop();
+    }
+  }
+}
+
+/**
+ * 把 TTS provider 适配成 runSpeakReply 需要的 synthesize 端口(PcmChunk → TtsAudioChunk):
+ * 逐句合成,language 空则省略(自动);voiceId 取 voice-profile(复刻闭环复用)。
+ */
+function makeSynthesize(
+  tts: TtsProvider,
+  env: NodeJS.ProcessEnv,
+): (sentence: string, ttsLang: string, signal: AbortSignal) => AsyncIterable<TtsAudioChunk> {
+  const profile = loadVoiceProfile(env);
+  return async function* synth(sentence, ttsLang, signal) {
+    const opts: TtsOptions = {
+      ...(ttsLang.length > 0 ? { language: ttsLang } : {}),
+      ...(profile.voiceId !== undefined ? { voiceId: profile.voiceId } : {}),
+    };
+    for await (const chunk of tts.synthesize(sentence, opts, signal)) {
+      yield { pcm: chunk.samples, sampleRate: chunk.sampleRate };
+    }
+  };
+}
+
+/** 用 SentenceSplitter 把整段回复切成句数组(push 全文 + flush 残余)。 */
+function splitReplySentences(text: string): readonly string[] {
+  const splitter = new SentenceSplitter();
+  const out = [...splitter.push(text)];
+  const tail = splitter.flush();
+  if (tail !== null) out.push(tail);
+  return out;
+}
+
+/**
+ * 朗读一条回复(§4.1,本批次):若朗读开启且 TTS 可用,据语种解耦(显示语种 displayLang + 合成语种 ttsLang)
+ * 算 spokenText(必要时走轻量 LLM 翻译)→ 分句 → 逐句合成 → 每块经 IPC.ttsAudio 推渲染层。
+ * signal 由 SpeakController 给:被打断(新消息/点停)即停。任何错误吞掉(有声尽力、绝不崩,§3.2)。
+ */
+async function speakReply(handle: AppHandle, reply: string, signal: AbortSignal): Promise<void> {
+  if (reply.trim().length === 0) return;
+  if (!isSpeakOn(handle) || !speakAvailable(handle)) return;
+  const env = handle.env;
+  const displayLang = normalizeLangCode(env['CHAT_A_DISPLAY_LANG']);
+  const ttsLang = (env['CHAT_A_TTS_LANG'] ?? '').trim();
+  try {
+    await runSpeakReply(
+      {
+        splitSentences: splitReplySentences,
+        synthesize: makeSynthesize(handle.tts, env),
+        // 翻译通道:用文字链路同一 handle.llm 发一条 system + user(显示 reply)→ 译文喂 TTS。
+        translate: (displayText, targetLang) =>
+          translateForSpeech(
+            { complete: (system, user) => completeOnce(handle, system, user, signal) },
+            displayText,
+            targetLang,
+          ),
+        emitAudio: (chunk) => emit(IPC.ttsAudio, chunk),
+      },
+      reply,
+      displayLang,
+      ttsLang,
+      signal,
+    );
+  } catch {
+    // 朗读链路任何失败不影响文字气泡(已定型),只吞掉(§3.2)。
+  }
+}
+
+/**
+ * 用 handle.llm 做一次性补全(翻译通道用):流式累积成完整文本。signal 透传以便被打断真停。
+ * 失败/被打断由 translateForSpeech 兜底降级为原文。
+ */
+async function completeOnce(
+  handle: AppHandle,
+  system: string,
+  user: string,
+  signal: AbortSignal,
+): Promise<string> {
+  let acc = '';
+  for await (const token of handle.llm.stream(
+    { system, messages: [{ role: 'user', content: user }] },
+    signal,
+  )) {
+    acc += token;
+  }
+  return acc;
+}
+
 /** 订阅总线:UI 状态派生 + 回合后心情 + 语音转写,推给渲染层。 */
 function wireBus(handle: AppHandle): () => void {
   const tracker = new StateTracker();
@@ -208,15 +391,27 @@ function wireBus(handle: AppHandle): () => void {
 /** 注册渲染→主的 IPC handler。 */
 function registerIpc(handle: AppHandle): void {
   // 文字回合:流式回 token + 最终 reply;出错回友好降级文案(主进程绝不崩,§3.2)。
+  // 朗读(本批次):用户发新消息即打断上一条在途朗读(begin 内部 abort 旧的 + 发 ttsAudioStop);
+  // 本回合拿到完整 reply 后,若朗读开启且 TTS 可用 → 据语种解耦合成 PCM 推渲染层(speakReply 内部自判)。
   ipcMain.handle(IPC.send, async (_e, text: string) => {
+    const signal = speakCtl?.begin() ?? new AbortController().signal; // 新消息抢占在途朗读。
     await runSendTurn(
-      { send: (t, onToken) => handle.convo.send(t, onToken), emit: (ch, p) => emit(ch, p) },
+      {
+        send: async (t, onToken) => {
+          const reply = await handle.convo.send(t, onToken);
+          // 回合体内拿到完整 reply:不阻塞 runSendTurn 的 reply emit(先定型气泡再发声),朗读后台跑。
+          void speakReply(handle, reply, signal);
+          return reply;
+        },
+        emit: (ch, p) => emit(ch, p),
+      },
       text,
     );
   });
 
-  // 换一段新对话(长期记忆仍保留)。
+  // 换一段新对话(长期记忆仍保留)。换段也停在途朗读(上一段的声音不该跨段续播)。
   ipcMain.handle(IPC.reset, () => {
+    speakCtl?.stop();
     handle.reset();
   });
 
@@ -274,8 +469,9 @@ function registerIpc(handle: AppHandle): void {
     }
   });
 
-  // 语音停止(幂等)。
+  // 语音停止(幂等)。同时停在途朗读(语音/朗读两条音频路不该叠播)。
   ipcMain.handle(IPC.voiceStop, () => {
+    speakCtl?.stop();
     try {
       voiceHandle?.stop();
     } catch {
@@ -328,6 +524,34 @@ function registerIpc(handle: AppHandle): void {
     } catch {
       return [];
     }
+  });
+
+  // —— 三语种 + 朗读(本批次)——
+  // 读当前三语种 + 朗读开关 + 朗读是否可用(语言面板初值)。
+  ipcMain.handle(IPC.langGet, (): LangForm => buildLangForm(handle));
+
+  // 应用语种/朗读设置:运行时生效(handle.applyLang:displayLang 重建 convo、其余同步 env)+ 持久化 .env.local。
+  // 返回规整后的最终设置(渲染层据此回填下拉/开关)。持久化失败不影响运行时生效,仅吞掉(§3.2)。
+  ipcMain.handle(IPC.langSet, (_e, raw: Partial<LangForm>): LangForm => {
+    // 规整入参(下拉给的是 ISO 码或 follow/空;经纯函数归一)。
+    const next = {
+      ...(raw.displayLang !== undefined ? { displayLang: normalizeLangCode(raw.displayLang) } : {}),
+      ...(raw.ttsLang !== undefined ? { ttsLang: normalizeTtsLang(raw.ttsLang) } : {}),
+      ...(raw.cloneRefLang !== undefined ? { cloneRefLang: normalizeLangCode(raw.cloneRefLang) } : {}),
+      ...(raw.speak !== undefined ? { speak: raw.speak } : {}),
+    };
+    // 切换显示语种/朗读前停在途朗读(语种变了,旧声音不该续播)。
+    if (next.displayLang !== undefined || next.speak !== undefined || next.ttsLang !== undefined) {
+      speakCtl?.stop();
+    }
+    handle.applyLang(next);
+    const form = buildLangForm(handle);
+    try {
+      persistLang(form);
+    } catch {
+      // 写盘失败不影响本次运行时生效;下次重启可能不续接,但不崩(§3.2)。
+    }
+    return form;
   });
 }
 
@@ -401,6 +625,8 @@ async function bootstrap(): Promise<void> {
   // in-process 装大脑(加载 .env.local + llm + bus + memory + persona + Conversation)。
   appHandle = assembleApp();
   const handle = appHandle;
+  // 朗读控制器(class 已声明,此处安全初始化;abort 时发 ttsAudioStop 清渲染层播放队列)。
+  speakCtl = new SpeakController(() => emit(IPC.ttsAudioStop));
   registerIpc(handle);
   const offBus = wireBus(handle);
 
@@ -418,6 +644,11 @@ async function bootstrap(): Promise<void> {
 
   app.on('before-quit', () => {
     offBus();
+    try {
+      speakCtl?.stop(); // 停在途朗读。
+    } catch {
+      /* ignore */
+    }
     try {
       voiceHandle?.stop();
     } catch {

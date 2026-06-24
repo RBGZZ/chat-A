@@ -22,6 +22,17 @@ import {
   isProactiveEnabled,
   type PersonaForm,
   type MemoryRecordLike,
+  // —— 三语种控制 + 朗读(本批次) ——
+  normalizeLangCode,
+  normalizeTtsLang,
+  resolveEffectiveTtsLang,
+  resolveSpokenPlan,
+  buildTranslateSystemPrompt,
+  translateForSpeech,
+  runSpeakReply,
+  isSpeakAvailable,
+  TTS_LANG_FOLLOW,
+  type TtsAudioChunk,
 } from '../src/ipc-contract';
 
 const cid = 's1/t1/0';
@@ -310,5 +321,181 @@ describe('toMemoryItems 记忆面板格式化(纯,可单测)(代理D)', () => {
 
   it('空数组 → 空数组(不崩)', () => {
     expect(toMemoryItems([])).toEqual([]);
+  });
+});
+
+// ═══════════════════════════════ 三语种控制 + 朗读(本批次) ═══════════════════════════════
+describe('normalizeLangCode / normalizeTtsLang(语种码规整,纯)', () => {
+  it('空/auto → 自动空串;trim 保留具体码', () => {
+    expect(normalizeLangCode('')).toBe('');
+    expect(normalizeLangCode('  ')).toBe('');
+    expect(normalizeLangCode('auto')).toBe('');
+    expect(normalizeLangCode('AUTO')).toBe('');
+    expect(normalizeLangCode('  zh ')).toBe('zh');
+    expect(normalizeLangCode(undefined)).toBe('');
+  });
+
+  it('ttsLang 空 → follow(默认跟随);follow 大小写不敏感;具体码经规整', () => {
+    expect(normalizeTtsLang('')).toBe(TTS_LANG_FOLLOW);
+    expect(normalizeTtsLang(undefined)).toBe(TTS_LANG_FOLLOW);
+    expect(normalizeTtsLang('Follow')).toBe(TTS_LANG_FOLLOW);
+    expect(normalizeTtsLang('en')).toBe('en');
+    expect(normalizeTtsLang('auto')).toBe(''); // 用户显式 auto → 自动
+  });
+});
+
+describe('resolveEffectiveTtsLang(实际合成语种,纯)', () => {
+  it('follow/空 → 跟随显示语种', () => {
+    expect(resolveEffectiveTtsLang('zh', 'follow')).toBe('zh');
+    expect(resolveEffectiveTtsLang('ja', '')).toBe('ja');
+    expect(resolveEffectiveTtsLang('', 'follow')).toBe(''); // 显示自动 → 合成也自动
+  });
+  it('具体 ttsLang → 用该值,不跟随显示', () => {
+    expect(resolveEffectiveTtsLang('zh', 'en')).toBe('en');
+    expect(resolveEffectiveTtsLang('', 'ja')).toBe('ja');
+  });
+});
+
+describe('resolveSpokenPlan(显示/合成解耦 golden 钉死四分支,纯)', () => {
+  it('跟随:ttsLang=follow → effective=display,不翻译', () => {
+    expect(resolveSpokenPlan('zh', 'follow')).toEqual({ ttsLang: 'zh', needsTranslation: false });
+  });
+  it('相同:effective == display → 不翻译', () => {
+    expect(resolveSpokenPlan('en', 'en')).toEqual({ ttsLang: 'en', needsTranslation: false });
+  });
+  it('不同:effective 具体且 ≠ display → 翻译', () => {
+    expect(resolveSpokenPlan('zh', 'en')).toEqual({ ttsLang: 'en', needsTranslation: true });
+  });
+  it('display 为空(自动)但 ttsLang 具体 → 翻译(无法假定显示语种)', () => {
+    expect(resolveSpokenPlan('', 'ja')).toEqual({ ttsLang: 'ja', needsTranslation: true });
+  });
+  it('自动:effective 为空 → 不翻译、不发 language', () => {
+    expect(resolveSpokenPlan('', 'follow')).toEqual({ ttsLang: '', needsTranslation: false });
+    expect(resolveSpokenPlan('', '')).toEqual({ ttsLang: '', needsTranslation: false });
+  });
+});
+
+describe('buildTranslateSystemPrompt / translateForSpeech(翻译通道,纯+mock LLM)', () => {
+  it('提示含目标语言中文名 + 只输出译文约束', () => {
+    const p = buildTranslateSystemPrompt('en');
+    expect(p).toContain('英文');
+    expect(p).toContain('只输出译文');
+  });
+
+  it('成功 → 返回 trim 后译文', async () => {
+    const complete = vi.fn(async () => '  Hello there.  ');
+    const out = await translateForSpeech({ complete }, '你好呀', 'en');
+    expect(out).toBe('Hello there.');
+    expect(complete).toHaveBeenCalledOnce();
+  });
+
+  it('翻译抛错 → 降级返回原文(有声优先、不崩)', async () => {
+    const out = await translateForSpeech(
+      { complete: async () => { throw new Error('网络'); } },
+      '你好呀',
+      'en',
+    );
+    expect(out).toBe('你好呀');
+  });
+
+  it('译文空白 → 降级返回原文', async () => {
+    const out = await translateForSpeech({ complete: async () => '   ' }, '你好呀', 'en');
+    expect(out).toBe('你好呀');
+  });
+});
+
+describe('runSpeakReply(朗读编排:解耦+分句+逐块+取消,纯)', () => {
+  const splitSentences = (t: string): string[] => t.split(/(?<=[。!?])/).filter((s) => s.length > 0);
+  const fakeSynth = (sentence: string, ttsLang: string): AsyncIterable<TtsAudioChunk> => ({
+    async *[Symbol.asyncIterator]() {
+      yield { pcm: new Int16Array([sentence.length, ttsLang.length]), sampleRate: 24000 };
+    },
+  });
+
+  it('同语种(不翻译)→ 直接合成显示 reply,逐句逐块 emitAudio', async () => {
+    const emitted: TtsAudioChunk[] = [];
+    const translate = vi.fn(async (t: string) => t);
+    const spoken = await runSpeakReply(
+      {
+        splitSentences,
+        synthesize: fakeSynth,
+        translate,
+        emitAudio: (c) => emitted.push(c),
+      },
+      '你好。再见。',
+      'zh',
+      'follow',
+      new AbortController().signal,
+    );
+    expect(translate).not.toHaveBeenCalled(); // 不翻译
+    expect(spoken).toBe('你好。再见。');
+    expect(emitted.length).toBe(2); // 两句各一块
+    expect(emitted[0]?.sampleRate).toBe(24000);
+  });
+
+  it('不同语种 → 先 translate 得 spokenText,再合成译文', async () => {
+    const emitted: TtsAudioChunk[] = [];
+    const translate = vi.fn(async () => 'Hi!');
+    const spoken = await runSpeakReply(
+      { splitSentences, synthesize: fakeSynth, translate, emitAudio: (c) => emitted.push(c) },
+      '你好!',
+      'zh',
+      'en',
+      new AbortController().signal,
+    );
+    expect(translate).toHaveBeenCalledWith('你好!', 'en');
+    expect(spoken).toBe('Hi!');
+    expect(emitted.length).toBe(1);
+  });
+
+  it('已 abort → 不合成(被打断/回合切换)', async () => {
+    const emitted: TtsAudioChunk[] = [];
+    const ac = new AbortController();
+    ac.abort();
+    await runSpeakReply(
+      { splitSentences, synthesize: fakeSynth, translate: async (t) => t, emitAudio: (c) => emitted.push(c) },
+      '你好。再见。',
+      'zh',
+      'follow',
+      ac.signal,
+    );
+    expect(emitted.length).toBe(0);
+  });
+
+  it('单句合成抛错 → 跳过该句继续后续(有声尽力,不崩)', async () => {
+    const emitted: TtsAudioChunk[] = [];
+    let i = 0;
+    const synth = (s: string): AsyncIterable<TtsAudioChunk> => ({
+      async *[Symbol.asyncIterator]() {
+        if (i++ === 0) throw new Error('第一句合成失败');
+        yield { pcm: new Int16Array([s.length]), sampleRate: 24000 };
+      },
+    });
+    await runSpeakReply(
+      { splitSentences, synthesize: synth, translate: async (t) => t, emitAudio: (c) => emitted.push(c) },
+      '甲。乙。',
+      'zh',
+      'follow',
+      new AbortController().signal,
+    );
+    expect(emitted.length).toBe(1); // 第一句失败,第二句成功
+  });
+});
+
+describe('isSpeakAvailable(朗读可用性,纯)', () => {
+  it('fake → 不可用;真合成 kind → 可用', () => {
+    expect(isSpeakAvailable('fake')).toBe(false);
+    expect(isSpeakAvailable('qwen-tts')).toBe(true);
+    expect(isSpeakAvailable('openai-compat')).toBe(true);
+    expect(isSpeakAvailable('kokoro')).toBe(true);
+  });
+});
+
+describe('新增 IPC 通道常量(防散落字符串)', () => {
+  it('langGet/langSet/ttsAudio/ttsAudioStop 已注册', () => {
+    expect(IPC.langGet).toBe('lang:get');
+    expect(IPC.langSet).toBe('lang:set');
+    expect(IPC.ttsAudio).toBe('tts:audio');
+    expect(IPC.ttsAudioStop).toBe('tts:audio-stop');
   });
 });

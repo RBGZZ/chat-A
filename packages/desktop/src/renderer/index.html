@@ -87,6 +87,50 @@
       </dl>
     </section>
 
+    <!-- 语言面板(本批次):显示/合成/复刻三独立语种 + 朗读开关;默认收起,点「语言」展开 -->
+    <section id="lang" aria-label="语言与朗读" hidden>
+      <div class="panel-head">
+        <span class="panel-title">语言与朗读</span>
+        <label class="speak-switch" title="朗读小雪的文字回复">
+          <input id="speak-toggle" type="checkbox" />
+          <span>朗读</span>
+        </label>
+      </div>
+      <div id="speak-hint" class="muted"></div>
+      <div class="lang-row">
+        <label for="lang-display">显示文字</label>
+        <select id="lang-display">
+          <option value="">自动</option>
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+          <option value="ja">日本語</option>
+          <option value="ko">한국어</option>
+        </select>
+      </div>
+      <div class="lang-row">
+        <label for="lang-tts">朗读语言</label>
+        <select id="lang-tts">
+          <option value="follow">跟随显示</option>
+          <option value="">自动</option>
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+          <option value="ja">日本語</option>
+          <option value="ko">한국어</option>
+        </select>
+      </div>
+      <div class="lang-row">
+        <label for="lang-clone-ref">复刻录音语言</label>
+        <select id="lang-clone-ref">
+          <option value="">不指定</option>
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+          <option value="ja">日本語</option>
+          <option value="ko">한국어</option>
+        </select>
+      </div>
+      <div id="lang-status" class="muted"></div>
+    </section>
+
     <footer id="composer">
       <button id="voice" type="button" title="语音对话">🎙</button>
       <textarea id="input" rows="1" placeholder="和小雪说点什么…(Enter 发送，Shift+Enter 换行)"></textarea>
@@ -95,6 +139,7 @@
       <button id="reset" type="button" class="ghost-btn" title="换一段新对话（长期记忆仍保留）">换段对话</button>
       <button id="memory-toggle" type="button" class="ghost-btn" title="查看小雪的记忆">记忆</button>
       <button id="settings-toggle" type="button" class="ghost-btn" title="查看当前设置">设置</button>
+      <button id="lang-toggle" type="button" class="ghost-btn" title="语言与朗读设置">语言</button>
     </footer>
 
     <script src="./renderer.js"></script>

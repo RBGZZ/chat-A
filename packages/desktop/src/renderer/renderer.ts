@@ -15,6 +15,8 @@ import type {
   ProactiveMessage,
   PersonaForm, // 代理C
   MemoryItem, // 代理D
+  LangForm, // 三语种 + 朗读
+  TtsAudioChunk, // 朗读 PCM 块
 } from './api';
 
 declare global {
@@ -373,3 +375,120 @@ void xiaoxue.getInfo().then((info) => {
   $setModel.textContent = info.model;
   $setMemory.textContent = info.memory;
 });
+
+// ═══════════════════════════════ 朗读:最小 Web Audio 播放器(本批次) ═══════════════════════════════
+//
+// 收 tts:audio 的 Int16 PCM@sampleRate → Float32 → 用 AudioContext 排队**无缝**播放(把每块按上一块的
+// 结束时刻接续调度,避免缝隙);tts:audio-stop 立即停并清队列。重采样靠 AudioContext 自身(用块自带
+// sampleRate 建 buffer,浏览器输出时自动重采样到 ctx.sampleRate),~60 行、零外部依赖、不依赖 web-voice 包。
+class PcmPlayer {
+  #ctx: AudioContext | null = null;
+  /** 下一块应开始播放的时刻(ctx.currentTime 基准);保证块间无缝接续。 */
+  #nextStartAt = 0;
+  /** 在播的源节点集合(stop 时全部断开)。 */
+  readonly #sources = new Set<AudioBufferSourceNode>();
+
+  /** 懒建 AudioContext(首次播放时,满足浏览器自动播放策略——由用户交互发起的回合触发)。 */
+  #ensureCtx(): AudioContext {
+    if (this.#ctx === null) {
+      this.#ctx = new AudioContext();
+      this.#nextStartAt = this.#ctx.currentTime;
+    }
+    return this.#ctx;
+  }
+
+  /** 排入一块 PCM:Int16→Float32([-1,1]) → 建单声道 buffer → 接在上一块尾部调度播放。 */
+  enqueue(chunk: TtsAudioChunk): void {
+    const pcm = chunk.pcm;
+    if (pcm.length === 0) return;
+    const ctx = this.#ensureCtx();
+    void ctx.resume(); // 若被浏览器挂起(自动播放策略),回合由用户交互发起,resume 可成功。
+    const f32 = new Float32Array(pcm.length);
+    for (let i = 0; i < pcm.length; i++) f32[i] = (pcm[i] ?? 0) / 32768;
+    const buffer = ctx.createBuffer(1, f32.length, chunk.sampleRate);
+    buffer.copyToChannel(f32, 0);
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(ctx.destination);
+    // 无缝接续:从 max(now, 上一块结束) 开始。
+    const startAt = Math.max(ctx.currentTime, this.#nextStartAt);
+    src.start(startAt);
+    this.#nextStartAt = startAt + buffer.duration;
+    this.#sources.add(src);
+    src.onended = (): void => {
+      this.#sources.delete(src);
+    };
+  }
+
+  /** 立即停播并清队列(回合结束/被打断):断开所有在播源,重置调度时刻。 */
+  stop(): void {
+    for (const src of [...this.#sources]) {
+      try {
+        src.stop();
+        src.disconnect();
+      } catch {
+        /* 已结束的源 stop 会抛,吞掉 */
+      }
+    }
+    this.#sources.clear();
+    if (this.#ctx !== null) this.#nextStartAt = this.#ctx.currentTime;
+  }
+}
+
+const pcmPlayer = new PcmPlayer();
+xiaoxue.onTtsAudio((chunk) => pcmPlayer.enqueue(chunk));
+xiaoxue.onTtsAudioStop(() => pcmPlayer.stop());
+
+// ═══════════════════════════════ 语言面板:三独立语种 + 朗读开关(本批次) ═══════════════════════════════
+const $langDisplay = document.getElementById('lang-display') as HTMLSelectElement;
+const $langTts = document.getElementById('lang-tts') as HTMLSelectElement;
+const $langCloneRef = document.getElementById('lang-clone-ref') as HTMLSelectElement;
+const $speakToggle = document.getElementById('speak-toggle') as HTMLInputElement;
+const $speakHint = document.getElementById('speak-hint') as HTMLElement;
+const $langStatus = document.getElementById('lang-status') as HTMLElement;
+const $langToggle = document.getElementById('lang-toggle') as HTMLButtonElement;
+const $lang = document.getElementById('lang') as HTMLElement;
+
+/** 把面板下拉/开关按当前设置回填。 */
+function renderLangForm(form: LangForm): void {
+  $langDisplay.value = form.displayLang; // ''=自动
+  $langTts.value = form.ttsLang; // 'follow'/''/具体
+  $langCloneRef.value = form.cloneRefLang;
+  $speakToggle.checked = form.speak;
+  // 朗读不可用 → 禁开关 + 提示。
+  $speakToggle.disabled = !form.speakAvailable;
+  $speakHint.textContent = form.speakAvailable
+    ? ''
+    : '朗读不可用:未配置可用的语音合成(TTS）——文字对话不受影响。';
+}
+
+/** 收集面板当前值提交主进程(运行时生效 + 持久化)。 */
+function submitLang(): void {
+  const form: Partial<LangForm> = {
+    displayLang: $langDisplay.value,
+    ttsLang: $langTts.value,
+    cloneRefLang: $langCloneRef.value,
+    speak: $speakToggle.checked,
+  };
+  $langStatus.textContent = '正在应用…';
+  void xiaoxue
+    .setLang(form)
+    .then((applied) => {
+      renderLangForm(applied);
+      $langStatus.textContent = '语言设置已生效。';
+    })
+    .catch((err: unknown) => {
+      $langStatus.textContent = `设置没成功——${err instanceof Error ? err.message : String(err)}`;
+    });
+}
+
+$langDisplay.addEventListener('change', submitLang);
+$langTts.addEventListener('change', submitLang);
+$langCloneRef.addEventListener('change', submitLang);
+$speakToggle.addEventListener('change', submitLang);
+$langToggle.addEventListener('click', () => {
+  $lang.hidden = !$lang.hidden;
+});
+
+// 启动:取当前语种 + 朗读设置回填面板。
+void xiaoxue.getLang().then(renderLangForm);
