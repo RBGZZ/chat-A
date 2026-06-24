@@ -196,6 +196,9 @@ async function main(): Promise<void> {
       voice = await startVoiceMode({
         // 语音用一个稳定的 send 适配器,内部读当前 convo(/reset 后也能拿到新上下文)。
         send: (text, onToken) => convo.send(text, onToken),
+        // omni 直路系统提示组装(omni-persona-context):与文字链路同一 Conversation,同源 persona/记忆/语气。
+        // 闭包读当前 convo(/reset 后换上下文也跟随);仅 omni 路用到,STT 路与现状逐字不变。
+        composeOmniInstructions: () => convo.composeOmniInstructions(),
         memory: mem.store,
         bus,
         sessionId,

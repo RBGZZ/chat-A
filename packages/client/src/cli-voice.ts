@@ -130,6 +130,14 @@ export interface VoiceModeDeps {
   readonly sessionId: string;
   readonly env?: NodeJS.ProcessEnv;
   /**
+   * omni 直路系统提示组装接缝(omni-persona-context,path B,**可选**、纯加法)。
+   * 仅 omni 路用到:omni 回合在调 `respondToAudio` 前 `await` 它得 persona/记忆/语气组装的 instructions,
+   * 让 audio-in 直路下的小雪和 STT 路一样有灵魂(修复 omni 回复退化成通用「AI 助手」腔的真 bug)。
+   * cli.ts 以 `() => convo.composeOmniInstructions()` 注入(与文字链路同一 Conversation,同源人设/记忆/语气);
+   * 仅在提供时透传进 `loopDeps`(未提供 / 非 omni 路 → omni 退回空 opts,逐字现状)。STT 路不经过它。
+   */
+  readonly composeOmniInstructions?: () => string | Promise<string>;
+  /**
    * 语音 autonomy 装配钩子(companion-live-wiring,**默认关随 CHAT_A_AUTONOMY**):
    * 语音模式拿到 VoiceLoop 后回调它装配 autonomy 并注入 `voiceState`(is_speaking 真闸)+
    * `preempt`(真打断,受 §7 约束:用户 URGENT 最高、不凌驾用户)+ 真候选源;返回的句柄纳入语音 stop 收尾。
@@ -307,7 +315,15 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
       send: deps.send,
       memory: deps.memory,
       sessionId: deps.sessionId,
-      ...(omni !== undefined ? { omni, voicePath: 'omni' as const } : {}),
+      // omni 路:注入端口 + 路径开关 + 系统提示组装接缝(让 omni 直路有 persona/记忆/语气,omni-persona-context)。
+      // composeOmniInstructions 仅在 omni 路且 cli 提供时透传(未提供 → omni 退回空 opts,逐字现状);STT 路不带。
+      ...(omni !== undefined
+        ? {
+            omni,
+            voicePath: 'omni' as const,
+            ...(deps.composeOmniInstructions ? { composeOmniInstructions: deps.composeOmniInstructions } : {}),
+          }
+        : {}),
     },
   });
 

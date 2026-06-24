@@ -12,7 +12,7 @@ import { StubVadDetector, TurnDetector, StubEouModel } from '@chat-a/voice-detec
 import { FakeStt, FakeTts, type PcmChunk } from '@chat-a/providers';
 import { LightVoiceBus } from '../src/bus';
 import { VoiceLoop } from '../src/voice-loop';
-import type { VoiceLoopDeps, OmniAudioPort, VoiceOmniEvent } from '../src/voice-loop';
+import type { VoiceLoopDeps, OmniAudioPort, OmniAudioOpts, VoiceOmniEvent } from '../src/voice-loop';
 
 // ───────────────────────────── 测试夹具（与 voice-loop.test.ts 同风格）─────────────────────────────
 
@@ -57,16 +57,23 @@ function fakeOmni(opts: {
   events: VoiceOmniEvent[];
   gate?: Promise<void>;
   throwBeforeYield?: boolean;
-}): { port: OmniAudioPort; capturedSignal: () => AbortSignal | undefined; consumedChunks: () => number } {
+}): {
+  port: OmniAudioPort;
+  capturedSignal: () => AbortSignal | undefined;
+  consumedChunks: () => number;
+  capturedOpts: () => OmniAudioOpts | undefined;
+} {
   let capturedSignal: AbortSignal | undefined;
   let consumed = 0;
+  let capturedOpts: OmniAudioOpts | undefined;
   const port: OmniAudioPort = {
     async *respondToAudio(
       audio: AsyncIterable<PcmChunk>,
-      _o?: Record<string, never>,
+      o?: OmniAudioOpts,
       signal?: AbortSignal,
     ): AsyncIterable<VoiceOmniEvent> {
       capturedSignal = signal;
+      capturedOpts = o;
       // 每次读取「当前是否已 abort」（用闭包避免 TS 把 signal.aborted 错误窄化为常量 false）。
       const isAborted = (): boolean => signal?.aborted === true;
       const abortErr = (): DOMException => new DOMException('aborted', 'AbortError');
@@ -84,7 +91,12 @@ function fakeOmni(opts: {
       }
     },
   };
-  return { port, capturedSignal: () => capturedSignal, consumedChunks: () => consumed };
+  return {
+    port,
+    capturedSignal: () => capturedSignal,
+    consumedChunks: () => consumed,
+    capturedOpts: () => capturedOpts,
+  };
 }
 
 function makeDeps(over: Partial<VoiceLoopDeps> = {}): {
@@ -272,5 +284,95 @@ describe('runtime/VoiceLoop omni audio-in 直路（path B）', () => {
     expect(sttFinal && (sttFinal.data as { text: string }).text).toBe('你好小雪');
     // omni 端口未被触达（缺省 stt 路径不调用它）
     expect(omni.capturedSignal()).toBeUndefined();
+  });
+
+  it('⑤ 系统提示注入：composeOmniInstructions 组装的 instructions 传进 respondToAudio.opts', async () => {
+    const omni = fakeOmni({
+      events: [
+        { type: 'transcript', text: '你好小雪' },
+        { type: 'text', text: '嗯，我在呢。' },
+        { type: 'end' },
+      ],
+    });
+    const SYSTEM = '你是小雪，温柔的伴侣。[记忆]\n- 用户喜欢猫';
+    const compose = vi.fn(() => SYSTEM);
+    const { deps, transport } = makeDeps({
+      omni: omni.port,
+      voicePath: 'omni',
+      composeOmniInstructions: compose,
+    });
+    const loop = new VoiceLoop(deps);
+    loop.start();
+    await driveSpeechThenSilence(transport);
+    await flush();
+    expect(loop.state).toBe('listening');
+    // 组装回调被调用，且其结果作为 opts.instructions 传给 respondToAudio
+    expect(compose).toHaveBeenCalledTimes(1);
+    expect(omni.capturedOpts()?.instructions).toBe(SYSTEM);
+  });
+
+  it('⑥ 降级：composeOmniInstructions 抛错 → 退回空 opts、omni 回合仍正常完成回 listening 不崩', async () => {
+    const omni = fakeOmni({
+      events: [
+        { type: 'transcript', text: '你好小雪' },
+        { type: 'text', text: '在的。' },
+        { type: 'end' },
+      ],
+    });
+    const compose = vi.fn(() => {
+      throw new Error('组装失败(模拟)');
+    });
+    const { deps, transport } = makeDeps({
+      omni: omni.port,
+      voicePath: 'omni',
+      composeOmniInstructions: compose,
+    });
+    const loop = new VoiceLoop(deps);
+    loop.start();
+    await driveSpeechThenSilence(transport);
+    await flush();
+    expect(loop.state).toBe('listening');
+    expect(compose).toHaveBeenCalled();
+    // 退回空 opts（不含 instructions），不崩
+    expect(omni.capturedOpts()?.instructions).toBeUndefined();
+  });
+
+  it('⑥b 降级：composeOmniInstructions 返回空白串 → 视作无、退回空 opts', async () => {
+    const omni = fakeOmni({
+      events: [
+        { type: 'transcript', text: '你好小雪' },
+        { type: 'text', text: '在的。' },
+        { type: 'end' },
+      ],
+    });
+    const { deps, transport } = makeDeps({
+      omni: omni.port,
+      voicePath: 'omni',
+      composeOmniInstructions: () => '   ',
+    });
+    const loop = new VoiceLoop(deps);
+    loop.start();
+    await driveSpeechThenSilence(transport);
+    await flush();
+    expect(loop.state).toBe('listening');
+    expect(omni.capturedOpts()?.instructions).toBeUndefined();
+  });
+
+  it('⑦ 未注入 composeOmniInstructions → omni 回合传空 opts（逐字现状）', async () => {
+    const omni = fakeOmni({
+      events: [
+        { type: 'transcript', text: '你好小雪' },
+        { type: 'text', text: '在的。' },
+        { type: 'end' },
+      ],
+    });
+    const { deps, transport } = makeDeps({ omni: omni.port, voicePath: 'omni' /* 不注入 compose */ });
+    const loop = new VoiceLoop(deps);
+    loop.start();
+    await driveSpeechThenSilence(transport);
+    await flush();
+    expect(loop.state).toBe('listening');
+    // 未注入：opts 不含 instructions（空 opts）
+    expect(omni.capturedOpts()?.instructions).toBeUndefined();
   });
 });

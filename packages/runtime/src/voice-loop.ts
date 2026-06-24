@@ -55,6 +55,16 @@ export type VoiceOmniEvent =
   | { readonly type: 'end' };
 
 /**
+ * omni 直路可选参数（§5.4 分两档注入：把组装好的系统提示喂模型）。
+ * - `instructions`：persona+记忆+语气 组装好的系统提示，映射 omni session 的 instructions/系统提示，
+ *   让 audio-in 直路下的小雪有人设/记忆/语气背景（**不含本轮 transcript**——用户这轮说了什么由模型自己听）。
+ * 形态与 `QwenOmniLlm.OmniAudioOptions` 兼容（其字段全可选，结构上满足本接口）。
+ */
+export interface OmniAudioOpts {
+  readonly instructions?: string;
+}
+
+/**
  * audio-in 直路端口（path B，§7#5 prosody：让模型直接「听」原始音频、从语气感知情绪）。
  * 形态等价 `QwenOmniLlm.respondToAudio`（其 opts 全可选，故结构上满足本接口，可直接当端口注入）。
  * 吃 endpointing 攒好的 PCM 块流，yield transcript/text/end；signal 用于打断时真停底层流（§3.2）。
@@ -62,7 +72,7 @@ export type VoiceOmniEvent =
 export interface OmniAudioPort {
   respondToAudio(
     audio: AsyncIterable<PcmChunk>,
-    opts?: Record<string, never>,
+    opts?: OmniAudioOpts,
     signal?: AbortSignal,
   ): AsyncIterable<VoiceOmniEvent>;
 }
@@ -116,6 +126,16 @@ export interface VoiceLoopDeps {
    * 复用既有打断/generation/半句写回核心；omni 不可用/失败 → 优雅降级（§3.2，干净回 listening 不崩）。
    */
   readonly omni?: OmniAudioPort;
+  /**
+   * omni 直路系统提示组装接缝（path B，§5.4 / §6 人格，**可选**、纯加法）。
+   * 不注入（缺省）→ omni 路以**空 opts** 调 `respondToAudio`，与本切片前**逐字一致**（无人设/记忆/语气）。
+   * 注入后 → omni 回合在调 `respondToAudio` 前先 `await` 它取得组装好的系统提示（persona 身份 + 记忆 +
+   * 语气/立场/风格），以 `{ instructions }` 传入，让 audio-in 直路下的小雪和 STT 路一样有灵魂。
+   * 装配层（cli）用与 `Conversation.send` 同源的 persona/memory/tone 机制实现并注入（复用既有组装，零重造）。
+   * **降级**（§3.2/§5.5）：抛错/超时/返回空 → 退回空 opts（记 warn），绝不崩、绝不阻塞 omni 首音。
+   * 本接缝**不影响 STT 路径**（STT 路不经过它）；instructions **不含本轮 transcript**（模型自己听音频）。
+   */
+  readonly composeOmniInstructions?: () => string | Promise<string>;
   /**
    * 语音路径开关（缺省 `stt`）；仅当为 `omni` **且**注入了 `omni` 端口时走 audio-in 直路，
    * 否则一律走现有 STT 路径（双保险：端口缺失即便选 omni 也回落 STT，行为逐字不变）。
@@ -178,6 +198,11 @@ export class VoiceLoop {
    * 仅在 `#voicePath==='omni'` 且本字段非空时,`#beginThinking` 分流到 omni 直路。
    */
   readonly #omni: OmniAudioPort | undefined;
+  /**
+   * omni 直路系统提示组装接缝（path B，§5.4/§6）；未注入 → undefined → omni 路以空 opts(逐字现状)。
+   * 注入后在 `#startThinkingOmni` 调 `respondToAudio` 前 `await` 它得 instructions(失败/空→退回空 opts)。
+   */
+  readonly #composeOmniInstructions: (() => string | Promise<string>) | undefined;
   /** 语音路径开关（缺省 `stt`）；决定 `#beginThinking` 走 STT 还是 omni 直路。 */
   readonly #voicePath: VoicePath;
   /** 本次 speaking 回合用户开口的首帧时刻（ms），用于估算 sustainedMs 喂关注闸。 */
@@ -223,6 +248,7 @@ export class VoiceLoop {
         ? new EchoGuardGate(deps.echoGuard)
         : undefined;
     this.#omni = deps.omni;
+    this.#composeOmniInstructions = deps.composeOmniInstructions;
     this.#voicePath = deps.voicePath ?? 'stt';
   }
 
@@ -570,7 +596,7 @@ export class VoiceLoop {
 
   /**
    * 起一个 omni 直路回合（§4 双路径 / §7#5 prosody）：endpointing 攒的音频帧**不喂 STT**，
-   * 而喂 `omni.respondToAudio(audio, {}, signal)`，消费事件：
+   * 而喂 `omni.respondToAudio(audio, opts, signal)`（opts 携 persona/记忆/语气组装的 instructions），消费事件：
    * - `transcript`（首条）→ 当作本轮用户话语：写记忆（role:'user'，供记忆/召回）+ `#go('stt:final')`
    *   推进 endpointing→thinking（复用现有迁移，转写来源不同、语义相同）。
    * - `text` → 回复增量，累积 `#replyAccum` + 既有 `SentenceSplitter` 分句 → 既有 `#speak` → TTS。
@@ -605,7 +631,10 @@ export class VoiceLoop {
     let sawTranscript = false; // 仅首条 transcript 触发迁移/写记忆（避免重复迁移）
     this.#currentTurn = (async () => {
       try {
-        for await (const ev of omni.respondToAudio(toChunks(), {}, ac.signal)) {
+        // 组装本回合系统提示（persona/记忆/语气，§5.4/§6）：在开 WS / 首音前先取（失败/空→空 opts，§3.2/§5.5）。
+        const instructions = await this.#composeOmniInstructionsSafe();
+        const opts: OmniAudioOpts = instructions !== undefined ? { instructions } : {};
+        for await (const ev of omni.respondToAudio(toChunks(), opts, ac.signal)) {
           if (gen !== this.#gen) return; // 被打断/换回合：协作式放弃
           if (ev.type === 'transcript') {
             const text = ev.text.trim();
@@ -650,6 +679,25 @@ export class VoiceLoop {
         if (this.#currentAbort === ac) this.#currentAbort = null;
       }
     })();
+  }
+
+  /**
+   * 安全组装 omni 直路系统提示（§5.4/§6 人格，§3.2/§5.5 降级）：
+   * - 未注入 `#composeOmniInstructions` → 返回 undefined（omni 路退回空 opts，与本切片前逐字一致）。
+   * - 注入则 `await` 之并 try/catch：抛错/超时/返回空白串 → 返回 undefined（退回空 opts，记 warn）。
+   * 绝不崩、绝不抛、不阻塞回合（失败立即兜底，不卡 omni 首音）。
+   */
+  async #composeOmniInstructionsSafe(): Promise<string | undefined> {
+    const compose = this.#composeOmniInstructions;
+    if (compose === undefined) return undefined;
+    try {
+      const text = await compose();
+      const trimmed = typeof text === 'string' ? text.trim() : '';
+      return trimmed.length > 0 ? text : undefined;
+    } catch (err) {
+      console.warn('[VoiceLoop] omni 系统提示组装抛错(退回空 opts,不影响回合):', err);
+      return undefined;
+    }
   }
 
   /**
