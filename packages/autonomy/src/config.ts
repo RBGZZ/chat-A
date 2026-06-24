@@ -25,6 +25,19 @@ export function resolveAutonomyConfig(overrides?: Partial<AutonomyConfig>): Auto
   return { ...DEFAULT_AUTONOMY_CONFIG, ...overrides };
 }
 
+/** autonomy 主开关环境变量名(单一权威常量)。 */
+export const AUTONOMY_ENV_FLAG = 'CHAT_A_AUTONOMY';
+
+/**
+ * autonomy 是否启用(承 §7 / decision 5「默认关 + 行为即配置」):
+ * `CHAT_A_AUTONOMY=on` 才启用;**缺省/任何其它值 = off**(关闭时接线层不挂调度,
+ * VoiceLoop 行为逐字不变)。值大小写不敏感、去空白。
+ * `env` 可注入(测试确定性);缺省读 `process.env`。
+ */
+export function isAutonomyEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return (env[AUTONOMY_ENV_FLAG] ?? '').trim().toLowerCase() === 'on';
+}
+
 /**
  * 便捷构造:用一个可变的"已启用技能集合"驱动 `isEnabled`(测试/简单场景友好)。
  * 返回 config + 暴露的 set——改 set 即改配置,下一 tick 经 `isEnabled` 现读生效,

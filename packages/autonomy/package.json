@@ -11,5 +11,9 @@
   "scripts": {
     "test": "vitest run --root ../.. packages/autonomy",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@chat-a/protocol": "workspace:*",
+    "@chat-a/providers": "workspace:*"
   }
 }
