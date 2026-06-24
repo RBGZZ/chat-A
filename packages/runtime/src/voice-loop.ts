@@ -72,6 +72,21 @@ export interface VoiceLoopDeps {
   readonly attention?: VoiceLoopAttentionConfig;
 }
 
+/**
+ * VoiceLoop 对外只读「忙闲」视图(承 §7 单一 is_speaking 硬闸)。
+ *
+ * 与 `@chat-a/autonomy` 的 `SpeakState` **结构等价**:装配层把本视图直接喂 arbiter 闭包,
+ * 让仲裁查到 VoiceLoop 真实说话状态,而非保守缺省 `{isSpeaking:false}`。
+ * 在 runtime 侧定义(不反向依赖 autonomy):`speakingPriority` MVP 省略 → arbitrate 按最低看待
+ * (任何明确优先级都可抢占在说者),后续可由回合调度填真优先级。
+ */
+export interface SpeakStateView {
+  /** 单一硬闸:当前是否正在说话(= 状态机处于 speaking)。 */
+  readonly isSpeaking: boolean;
+  /** 当前在说者优先级(MVP 省略;留作后续回合调度填充)。 */
+  readonly speakingPriority?: 'URGENT' | 'PERCEPTION' | 'LOWEST';
+}
+
 /** VoiceLoop 关注闸配置(可选注入;承 §7 软反转 + attention_mode)。 */
 export interface VoiceLoopAttentionConfig {
   /**
@@ -144,6 +159,67 @@ export class VoiceLoop {
   /** 当前状态（供测试断言）。 */
   get state(): VoiceState {
     return this.#state;
+  }
+
+  /**
+   * 只读 is_speaking 硬闸(§7):当前是否正在说话(= 状态机处于 speaking)。
+   * autonomy 装配层经此接缝把真实忙闲喂 arbiter 闭包,**取代保守缺省**;
+   * 纯只读、零副作用,不导出内部状态机(§3.1 经接口不经内部)。
+   */
+  get isSpeaking(): boolean {
+    return this.#state === 'speaking';
+  }
+
+  /**
+   * 只读忙闲视图(结构等价 autonomy `SpeakState`):供仲裁器查真实说话状态。
+   * MVP 不填 `speakingPriority`(arbitrate 据此按最低看待,任何明确优先级可抢占)。
+   */
+  speakState(): SpeakStateView {
+    return { isSpeaking: this.#state === 'speaking' };
+  }
+
+  /**
+   * autonomy **自身抢占**触发入口(缝 1,承 §7 软反转下的「autonomy 抢占受约束」)。
+   *
+   * 与用户语音 URGENT 的 barge-in **完全独立**:那条路径在 `#onAudio` 里、恒最高优先,
+   * 不经此钩子、不与之竞争——autonomy 抢占**绝不凌驾用户**。
+   *
+   * 判定(§7):
+   *   1. **非 speaking**(无在飞 autonomy/动作输出可抢占)→ 不打断、无副作用,返回 false。
+   *      (空闲时 autonomy 本就走正常 requestSpeak 放行,无需打断。)
+   *   2. speaking 且**未注入关注闸** → 复用既有打断核心 `#interrupt(reason)`(与 attention 缺省即时
+   *      打断语义一致:「能抢就抢」),返回 true。
+   *   3. speaking 且**注入关注闸** → 经 `evaluateAttention(mode, {sustainedMs:0, somethingInFlight:true})`
+   *      判 `trueInterrupt`:focus 模式下不轻易打断自己的专注输出;companion/危机/硬打断则打断。
+   *
+   * **复用** abort 三件套(`#gen++` + abort 底层 LLM 流 + clearBuffer + 半句写回),不重写打断核心。
+   * `reason` 透传 `turn:interrupt` 的 reason(§8.1 可追溯,区分 barge_in / autonomy_preempt)。
+   */
+  requestAutonomyPreempt(reason = 'autonomy_preempt'): boolean {
+    if (this.#state !== 'speaking') return false; // 无在飞输出可抢占
+    const cfg = this.#attention;
+    if (cfg === undefined) {
+      // 未注入关注闸:复用既有即时打断语义。
+      if (this.#go('vad:speech_start')) {
+        this.#interrupt(reason);
+        return true;
+      }
+      return false;
+    }
+    // 注入关注闸:autonomy 自身抢占也受 attention_mode 约束(focus 不轻易打断自己)。
+    try {
+      const mode = typeof cfg.mode === 'function' ? cfg.mode() : cfg.mode;
+      const verdict = evaluateAttention(mode, { sustainedMs: 0, somethingInFlight: true }, cfg.options);
+      if (!verdict.trueInterrupt) return false; // attention 不允许(如 focus 未达坚持)→ 不打断
+      if (this.#go('vad:speech_start')) {
+        this.#interrupt(reason);
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.warn('[VoiceLoop] autonomy 抢占判定抛错(已捕获,放弃本次抢占):', err);
+      return false;
+    }
   }
 
   /** 启动：订阅上行音频，进入 listening。重复 start 幂等（先退订旧的）。 */
@@ -493,8 +569,11 @@ export class VoiceLoop {
    *   3. transport.clearBuffer() 排空已下发未播音频；
    *   4. 半句写回（`#replyAccum + [被用户打断]`，仅非空时）；
    *   5. 清状态、回 listening。被取消的 send 以 AbortError reject,因 gen 已变在 .catch 里静默忽略。
+   *
+   * `reason` 透传 `turn:interrupt` 的 reason(默认 `barge_in` 保持用户打断现状;autonomy 自身抢占传
+   * `autonomy_preempt` 以区分,§8.1 可追溯)。打断核心逻辑不因 reason 改变。
    */
-  #interrupt(): void {
+  #interrupt(reason = 'barge_in'): void {
     this.#gen++; // 在途旧 TTS 帧/onToken 立即作废
     this.#abortCurrent(); // 真取消:abort 本回合底层 LLM 流(承 §3.2)
     try {
@@ -519,7 +598,7 @@ export class VoiceLoop {
     this.#replyAccum = '';
     this.#audioBuf = [];
     this.#userSpeechStartAtMs = null;
-    this.#go('turn:interrupt'); // barge_in_pending → listening
+    this.#go('turn:interrupt', { reason }); // barge_in_pending → listening(reason 透传可追溯)
   }
 
   // ───────────────────────────── 兜底 ─────────────────────────────

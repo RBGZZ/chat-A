@@ -13,7 +13,7 @@
  * autonomy-runtime-wiring 的 runtime 改动范围,本装配层不重做,只产信号)。
  */
 import { stdout } from 'node:process';
-import type { LightVoiceBus } from '@chat-a/runtime';
+import type { LightVoiceBus, SpeakStateView } from '@chat-a/runtime';
 import type { LlmProvider } from '@chat-a/providers';
 import {
   DecisionLlm,
@@ -28,6 +28,7 @@ import {
   type AutonomyDecisionSink,
   type BaseSkill,
   type Clock,
+  type ProactiveCandidateSource,
   type SpeakArbiter,
   type SpeakOutcome,
   type SpeakRequest,
@@ -48,35 +49,60 @@ export function loadAutonomyTickMs(env: NodeJS.ProcessEnv): number {
 
 /**
  * 把 {@link ProactiveTurnRunner} 包成一个后台技能:每 tick 从队列取一条 signal,
- * 据其组织候选 + context 跑一次主动回合。`shouldPreempt` 时 MVP 仅记录(不强接 VoiceLoop abort)。
+ * 据其组织候选 + context 跑一次主动回合。
+ *
+ * **缝 3(真候选)**:注入 `candidateSource` 时优先用其产出的**真实候选**(基于记忆未了话题/情绪弧)
+ * 喂决策 LLM;无源 / 源本 tick 返回空时回落现状占位(signal 描述 / kind)。决策 LLM schema 约束 +
+ * 失败退 silent + 落 trace 全不变(候选只是喂料,restraint-first 不被削弱)。
+ *
+ * **缝 1(真抢占)**:`shouldPreempt` 时回调 `onPreempt`(装配缺省回落为触发 VoiceLoop 真打断)。
  */
 export class AutonomyRunnerSkill implements BaseSkill {
   readonly id = AUTONOMY_RUNNER_SKILL_ID;
   readonly #runner: ProactiveTurnRunner;
   readonly #queue: PriorityEventQueue;
   readonly #onPreempt: ((outcome: SpeakOutcome) => void) | undefined;
+  readonly #candidateSource: ProactiveCandidateSource | undefined;
 
   constructor(deps: {
     readonly runner: ProactiveTurnRunner;
     readonly queue: PriorityEventQueue;
     readonly onPreempt?: (outcome: SpeakOutcome) => void;
+    /** 缝 3:真候选源(open-thread / idle-arc;无则回落现状占位)。 */
+    readonly candidateSource?: ProactiveCandidateSource;
   }) {
     this.#runner = deps.runner;
     this.#queue = deps.queue;
     this.#onPreempt = deps.onPreempt;
+    this.#candidateSource = deps.candidateSource;
   }
 
   async tick(): Promise<void> {
     const event = this.#queue.dequeue();
     if (event === undefined) return; // 队列空:本 tick 无事可做。
-    // 候选:用 signal 的描述当线索(MVP);真候选生成属技能领域,后续可丰富。
+    // 现状占位:用 signal 的描述当线索(回落用)。
     const description =
       typeof (event.payload as { description?: unknown } | undefined)?.description === 'string'
         ? (event.payload as { description: string }).description
         : event.kind;
+
+    // 缝 3:优先真候选源(失败/空回落占位,§3.2 优雅降级)。
+    let candidates: readonly string[] = [description];
+    if (this.#candidateSource !== undefined) {
+      try {
+        const real = await this.#candidateSource.gather({
+          signalKind: event.kind,
+          ...(typeof description === 'string' ? { description } : {}),
+        });
+        if (real.length > 0) candidates = real;
+      } catch {
+        /* 候选源失败:回落占位候选,不中断决策回路(§3.2) */
+      }
+    }
+
     const result = await this.#runner.run({
       skillId: this.id,
-      candidates: [description],
+      candidates,
       context: `感知信号: ${event.kind}`,
       priority: event.priority,
       deferrable: true,
@@ -105,10 +131,24 @@ export interface AssembleAutonomyDeps {
   readonly clock?: Clock;
   /** 注入定时器(确定性测试);缺省 setInterval。返回取消句柄。 */
   readonly schedule?: (fn: () => void, periodMs: number) => () => void;
-  /** is_speaking 硬闸读取(MVP 缺省「未在说」;真状态由 runtime 层维护)。 */
+  /** is_speaking 硬闸读取(缺省「未在说」;优先用 {@link voiceState})。 */
   readonly currentSpeakState?: () => SpeakState;
-  /** 抢占信号回调(MVP 仅记录;真 abort 在 runtime 层)。 */
+  /**
+   * 缝 2:VoiceLoop 真实忙闲读取(传 `() => voiceLoop.speakState()`)。
+   * 优先级高于 `currentSpeakState`;`SpeakStateView` 与 autonomy `SpeakState` 结构等价,直接透传。
+   * 经此接缝 arbiter 才查到 VoiceLoop 真在说,而非保守缺省。**不 import VoiceLoop 内部**(§3.1)。
+   */
+  readonly voiceState?: () => SpeakStateView;
+  /** 抢占信号回调(优先;不传则缺省回落 {@link preempt} 触发 VoiceLoop 真打断)。 */
   readonly onPreempt?: (outcome: SpeakOutcome) => void;
+  /**
+   * 缝 1:VoiceLoop 真打断触发(传 `(reason) => voiceLoop.requestAutonomyPreempt(reason)`)。
+   * `onPreempt` 未传时,`shouldPreempt` 经此触发既有 abort 三件套(受 §7 attention + is_speaking 约束;
+   * 绝不凌驾用户语音 URGENT)。off 路径不构造,未注入则退回「仅记录」。
+   */
+  readonly preempt?: (reason?: string) => void;
+  /** 缝 3:真候选源(open-thread / idle-arc;无则技能回落现状占位)。 */
+  readonly candidateSource?: ProactiveCandidateSource;
   /** 决策概率闸的 rng(确定性测试可注入恒过/恒拒);缺省 Math.random(restraint-first)。 */
   readonly decisionRng?: () => number;
 }
@@ -136,17 +176,25 @@ export function assembleAutonomy(
     ...(deps.decisionRng ? { rng: deps.decisionRng } : {}),
   });
 
-  // 出声仲裁闭包:查当前 is_speaking 后纯函数仲裁(不 import VoiceLoop;§3.1)。
-  const readState: () => SpeakState = deps.currentSpeakState ?? (() => ({ isSpeaking: false }));
+  // 缝 2:出声仲裁闭包查真实 is_speaking——优先 voiceState(VoiceLoop 真状态),
+  // 其次 currentSpeakState,最后保守缺省「未在说」。纯函数仲裁(不 import VoiceLoop;§3.1)。
+  const readState: () => SpeakState =
+    deps.voiceState ?? deps.currentSpeakState ?? (() => ({ isSpeaking: false }));
   const arbiter: SpeakArbiter = {
     requestSpeak: (request: SpeakRequest): SpeakOutcome => arbitrate(request, readState()),
   };
+
+  // 缝 1:shouldPreempt 触发——优先 onPreempt(可观测);否则回落 preempt 触发 VoiceLoop 真打断
+  // (受 §7 attention + is_speaking 约束;绝不凌驾用户)。两者皆无则等价现状「仅记录(无操作)」。
+  const onPreempt: ((outcome: SpeakOutcome) => void) | undefined =
+    deps.onPreempt ?? (deps.preempt ? () => deps.preempt?.('autonomy_preempt') : undefined);
 
   const runner = new ProactiveTurnRunner({ decisionLlm, arbiter });
   const skill = new AutonomyRunnerSkill({
     runner,
     queue,
-    ...(deps.onPreempt ? { onPreempt: deps.onPreempt } : {}),
+    ...(onPreempt ? { onPreempt } : {}),
+    ...(deps.candidateSource ? { candidateSource: deps.candidateSource } : {}),
   });
 
   // 调度:enabledSetConfig 启用本技能(其余默认关);scheduler 单循环 reconcile。
