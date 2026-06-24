@@ -32,6 +32,9 @@ importers:
 
   packages/client:
     dependencies:
+      '@chat-a/autonomy':
+        specifier: workspace:*
+        version: link:../autonomy
       '@chat-a/gateway':
         specifier: workspace:*
         version: link:../gateway

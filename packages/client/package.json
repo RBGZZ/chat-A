@@ -5,11 +5,13 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/cli.ts",
+    "brain": "tsx src/cli-brain.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@chat-a/runtime": "workspace:*",
     "@chat-a/protocol": "workspace:*",
+    "@chat-a/autonomy": "workspace:*",
     "@chat-a/gateway": "workspace:*",
     "@chat-a/voice-detect": "workspace:*",
     "@chat-a/interaction": "workspace:*",

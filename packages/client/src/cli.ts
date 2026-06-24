@@ -6,11 +6,14 @@ import process, { stdin, stdout, env, argv, cwd } from 'node:process';
 import { Conversation, LightVoiceBus, ToolCallingStrategy } from '@chat-a/runtime';
 import { buildDefaultRegistry, createMemoryFactLookup } from '@chat-a/interaction';
 import { createLlm, loadLlmConfig, createEmbedder, loadEmbedderConfig } from '@chat-a/providers';
-import { initTelemetry, createDecisionTraceSinkFromEnv } from '@chat-a/observability';
+import { initTelemetry, createDecisionTraceSinkFromEnv, SqliteAutonomyDecisionSink } from '@chat-a/observability';
 import { createMemoryStoreFromEnv, LlmMemoryExtractor, LlmReflector, NoopReflector } from '@chat-a/memory';
 import type { Reflector } from '@chat-a/memory';
 import { loadPersonaFromEnv, seedPersonaMemories, createKvPersonaStore, LlmAppraiser, LlmStanceDetector, LlmOceanEvolver, LlmSelfNotionEvolver } from '@chat-a/persona';
 import { startVoiceMode, type VoiceModeHandle } from './cli-voice';
+import { assemblePerception, type PerceptionHandle } from './assembly/perception';
+import { assembleAutonomy, type AutonomyHandle } from './assembly/autonomy';
+import { assembleConsolidation, type ConsolidationHandle } from './assembly/consolidation';
 import { parseDotEnv, applyDotEnv } from './env-file';
 import { parseCommand, renderHelp, renderPersona, renderBanner } from './commands';
 
@@ -155,6 +158,30 @@ async function main(): Promise<void> {
       stdout.write(`语音: 启动失败(回落纯文字):${err instanceof Error ? err.message : String(err)}\n`);
     }
   }
+  // ── 端到端装配接线(runtime-assembly-wiring,全部默认关 / 缺省 inprocess) ──
+  // 感知中枢接真总线(CHAT_A_PERCEPTION=on 才挂;off → undefined,总线零新事件)。
+  let perception: PerceptionHandle | undefined;
+  try {
+    perception = await assemblePerception(env, bus);
+  } catch {
+    /* 感知装配失败不影响主对话(§3.2) */
+  }
+  // autonomy 上线(CHAT_A_AUTONOMY=on 才挂;决策落 SQLite 决策 trace,同 correlationId 缝合)。
+  // 决策 sink:把 autonomy 决策映射进既有 decision_traces 表(复用回合 trace sink 句柄)。
+  const autonomy: AutonomyHandle | undefined = assembleAutonomy(env, {
+    bus,
+    llm,
+    decisionSink: new SqliteAutonomyDecisionSink({ sink: trace.sink }),
+  });
+  // 夜间巩固触发(CHAT_A_CONSOLIDATION=on 才挂;会话结束 / /reset 触发,后台 fire-and-forget)。
+  const consolidation: ConsolidationHandle | undefined = assembleConsolidation(env, {
+    llm,
+    store: mem.store,
+  });
+  stdout.write(
+    `接线: 感知=${perception ? `on(tick ${perception.tickMs}ms)` : 'off'} | 主动=${autonomy ? `on(tick ${autonomy.tickMs}ms)` : 'off'} | 巩固=${consolidation ? 'on' : 'off'}\n`,
+  );
+
   stdout.write('\n');
 
   // ── 统一优雅收尾(EOF / Ctrl+C / /quit 共用;幂等,多次触发只跑一次) ──
@@ -164,8 +191,17 @@ async function main(): Promise<void> {
     cleaned = true;
     // 语音模式收尾:停采集/loop/设备(幂等;无语音则 no-op)。
     voice?.stop();
+    // 接线收尾:停感知中枢(停 tick/源)、停 autonomy 调度(停定时器 + 退订总线);均幂等、失败吞。
+    try {
+      autonomy?.stop();
+    } catch {
+      /* ignore */
+    }
+    await perception?.stop().catch(() => {});
     // 会话结束的夜间沉淀(§5/§6.1):在关库之前异步蒸馏一次;幂等 + 全程降级,失败吞掉不影响退出。
     await reflector.reflect(sessionId).catch(() => {});
+    // 会话结束的夜间巩固触发(§5.1,默认关):后台幂等、失败仅告警,绝不阻塞退出。
+    await consolidation?.consolidateSession(sessionId).catch(() => {});
     try {
       mem.store.close();
     } catch {
@@ -226,12 +262,16 @@ async function main(): Promise<void> {
         stdout.write('\x1b[2J\x1b[H');
         if (!closed) rl.prompt();
         continue;
-      case 'reset':
+      case 'reset': {
+        // 换会话前:对旧会话触发夜间巩固(默认关;后台 fire-and-forget,不阻塞 REPL)。
+        const endingSession = sessionId;
+        void consolidation?.consolidateSession(endingSession).catch(() => {});
         sessionId = randomUUID().slice(0, 8);
         convo = makeConvo(sessionId);
         stdout.write('(已开新一段对话,之前的上下文不再带入。长期记忆仍保留。)\n\n');
         if (!closed) rl.prompt();
         continue;
+      }
       case 'unknown':
         stdout.write(`未知命令:${parsed.name}。输入 /help 查看可用命令。\n\n`);
         if (!closed) rl.prompt();

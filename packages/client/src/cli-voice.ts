@@ -77,7 +77,7 @@ export interface VoiceModeHandle {
 }
 
 /** 端点检测装配结果:VAD + TurnDetector + 实际生效的实现标识(真/桩,供状态行)。 */
-interface Detectors {
+export interface Detectors {
   readonly vad: VadDetector;
   readonly turnDetector: TurnDetector;
   /** 实际生效的 VAD 实现标识(回落后)。 */
@@ -103,7 +103,7 @@ function createStubDetectors(): Detectors {
  *   - 缺省/空/其它/`stub` → 确定性桩(CI/冒烟默认,文字模式与现状逐字不变)。
  * 真路径动态加载/构造**任一步抛错** → 打印明确中文提示并**回落桩**,绝不崩(§3.2,沿用真设备回落范式)。
  */
-async function createDetectors(env: NodeJS.ProcessEnv): Promise<Detectors> {
+export async function createDetectors(env: NodeJS.ProcessEnv): Promise<Detectors> {
   const mode = (env['CHAT_A_VAD'] ?? 'stub').toLowerCase();
   const wantReal = mode === 'silero' || mode === 'real' || mode === 'sherpa';
   if (!wantReal) return createStubDetectors();
