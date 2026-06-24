@@ -75,11 +75,16 @@ function cloneStatus(handle: AppHandle): VoiceCloneStatus {
  * 经 DashScope 千问声音复刻创建专属音色(主进程注入给 runCloneVoice 的 clone 端口)。
  * 优先用渲染层给的文件路径(读盘 + 按扩展名推 MIME 由 providers 处理);兜底用字节 + mime。
  * targetModel 取 CHAT_A_TTS_MODEL(若是 vc 模型)否则默认 vc-realtime。
+ *
+ * **一致性纪律(已据官方核实 2026-06-24)**:复刻 target_model 必须与后续合成时的 model
+ * **逐字一致**(含日期快照),否则合成失败——音色绑单模型。故此处直接取合成配置 CHAT_A_TTS_MODEL
+ * (当它是 vc 模型时)作 targetModel,确保复刻得到的 voiceId 能被同一 model 合成。
  */
 async function cloneVoiceViaDashScope(handle: AppHandle, input: VoiceCloneInput): Promise<string> {
   const apiKey = dashKey(handle);
   if (apiKey.length === 0) throw new Error(CLONE_NO_KEY_REASON);
   const configModel = (handle.env['CHAT_A_TTS_MODEL'] ?? '').trim();
+  // 取合成 model(vc 模型)作 target_model 以保证两者同串;否则回落默认 vc 模型。
   const targetModel =
     configModel.includes('vc') ? configModel : QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL;
   const audio =

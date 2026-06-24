@@ -135,6 +135,54 @@ describe('QwenTtsRealtime(注入 mock WS,不触网)', () => {
     expect(append.text).toBe('讲个故事');
   });
 
+  it('输出语种:opts.language=zh → session.update 含 language_type:Chinese', async () => {
+    const { factory, created } = mockFactory((ws) => {
+      ws.serverSend({ type: 'response.done' });
+    });
+    const tts = newTts(factory);
+    await collect(tts.synthesize('你好', { language: 'zh' }));
+    const update = created[0]!.sent.find((m) => (m as { type: string }).type === 'session.update') as {
+      session: { language_type?: string };
+    };
+    expect(update.session.language_type).toBe('Chinese');
+  });
+
+  it('输出语种:opts.language=en → language_type:English', async () => {
+    const { factory, created } = mockFactory((ws) => {
+      ws.serverSend({ type: 'response.done' });
+    });
+    const tts = newTts(factory);
+    await collect(tts.synthesize('hello', { language: 'en' }));
+    const update = created[0]!.sent.find((m) => (m as { type: string }).type === 'session.update') as {
+      session: { language_type?: string };
+    };
+    expect(update.session.language_type).toBe('English');
+  });
+
+  it('回归:不给 language → session.update 不含 language_type(=服务端 Auto,逐字现状)', async () => {
+    const { factory, created } = mockFactory((ws) => {
+      ws.serverSend({ type: 'response.done' });
+    });
+    const tts = newTts(factory);
+    await collect(tts.synthesize('你好'));
+    const update = created[0]!.sent.find((m) => (m as { type: string }).type === 'session.update') as {
+      session: Record<string, unknown>;
+    };
+    expect('language_type' in update.session).toBe(false);
+  });
+
+  it('回归:未知语种码 → 不含 language_type(优雅落回 Auto)', async () => {
+    const { factory, created } = mockFactory((ws) => {
+      ws.serverSend({ type: 'response.done' });
+    });
+    const tts = newTts(factory);
+    await collect(tts.synthesize('x', { language: 'xx' }));
+    const update = created[0]!.sent.find((m) => (m as { type: string }).type === 'session.update') as {
+      session: Record<string, unknown>;
+    };
+    expect('language_type' in update.session).toBe(false);
+  });
+
   it('commit 模式:发显式 input_text_buffer.commit', async () => {
     const { factory, created } = mockFactory((ws) => {
       ws.serverSend({ type: 'response.done' });

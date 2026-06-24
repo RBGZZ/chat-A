@@ -15,9 +15,11 @@ import type { FetchLike } from './gpt-sovits-tts';
  * - 创建:body `{ model:'qwen-voice-enrollment', input:{ action:'create', target_model, preferred_name?,
  *   audio:{ data:'data:audio/<mime>;base64,...' } } }`;返回 voice id 在 `output.voice`。
  *   参考音频走 **base64 data URI 内联**(本地文件零操作;也可放公网 URL,本期不用)。
- * - 管理(list/query/delete):同端点、同 model,`input.action` 取 'list'/'query'/'delete',
- *   delete/query 带 `input.voice`。⚠️ **list/delete 的 action 动词与 list 响应字段名官方未完整公开**,
- *   按 CosyVoice 同族 voice-enrollment 推断;真机不符——**改下面对应的可改函数一处即可**(§3.1 爆炸半径可控)。
+ * - 管理(list/query/delete):同端点、同 model,`input.action` 取 'list'/'query'/'delete'(**裸动词**),
+ *   delete/query 带 `input.voice`,list 带分页 `page_index`/`page_size`。
+ *   ✅ **已据官方核实(2026-06-24)**:qwen-voice-enrollment 用裸动词 + `voice` 字段(本模块契约)。
+ *   ⚠️ **CosyVoice 是另一套契约**:动词为 `list_voice`/`delete_voice`、字段为 `voice_id`、语种走注册期
+ *   `language_hints`——Factory 将来接 CosyVoice 复刻时**别套用**本模块/qwen 的契约(见 design.md)。
  * - 音频要求:WAV(16bit)/MP3/M4A;时长 10~20s(≤60s);大小 < 10MB;采样率 ≥ 24kHz;单声道;
  *   ≥3s 连续清晰朗读、无背景音。配额:¥0.01/个、上限 1000、1 年未用自动删(以官方当时计费为准)。
  *
@@ -37,6 +39,11 @@ export const QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL = 'qwen3-tts-vc-realtime';
 export const QWEN_VOICE_CLONE_MAX_BYTES = 10 * 1024 * 1024;
 /** 创建音色时默认前缀名(preferred_name;仅命名用,可经 opts 覆盖)。 */
 export const QWEN_VOICE_CLONE_DEFAULT_NAME = 'xiaoxue';
+/**
+ * list 默认每页条数(分页 page_size;否则服务端只返首页,音色多了会漏列)。
+ * 已据官方核实(2026-06-24):list 支持 page_index/page_size 分页。
+ */
+export const QWEN_VOICE_CLONE_LIST_PAGE_SIZE = 100;
 
 /** 参考音频:字节 + MIME(浏览器/主进程通用),或本地文件路径(仅 Node 侧,自动读盘)。 */
 export type VoiceCloneAudio =
@@ -55,7 +62,11 @@ export interface VoiceCloneCommonOptions {
 
 /** 创建音色选项。 */
 export interface CreateVoiceOptions extends VoiceCloneCommonOptions {
-  /** 目标模型(创建时的 target_model **必须与合成时模型一致**);默认 qwen3-tts-vc-realtime。 */
+  /**
+   * 目标模型(创建时的 target_model)。**一致性纪律(已据官方核实 2026-06-24)**:此值必须与
+   * 后续合成(QwenTtsRealtime 的 `model`)**逐字一致**(含日期快照),否则合成失败——音色绑单模型。
+   * 默认 qwen3-tts-vc-realtime;装配层(desktop)据 `CHAT_A_TTS_MODEL` 选取以保证同串。
+   */
   readonly targetModel?: string;
   /** 音色显示名前缀(preferred_name);默认 'xiaoxue'。 */
   readonly preferredName?: string;
@@ -99,7 +110,10 @@ export function audioToDataUri(data: Uint8Array, mime: string): string {
   return `data:${mime};base64,${b64}`;
 }
 
-/** 构造创建音色请求体(契约可改函数:真机不符改此处)。 */
+/**
+ * 构造创建音色请求体(已据官方核实 2026-06-24:端点/action/base64 data URI/output.voice 均正确)。
+ * **一致性纪律**:`targetModel` 必须与合成 model 逐字同串(见 CreateVoiceOptions.targetModel)。
+ */
 export function buildCreateBody(
   dataUri: string,
   targetModel: string,
@@ -117,18 +131,24 @@ export function buildCreateBody(
 }
 
 /**
- * 构造管理(list/query/delete)请求体(契约可改函数;**action 动词官方未完整公开,真机校准改此处**)。
- * delete/query 带 voiceId;list 不带。
+ * 构造管理(list/query/delete)请求体。
+ * ✅ **已据官方核实(2026-06-24)**:裸动词 `list`/`query`/`delete` + `voice` 字段(CosyVoice 才是
+ * `list_voice`/`delete_voice` + `voice_id`,另一套契约)。
+ * - delete/query 带 `voice`(voiceId);
+ * - list 不带 voice,但带分页 `page_index`/`page_size`(否则服务端只返首页,音色多了漏列)。
  */
 export function buildManageBody(
   action: 'list' | 'query' | 'delete',
   voiceId?: string,
+  pageSize: number = QWEN_VOICE_CLONE_LIST_PAGE_SIZE,
 ): Record<string, unknown> {
   return {
     model: QWEN_VOICE_ENROLLMENT_MODEL,
     input: {
       action,
       ...(voiceId !== undefined ? { voice: voiceId } : {}),
+      // list 加分页;query/delete 不需要(它们靠 voice 定位单条)。
+      ...(action === 'list' ? { page_index: 0, page_size: pageSize } : {}),
     },
   };
 }
@@ -143,8 +163,9 @@ export function parseVoiceId(resp: unknown): string | undefined {
 }
 
 /**
- * 从 list 响应解析 voice id 列表(契约可改函数:**响应数组字段名官方未公开,真机校准改此处**)。
- * 容忍多种可能形态:output.voices / output.voice_list / output 直接是数组;元素为字符串或带 voice 字段的对象。
+ * 从 list 响应解析 voice id 列表(已据官方核实 2026-06-24;仍留多形态容忍以防服务端微调)。
+ * 容忍多种可能形态:output.voices / output.voice_list / output 直接是数组;
+ * 元素为字符串,或带 `voice` 字段的对象(取不到时回退 `voice_id`,兼容 CosyVoice 风格字段)。
  */
 export function parseVoiceList(resp: unknown): string[] {
   if (resp === null || typeof resp !== 'object') return [];
@@ -154,8 +175,13 @@ export function parseVoiceList(resp: unknown): string[] {
   for (const item of arr) {
     if (typeof item === 'string' && item.length > 0) out.push(item);
     else if (item !== null && typeof item === 'object') {
-      const v = (item as { voice?: unknown }).voice;
-      if (typeof v === 'string' && v.length > 0) out.push(v);
+      const o = item as { voice?: unknown; voice_id?: unknown };
+      // 优先 voice(本模块契约);取不到回退 voice_id(防元素复用 CosyVoice 风格)。
+      const v = typeof o.voice === 'string' && o.voice.length > 0 ? o.voice : undefined;
+      const fallback =
+        typeof o.voice_id === 'string' && o.voice_id.length > 0 ? o.voice_id : undefined;
+      const id = v ?? fallback;
+      if (id !== undefined) out.push(id);
     }
   }
   return out;

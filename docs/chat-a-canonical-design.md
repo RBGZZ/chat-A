@@ -186,6 +186,9 @@ voice:
 - **STT(输入)**:多语种 / 自动识别(Whisper/Deepgram 支持);由 `input_lang` 路由到支持该语种的 STT Provider。
 - **LLM(生成)**:按 `output_lang` 指示生成语言(prompt 注入目标语种)。
 - **TTS(输出)**:按 `output_lang` 选支持该语种的 TTS Provider/音色;音色本身也用户可自定义(承 v2.1 音色复刻)。
+  - **qwen-tts-realtime 落地(已据官方核实 2026-06-24)**:`output_lang`(ISO 码)在合成边界映成 Qwen `language_type` 名(`Chinese/English/…`,首字母大写英文名,**非** `zh`/`en` code)下发;未配置 → 不发该字段 = 服务端 `Auto`(逐字回归)。
+  - **声音复刻一致性纪律**:千问声音复刻创建时的 `target_model` 必须与后续**合成时的 model 逐字一致**(含日期快照),否则合成失败——音色绑单模型;装配层据合成配置选 target_model 保证同串。
+  - **CosyVoice 复刻语种机制相反(备注,暂不实现)**:CosyVoice 在**注册期**用 `language_hints` 声明音色语种、**合成期无**语种参数、语种**焊死在音色**上;且管理动词为 `list_voice`/`delete_voice`、字段为 `voice_id`。Factory 将来接 CosyVoice 复刻时**别套用** qwen 的「合成期发 `language_type`」思路——两套契约不可混。
 - **能力驱动路由**:STT/TTS Provider 声明 `languages` 能力,网关按 input/output 语种选可用 Provider(接缝 2);多模态 audio-in 路径同理需支持跨语种。
 - **直接参考**:realtime-demo 的 talk/translate 模式 + `source/target` 语种 + `system_prompt_for(mode,source,target)`(`reference-code-findings` §3)。
 - 运行时可热调(配置热加载)。

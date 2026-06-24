@@ -118,3 +118,52 @@ export function assertTtsCloning(cap: TtsCapabilities, opts: TtsOptions | undefi
     `TTS 不支持音色复刻(voiceCloning=false),但请求里带了 refAudio;请改用支持复刻的 provider`,
   );
 }
+
+/**
+ * ISO-639-1 语种码 → Qwen `language_type` 名映射(已据官方核实 2026-06-24:
+ * help.aliyun.com/zh/model-studio/qwen-tts-realtime + qwen-tts-api)。
+ * qwen-tts realtime 的 `session.language_type` 取**首字母大写英文名**(不是 `zh`/`en` code);
+ * voice 不自带语种,`Auto` 由服务端自动判定/处理混读。具名常量,无 magic。
+ */
+export const ISO_TO_QWEN_LANGUAGE: Readonly<Record<string, string>> = {
+  zh: 'Chinese',
+  en: 'English',
+  ja: 'Japanese',
+  ko: 'Korean',
+  de: 'German',
+  it: 'Italian',
+  pt: 'Portuguese',
+  es: 'Spanish',
+  fr: 'French',
+  ru: 'Russian',
+};
+
+/** 全部合法 Qwen `language_type` 名(含 `Auto`;用于兼容用户直传合法名)。 */
+export const QWEN_LANGUAGE_TYPES: readonly string[] = [
+  'Auto',
+  ...Object.values(ISO_TO_QWEN_LANGUAGE),
+];
+
+/**
+ * 把项目内部统一的输出语种(ISO 码,如 'zh'/'en')映射成 Qwen `language_type` 名,用于
+ * qwen-tts-realtime 握手(承 §4.1 语音 I/O 语种解耦在 qwen TTS 侧真正生效)。
+ *
+ * **回归硬线**:
+ * - 未给 / 空 → 返回 undefined(=不发 language_type = 服务端默认 `Auto` = 逐字现状)。
+ * - 命中 ISO 表(大小写不敏感) → 对应 Qwen 名。
+ * - 已是合法 Qwen 名(大小写不敏感,含 `Auto`) → 归一到官方写法原样返回(兼容用户直传)。
+ * - 其它未知 → 返回 undefined(优雅落回 Auto,**不抛**)。
+ */
+export function toQwenLanguageType(language?: string): string | undefined {
+  const raw = language?.trim();
+  if (raw === undefined || raw.length === 0) return undefined;
+  const lower = raw.toLowerCase();
+  // ISO 码命中(zh/en/...)。
+  const mapped = ISO_TO_QWEN_LANGUAGE[lower];
+  if (mapped !== undefined) return mapped;
+  // 已是合法 Qwen 名(大小写不敏感)→ 归一到官方写法。
+  const canonical = QWEN_LANGUAGE_TYPES.find((name) => name.toLowerCase() === lower);
+  if (canonical !== undefined) return canonical;
+  // 未知 → 不发(=Auto)。
+  return undefined;
+}

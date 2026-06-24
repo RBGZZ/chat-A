@@ -9,6 +9,7 @@ import {
   OpenAiCompatTts,
   GptSoVitsTts,
   TTS_SAMPLE_RATE_HZ,
+  toQwenLanguageType,
 } from '../src/index';
 import type { PcmChunk, TtsConfig, TtsRefAudio } from '../src/index';
 
@@ -84,6 +85,44 @@ describe('FakeTts 音色复刻路径(§4.1/v2.1)', () => {
       streaming: true,
       voiceCloning: true,
     });
+  });
+});
+
+describe('toQwenLanguageType(ISO 码 → Qwen language_type 名)', () => {
+  it('ISO 码映射到 Qwen 名', () => {
+    expect(toQwenLanguageType('zh')).toBe('Chinese');
+    expect(toQwenLanguageType('en')).toBe('English');
+    expect(toQwenLanguageType('ja')).toBe('Japanese');
+    expect(toQwenLanguageType('ko')).toBe('Korean');
+    expect(toQwenLanguageType('de')).toBe('German');
+    expect(toQwenLanguageType('it')).toBe('Italian');
+    expect(toQwenLanguageType('pt')).toBe('Portuguese');
+    expect(toQwenLanguageType('es')).toBe('Spanish');
+    expect(toQwenLanguageType('fr')).toBe('French');
+    expect(toQwenLanguageType('ru')).toBe('Russian');
+  });
+
+  it('大小写不敏感', () => {
+    expect(toQwenLanguageType('ZH')).toBe('Chinese');
+    expect(toQwenLanguageType('En')).toBe('English');
+  });
+
+  it('未给 / 空 → undefined(=不发 = Auto,逐字回归)', () => {
+    expect(toQwenLanguageType()).toBeUndefined();
+    expect(toQwenLanguageType('')).toBeUndefined();
+    expect(toQwenLanguageType('   ')).toBeUndefined();
+  });
+
+  it('未知码 → undefined(优雅落回 Auto,不抛)', () => {
+    expect(toQwenLanguageType('xx')).toBeUndefined();
+    expect(toQwenLanguageType('zh-CN')).toBeUndefined();
+  });
+
+  it('已是合法 Qwen 名 → 归一原样返回(兼容用户直传)', () => {
+    expect(toQwenLanguageType('Chinese')).toBe('Chinese');
+    expect(toQwenLanguageType('chinese')).toBe('Chinese');
+    expect(toQwenLanguageType('Auto')).toBe('Auto');
+    expect(toQwenLanguageType('english')).toBe('English');
   });
 });
 

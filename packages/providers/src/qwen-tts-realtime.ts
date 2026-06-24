@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import type { PcmChunk } from './audio';
 import { TTS_SAMPLE_RATE_HZ, pcmChunk } from './audio';
-import { assertTtsCloning, assertTtsLanguage } from './tts';
+import { assertTtsCloning, assertTtsLanguage, toQwenLanguageType } from './tts';
 import type { TtsCapabilities, TtsOptions, TtsProvider } from './tts';
 
 /**
@@ -80,6 +80,8 @@ export interface QwenTtsRealtimeOptions {
    * 是否支持**复刻音色合成**(能力位,§4.1/v2.1)。默认 false(内置音色)。
    * 配 vc 实时模型(如 `qwen3-tts-vc-realtime`)时设 true:`TtsOptions.voiceId` = 千问声音复刻得到的
    * voice id,直接当 WS `session.update` 的 `voice` 透传(复刻音色 id 即合成 voice)。
+   * **一致性纪律(已据官方核实 2026-06-24)**:此处合成 `model` 必须与复刻 `createVoice` 时的
+   * `target_model` **逐字一致**(含日期快照),否则合成失败(音色绑单模型);装配层保证两者同串。
    * **默认 false 时合成路径与产出逐字不变**(回归硬线)。
    */
   readonly voiceCloning?: boolean;
@@ -143,7 +145,13 @@ export class QwenTtsRealtime implements TtsProvider {
     // 进入即查取消:已取消则不建连、空产出(与现有 TTS 一致,干净停止)。
     if (signal?.aborted === true) return;
 
+    // voiceId 覆盖默认音色。**复刻音色一致性纪律**:当 voiceId 为千问声音复刻得到的 vc 音色时,
+    // 本 provider 的合成 model(this.#model)MUST 与复刻时的 target_model **逐字一致**(含日期快照),
+    // 否则服务端合成失败——音色绑单模型(已据官方核实 2026-06-24)。装配层负责保证两者同串。
     const voice = opts?.voiceId ?? this.#voice;
+    // §4.1 语种解耦真正生效:把输出语种(ISO 码)映成 Qwen language_type 名;
+    // 未给/未知 → undefined → 不发该字段(=服务端默认 Auto = 逐字回归)。
+    const languageType = toQwenLanguageType(opts?.language);
 
     // 建连:url 带 model query;鉴权走请求头(**不打印 key**)。
     const url = appendModelQuery(this.#endpoint, this.#model);
@@ -175,6 +183,8 @@ export class QwenTtsRealtime implements TtsProvider {
             sample_rate: this.#sampleRate,
             mode: this.#mode,
             ...(this.#instructions !== undefined ? { instructions: this.#instructions } : {}),
+            // 有值才发 language_type(无值 → 不含此键 → 服务端 Auto → 逐字回归)。
+            ...(languageType !== undefined ? { language_type: languageType } : {}),
           },
         }),
       );
