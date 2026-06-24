@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@chat-a/protocol": "workspace:*",
-    "@chat-a/providers": "workspace:*"
+    "@chat-a/providers": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0"
   }
 }
