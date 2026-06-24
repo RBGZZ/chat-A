@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+    <title>和小雪聊天</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header id="topbar">
+      <div class="title">
+        <span id="name">小雪</span>
+        <span id="provider" class="muted"></span>
+      </div>
+      <div class="status">
+        <span id="state" class="state idle">空闲</span>
+        <span id="mood" class="mood muted"></span>
+      </div>
+    </header>
+
+    <main id="messages" aria-live="polite"></main>
+
+    <footer id="composer">
+      <button id="voice" type="button" title="语音对话">🎙</button>
+      <textarea id="input" rows="1" placeholder="和小雪说点什么…(Enter 发送，Shift+Enter 换行)"></textarea>
+      <button id="send" type="button">发送</button>
+    </footer>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

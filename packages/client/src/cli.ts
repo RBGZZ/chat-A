@@ -1,22 +1,20 @@
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import process, { stdin, stdout, env, argv, cwd } from 'node:process';
-import { Conversation, LightVoiceBus, ToolCallingStrategy } from '@chat-a/runtime';
+import process, { stdin, stdout, env, argv } from 'node:process';
+import { Conversation, ToolCallingStrategy, type LightVoiceBus } from '@chat-a/runtime';
 import { buildDefaultRegistry, createMemoryFactLookup } from '@chat-a/interaction';
-import { createLlm, loadLlmConfig, createEmbedder, loadEmbedderConfig } from '@chat-a/providers';
-import { initTelemetry, createDecisionTraceSinkFromEnv, SqliteAutonomyDecisionSink } from '@chat-a/observability';
-import { createMemoryStoreFromEnv, LlmMemoryExtractor, LlmReflector, NoopReflector } from '@chat-a/memory';
+import { createEmbedder, loadEmbedderConfig } from '@chat-a/providers';
+import { createDecisionTraceSinkFromEnv, SqliteAutonomyDecisionSink } from '@chat-a/observability';
+import { LlmMemoryExtractor, LlmReflector, NoopReflector } from '@chat-a/memory';
 import type { Reflector } from '@chat-a/memory';
-import { loadPersonaFromEnv, seedPersonaMemories, createKvPersonaStore, LlmAppraiser, LlmStanceDetector, LlmOceanEvolver, LlmSelfNotionEvolver, createSelfConsistencyGuard, parseSelfConsistencyMode } from '@chat-a/persona';
+import { LlmAppraiser, LlmStanceDetector, LlmOceanEvolver, LlmSelfNotionEvolver, createSelfConsistencyGuard, parseSelfConsistencyMode } from '@chat-a/persona';
 import { isAutonomyEnabled } from '@chat-a/autonomy';
+import { assembleApp } from './assembly/app';
 import { startVoiceMode, type VoiceModeHandle, type VoiceLoopAutonomyView } from './cli-voice';
 import { assemblePerception, type PerceptionHandle } from './assembly/perception';
 import { assembleAutonomy, type AutonomyHandle } from './assembly/autonomy';
 import { assembleConsolidation, type ConsolidationHandle } from './assembly/consolidation';
 import { createPresencePort, createCompanionCandidateSource } from './assembly/memory-autonomy-ports';
-import { parseDotEnv, applyDotEnv } from './env-file';
 import { parseCommand, renderHelp, renderPersona, renderBanner } from './commands';
 
 /**
@@ -24,36 +22,24 @@ import { parseCommand, renderHelp, renderPersona, renderBanner } from './command
  * 用 node:readline 异步迭代行;stdin EOF / Ctrl+C / `/quit` 三种情况统一优雅收尾(§3.2)。
  *
  * 交互层(横幅/命令)的纯逻辑抽到 commands.ts、env-file.ts(可单测);本文件是装配 + 副作用薄壳。
+ * 核心会话装配(env/llm/bus/memory/persona/Conversation 工厂/收尾)抽到 assembly/app.ts 的
+ * `assembleApp()`,与 Electron 桌面前端共用;cli 在其之上接 LLM 认知升级 / 策略 / 语义召回 /
+ * 自我一致性 / 语音 / autonomy / 感知 / 巩固等 opt-in 子系统(行为与抽取前逐字一致)。
  */
-
-/**
- * 启动最前面加载项目根 `.env.local`(与 start.bat 行为一致):让 `pnpm dev` 直接拿到 key。
- * 存在才读、解析为纯函数、注入不覆盖真实 env;文件缺失/读失败静默跳过,绝不崩(§3.2)。
- */
-function loadEnvLocal(): void {
-  try {
-    const text = readFileSync(join(cwd(), '.env.local'), 'utf8');
-    applyDotEnv(parseDotEnv(text), env);
-  } catch {
-    // 文件不存在 / 读取失败 → 静默(用户可能直接用进程环境变量或 start.bat)。
-  }
-}
 
 async function main(): Promise<void> {
-  loadEnvLocal();
-
-  const cfg = loadLlmConfig();
-  const llm = createLlm(cfg);
-  const bus = new LightVoiceBus();
-  // 记忆按配置装配(默认 SQLite 真相源,跨重启记得;CHAT_A_MEMORY_BACKEND=memory 可退回内存)。
-  const mem = createMemoryStoreFromEnv();
-  // PersonaCard 装配(§6.2,card-as-config):卡优先、env 覆盖;PAD 状态复用记忆 SQLite KV(跨重启续接)。
-  const persona = loadPersonaFromEnv();
-  const seed = persona.seed;
-  const personaStore = createKvPersonaStore(mem.store);
-  // 种子化:角色背景/故事 → subject=agent 可召回 lore(不进骨架);多条用户画像 → subject=person 主用户。
-  // CHAT_A_USER_PROFILE 单行画像并入(向后兼容)。全部经去重幂等,重复启动不新建(§5.8)。
-  const seeded = seedPersonaMemories(mem.store, persona, env['CHAT_A_USER_PROFILE']);
+  // 核心装配(env 加载 + llm + bus + memory + persona + 基础收尾):与 desktop 共用同一套。
+  const app = assembleApp();
+  const cfg = app.llmConfig;
+  const llm = app.llm;
+  const bus = app.bus;
+  // memory:复用共享装配开的同一个 store(避免双开 SQLite);保持 mem.store / backend / dbPath 形态。
+  const mem = { store: app.memory, backend: app.memoryInfo.backend, dbPath: app.memoryInfo.dbPath };
+  // PersonaCard:复用共享装配的卡加载结果与种子/持久化(card 元信息供下方状态行)。
+  const persona = app.personaCard;
+  const seed = app.seed;
+  const personaStore = app.personaStore;
+  // 种子化(角色背景/用户画像 → 记忆,去重幂等)已在 assembleApp 内完成,此处不再重复。
   const cardPath = env['CHAT_A_PERSONA_CARD'];
   const personaSource = cardPath && cardPath.trim().length > 0 ? `卡(${cardPath})` : '默认种子';
   const personaEnvOverride =
@@ -138,9 +124,8 @@ async function main(): Promise<void> {
     });
   let convo = makeConvo(sessionId);
 
-  // OTel 追踪骨架(§8.1):默认不开以免刷屏;设 CHAT_A_TRACE=1 打开控制台 span 树。
-  const traceOn = (env['CHAT_A_TRACE'] ?? '').length > 0;
-  const telemetry = traceOn ? initTelemetry({ console: true }) : undefined;
+  // OTel 追踪骨架(§8.1):由 assembleApp 按 CHAT_A_TRACE 统一 init + 在 app.cleanup() 关闭
+  // (与抽取前等价:默认不开,设 CHAT_A_TRACE=1 打开控制台 span 树)。此处不再重复 init。
 
   // ── 友好横幅(面向用户)+ 开发者向的精简状态行(可一眼看出各能力开关) ──
   stdout.write(
@@ -296,17 +281,14 @@ async function main(): Promise<void> {
     await reflector.reflect(sessionId).catch(() => {});
     // 会话结束的夜间巩固触发(§5.1,默认关):后台幂等、失败仅告警,绝不阻塞退出。
     await consolidation?.consolidateSession(sessionId).catch(() => {});
-    try {
-      mem.store.close();
-    } catch {
-      /* 关库失败不影响退出 */
-    }
+    // cli 特有的决策 trace sink 收尾(共享层不持有它);失败吞。
     try {
       trace.sink.close();
     } catch {
       /* 同上 */
     }
-    await telemetry?.shutdown().catch(() => {});
+    // 共享层收尾:关 memory store + 关 telemetry(幂等、失败吞)。在 reflect/巩固之后关库。
+    await app.cleanup();
   };
 
   const rl = createInterface({ input: stdin, output: stdout });
