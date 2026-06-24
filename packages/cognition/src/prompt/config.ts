@@ -16,6 +16,8 @@ export const PROMPT_PRIORITY = {
   style: 920,
   /** 异议(§7#3):tone 之后,作为本轮最强 steer(最靠近末尾)。 */
   dissent: 950,
+  /** 重锚(§6.1 自我一致性锚定):dissent 之后,最靠近末尾——"守住核心自我"的最强压轴 steer(仅漂移时注入,措辞克制不否定个性)。 */
+  reAnchor: 980,
 } as const;
 
 /**
