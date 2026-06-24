@@ -1,4 +1,5 @@
-import { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
+import { loadDatabaseSync } from './sqlite-loader';
 import type { DecisionTrace, DecisionTraceRecalled } from './decision-trace';
 
 /**
@@ -74,7 +75,7 @@ export class DecisionTraceReader {
     try {
       // 只读打开:不创建库、不写。库不存在/损坏在此抛 → 降级。
       // 注意:node:sqlite 选项名为 `readOnly`(大写 O);小写 `readonly` 不报错但**不强制只读**。
-      this.#db = new DatabaseSync(this.#path, { readOnly: true });
+      this.#db = new (loadDatabaseSync())(this.#path, { readOnly: true });
     } catch (err) {
       this.#onWarn(err, 'open');
       this.#db = null;

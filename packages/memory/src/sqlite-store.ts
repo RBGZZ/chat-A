@@ -1,4 +1,5 @@
-import { DatabaseSync } from 'node:sqlite';
+import { createRequire } from 'node:module';
+import type { DatabaseSync } from 'node:sqlite';
 import type {
   ChatMessage,
   ConsolidationTrace,
@@ -328,6 +329,37 @@ type Cand = {
 };
 
 /**
+ * node:sqlite「内建不可用」专用错误:Node ≥24 才内建 `node:sqlite`,Electron 内嵌的旧 Node 没有
+ * (`ERR_UNKNOWN_BUILTIN_MODULE`)。装配层(config-loader)据此**降级到内存后端**而非整个应用崩溃(§3.2)。
+ */
+export class SqliteUnavailableError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'SqliteUnavailableError';
+  }
+}
+
+/**
+ * 惰性加载 node:sqlite 的 `DatabaseSync`(承 §3.2 优雅降级):顶层改 **type-only** 静态 import +
+ * 运行时 `createRequire`,使**模块图不在链接期强制加载 node:sqlite**——否则 Electron 旧 Node 一 import
+ * 就 throw,连选内存后端都救不了。Node ≥24 正常;不可用 → 抛 {@link SqliteUnavailableError} 由装配层降级。
+ */
+let cachedDatabaseSync: typeof DatabaseSync | undefined;
+function loadDatabaseSync(): typeof DatabaseSync {
+  if (cachedDatabaseSync !== undefined) return cachedDatabaseSync;
+  try {
+    const req = createRequire(import.meta.url);
+    cachedDatabaseSync = (req('node:sqlite') as typeof import('node:sqlite')).DatabaseSync;
+  } catch (err) {
+    throw new SqliteUnavailableError(
+      'node:sqlite 不可用(需 Node ≥24;Electron 内嵌旧 Node 无内建 SQLite);装配层应降级内存后端。',
+      { cause: err },
+    );
+  }
+  return cachedDatabaseSync;
+}
+
+/**
  * SQLite 记忆实现(node:sqlite,单文件真相源,§8.1)。
  * 写路径 ADD+去重(ON CONFLICT 增计数);关键词召回(token/LIKE,P1);schema 版本化+迁移。
  * 读失败优雅降级为空(不拖垮主对话,§3.2)。
@@ -354,7 +386,7 @@ export class SqliteMemoryStore implements MemoryStore {
     this.#now = opts.now ?? Date.now;
     this.#onError = opts.onError ?? ((err, op) => console.error(`[memory] ${op} 失败`, err));
     this.#shingleCache = new ShingleCache(this.#cfg);
-    this.#db = new DatabaseSync(opts.path);
+    this.#db = new (loadDatabaseSync())(opts.path);
     try {
       this.#db.exec('PRAGMA journal_mode=WAL;');
       this.#migrate();

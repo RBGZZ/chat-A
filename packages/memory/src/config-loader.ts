@@ -1,5 +1,5 @@
 import { InMemoryMemoryStore } from './in-memory-store';
-import { SqliteMemoryStore } from './sqlite-store';
+import { SqliteMemoryStore, SqliteUnavailableError } from './sqlite-store';
 import type { MemoryStore } from './types';
 import type { MemoryConfig } from './config';
 
@@ -73,5 +73,18 @@ export function createMemoryStoreFromEnv(env: NodeJS.ProcessEnv = process.env): 
     return { store: new InMemoryMemoryStore({ config }), backend };
   }
   const dbPath = env['CHAT_A_MEMORY_DB'] ?? 'chat-a-memory.db';
-  return { store: new SqliteMemoryStore({ path: dbPath, config }), backend, dbPath };
+  try {
+    return { store: new SqliteMemoryStore({ path: dbPath, config }), backend, dbPath };
+  } catch (err) {
+    // node:sqlite 不可用(如 Electron 内嵌旧 Node 无内建 SQLite)→ 降级内存后端:
+    // 本次不跨重启持久化,但应用照常起、文字/语音/人格/记忆查看均可用(§3.2 优雅降级)。
+    if (err instanceof SqliteUnavailableError) {
+      console.warn(
+        '[memory] SQLite 不可用,本次降级为内存后端(对话/记忆本次不跨重启留存):',
+        err.message,
+      );
+      return { store: new InMemoryMemoryStore({ config }), backend: 'memory' };
+    }
+    throw err;
+  }
 }

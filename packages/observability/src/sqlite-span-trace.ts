@@ -1,4 +1,5 @@
-import { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
+import { loadDatabaseSync } from './sqlite-loader';
 
 /**
  * OTel span 落 SQLite(§8.1 两层追踪「OTel→SQLite 落地」一半)。
@@ -108,7 +109,7 @@ export class SqliteSpanSink {
 
   constructor(opts: SqliteSpanSinkOptions) {
     this.#onError = opts.onError ?? ((err, op) => console.error(`[span-trace] ${op} 失败`, err));
-    this.#db = new DatabaseSync(opts.path);
+    this.#db = new (loadDatabaseSync())(opts.path);
     try {
       this.#db.exec('PRAGMA journal_mode=WAL;');
       this.#migrate();

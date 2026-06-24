@@ -36,9 +36,11 @@ async function run() {
     external,
     sourcemap: true,
     logLevel: 'info',
-    // ESM 输出里 __dirname 不存在:注入基于 import.meta.url 的兼容定义。
+    // ESM 输出里 __dirname/require 不存在:注入基于 import.meta.url 的兼容定义。
+    // createRequire 定义的 require 让 esbuild 的 __require 垫片回落到真 require——否则 bundled CJS 依赖
+    // (如 yaml 内部 `require('process')`)在 ESM 产物里抛「Dynamic require of X is not supported」。
     banner: {
-      js: "import { fileURLToPath as __f } from 'node:url'; import { dirname as __d } from 'node:path'; const __filename = __f(import.meta.url); const __dirname = __d(__filename);",
+      js: "import { fileURLToPath as __f } from 'node:url'; import { dirname as __d } from 'node:path'; import { createRequire as __cr } from 'node:module'; const __filename = __f(import.meta.url); const __dirname = __d(__filename); const require = __cr(import.meta.url);",
     },
   });
 

@@ -1,4 +1,5 @@
-import { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
+import { loadDatabaseSync } from './sqlite-loader';
 import type { DecisionTrace, DecisionTraceSink } from './decision-trace';
 import { NoopDecisionTraceSink } from './decision-trace';
 import { captureActiveSpanContext } from './telemetry';
@@ -80,7 +81,7 @@ export class SqliteDecisionTraceSink implements DecisionTraceSink {
   constructor(opts: SqliteDecisionTraceSinkOptions) {
     this.#onError = opts.onError ?? ((err, op) => console.error(`[decision-trace] ${op} 失败`, err));
     this.#captureActiveSpan = opts.captureActiveSpan ?? true;
-    this.#db = new DatabaseSync(opts.path);
+    this.#db = new (loadDatabaseSync())(opts.path);
     try {
       this.#db.exec('PRAGMA journal_mode=WAL;');
       this.#migrate();
