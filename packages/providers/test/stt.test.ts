@@ -139,7 +139,7 @@ describe('createStt(工厂按判别联合切换)+ loadSttConfig', () => {
   });
 
   it('已注册 kind 列表', () => {
-    expect([...listSttKinds()].sort()).toEqual(['fake', 'openai-compat', 'whisper-local']);
+    expect([...listSttKinds()].sort()).toEqual(['fake', 'openai-compat', 'qwen-asr', 'whisper-local']);
   });
 
   it('全空 env → 降级 fake', () => {

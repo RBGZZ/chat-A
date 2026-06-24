@@ -4,6 +4,8 @@ import { FakeStt } from './fake-stt';
 import { OpenAiCompatStt } from './openai-compat-stt';
 import { WhisperLocalStt } from './whisper-local-stt';
 import type { SpawnFn } from './whisper-local-stt';
+import { QwenAsrStt } from './qwen-asr-stt';
+import type { SttFetch } from './qwen-asr-stt';
 
 /**
  * 运行时注入的 STT 端口(R1 注入式接缝)。
@@ -12,6 +14,8 @@ import type { SpawnFn } from './whisper-local-stt';
 export interface SttPorts {
   /** whisper-local 的子进程端口(SpawnFn);运行时包一层 node:child_process spawn 调 whisper.cpp/faster-whisper CLI。 */
   readonly spawn?: SpawnFn;
+  /** qwen-asr 的 HTTP 端口(注入用于不触网单测);缺省时 QwenAsrStt 用全局 fetch。 */
+  readonly fetch?: SttFetch;
 }
 
 /** 后端工厂:某一 kind 的子配置(+ 注入端口) → 具体 SttProvider。 */
@@ -63,6 +67,19 @@ const registry: { [K in SttConfig['kind']]: SttFactory<K> } = {
       ...(cfg.languages !== undefined ? { languages: cfg.languages } : {}),
     });
   },
+  // DashScope qwen3-asr-flash:批式云 STT + prosody 情绪(§7#5)。fetch 端口可注入(不触网单测);
+  // 缺省用全局 fetch(云端档无需运行时二进制端口)。缺 key 由 QwenAsrStt 构造 fail-fast。
+  'qwen-asr': (cfg, ports) =>
+    new QwenAsrStt({
+      id: cfg.id ?? 'qwen-asr',
+      model: cfg.model,
+      apiKey: cfg.apiKey,
+      baseURL: cfg.baseURL,
+      ...(cfg.language !== undefined ? { language: cfg.language } : {}),
+      ...(cfg.enableItn !== undefined ? { enableItn: cfg.enableItn } : {}),
+      ...(cfg.languages !== undefined ? { languages: cfg.languages } : {}),
+      ...(ports.fetch !== undefined ? { fetch: ports.fetch } : {}),
+    }),
 };
 
 export function listSttKinds(): readonly SttConfig['kind'][] {
