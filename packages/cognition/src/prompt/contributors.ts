@@ -94,3 +94,31 @@ export class StyleDisciplineContributor implements PromptContributor {
     };
   }
 }
+
+/**
+ * 重锚(§6.1 自我一致性锚定):仅当本轮 `ctx.anchor.drift === true`(回复疑似否定核心自我)时,
+ * 注入一段**温和**重锚 steer——以确立过的自我为准、自然说回正,但**明确保留个性偏离**
+ * (不同观点/改主意/新喜好不必收回)。无 anchor 或未漂移 → 返回 null(默认路径零注入)。
+ * 同步无 I/O(承接缝契约);priority 在 dissent 之后(最强压轴),tier='peripheral'(极端预算下可裁,核心事实/记忆优先)。
+ * **本期只注入下轮 steer,不改写/不截断已生成回复。**
+ */
+export class ReAnchorContributor implements PromptContributor {
+  contribute(ctx: PromptContext): PromptFragment | null {
+    const anchor = ctx.anchor;
+    if (anchor === undefined || anchor.drift !== true) return null;
+    const anchorLine =
+      anchor.anchorText !== undefined && anchor.anchorText.trim().length > 0
+        ? `你确立过的自我是:${anchor.anchorText.trim()}。`
+        : '';
+    const text = [
+      '[自我一致性]',
+      '你刚才的说法似乎和你确立过的核心自我不太一致。',
+      anchorLine,
+      '请以你确立过的自我为准,自然地把它说回正——别否定你是谁、你根本相信什么。',
+      '注意:你完全可以有不同观点、可以改主意、可以有新喜好,那些不必收回;只是别推翻核心设定。',
+    ]
+      .filter((l) => l.length > 0)
+      .join('\n');
+    return { text, priority: PROMPT_PRIORITY.reAnchor, tier: 'peripheral' };
+  }
+}

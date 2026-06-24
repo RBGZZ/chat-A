@@ -23,6 +23,17 @@ export interface StanceInput {
   readonly notions: readonly string[];
 }
 
+/**
+ * 本轮自我一致性判定结果(§6.1),由回合编排层据 SelfConsistencyGuard 产出后填入 ctx。
+ * cognition 自有最小形状,不依赖 persona 的 AnchorResult 类型(松耦合,同 StanceInput 手法)。
+ */
+export interface AnchorInput {
+  /** 回复是否与确立过的核心自我矛盾(漂移);ReAnchorContributor 仅在 true 时注入重锚。 */
+  readonly drift: boolean;
+  /** 命中的核心锚点文本(供重锚提示「以此为准」);可空。 */
+  readonly anchorText?: string;
+}
+
 /** 一个 contributor 本轮产出的注入片段。 */
 export interface PromptFragment {
   /** 注入文本(空字符串视为有内容、照常拼;无内容应由 contributor 返回 null)。 */
@@ -61,6 +72,8 @@ export interface PromptContext {
   readonly history: readonly ChatMessage[];
   /** 本轮分歧检测结果(§7#3);由编排层调 StanceDetector 产出,缺省/无异议时省略。 */
   readonly stance?: StanceInput;
+  /** 本轮自我一致性判定结果(§6.1);由编排层调 SelfConsistencyGuard 产出,缺省/未漂移时省略。 */
+  readonly anchor?: AnchorInput;
   /** expressiveness 旋钮值 [0,1](§7#4);由编排层据人格旋钮填入,微调风格强度。缺省时 StyleDisciplineContributor 回落中性档。 */
   readonly expressiveness?: number;
   /** volatile 上下文键值(时间戳/turnId 等),追加到末条用户消息(§5.4);P1 可空。 */

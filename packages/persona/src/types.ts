@@ -236,6 +236,72 @@ export interface StanceDetector {
   detect(ctx: StanceContext): Promise<StanceResult>;
 }
 
+/**
+ * 核心自我记忆的最小注入结构(§6.1 自我一致性锚定)。
+ * 编排层用既有 `recall(subject=agent)` 召回核心自我记忆(种子 lore / self_notion / core_belief)后,
+ * 以本结构传入 Guard——**persona 不依赖 memory 包**(接缝边界 §3.1;同 KvLike/MemoryAdder 手法)。
+ */
+export interface SelfMemoryRef {
+  /** 记忆文本(如「我叫小雪」「我相信慢下来更有味道」)。 */
+  readonly text: string;
+  /** 记忆 kind(self_lore / self_notion / core_belief…);仅作权重/分类提示,可缺省。 */
+  readonly kind?: string;
+  /** 是否核心档(§5.4「Agent:名字/core_belief/根本设定」);true=根本设定。确定性 core-only 档只锚此类 + name。 */
+  readonly core?: boolean;
+}
+
+/**
+ * 自我一致性检测输入(§6.1):本轮回复(候选/已生成)+ 注入的核心自我记忆 + 人格名字。
+ * name 是最强核心锚点(否定名字=最典型漂移)。
+ */
+export interface SelfConsistencyContext {
+  /** 本轮回复文本(候选或已生成)。 */
+  readonly reply: string;
+  /** 语义召回的核心自我记忆(编排层注入;可空=无可锚定)。 */
+  readonly selfMemories: readonly SelfMemoryRef[];
+  /** 人格名字(最强核心锚点);缺省=不锚定名字。 */
+  readonly agentName?: string;
+}
+
+/**
+ * 自我一致性判定结果(§6.1):是否与确立过的核心自我矛盾(漂移)。
+ * **放宽阈值**:仅"否定核心设定"(名字/根本信念/根本人设)算 drift;观点变化/不同意/新喜好不算。
+ */
+export interface AnchorResult {
+  /** 是否与核心自我矛盾。 */
+  readonly drift: boolean;
+  /** 判定理由(trace / 重锚提示用);可缺省。 */
+  readonly reason?: string;
+  /** 命中的核心锚点文本(供重锚「以此为准」);仅 drift 时通常有值。 */
+  readonly anchorText?: string;
+}
+
+/** 自我一致性锚定的可配项(§6.1 行为即配置)。strictness 控锚点范围。 */
+export interface SelfConsistencyConfig {
+  /** 总开关(**缺省 false=不锚定**,缺省安全:行为字面不变)。 */
+  readonly enabled: boolean;
+  /** 锚点范围:core-only=仅 name+核心档记忆(默认,保守);all-self=放宽到全部注入的自我记忆。 */
+  readonly strictness: 'core-only' | 'all-self';
+}
+
+/** 一次自我一致性判定的 trace 载荷(§8.1 sink 接缝)。 */
+export interface SelfConsistencyDecision {
+  readonly drift: boolean;
+  readonly reason?: string;
+  readonly anchorText?: string;
+  /** 判定来源:确定性默认 default / LLM 实现 llm。 */
+  readonly mode: 'default' | 'llm';
+}
+
+/**
+ * 自我一致性检测接缝(§3.1/§6.1):据回复 + 核心自我记忆判定是否漂移。
+ * 异步以容纳 LLM 实现;确定性实现返回已决议 Promise。
+ * **失败/无锚点/未启用 → `{drift:false}`(降级不锚定,绝不抛、不阻塞回合,§3.2)。**
+ */
+export interface SelfConsistencyGuard {
+  check(ctx: SelfConsistencyContext): Promise<AnchorResult>;
+}
+
 /** 离散情绪(P1 小集合,够 tone 区分)。 */
 export type Emotion = 'joyful' | 'content' | 'neutral' | 'down' | 'irritated';
 
