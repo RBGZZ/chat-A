@@ -10,6 +10,11 @@ import { createCountdownAction } from './actions/countdown';
 
 export * from './types';
 export * from './registry';
+// —— 外界交互 MVP(§12)新增 ——
+export * from './bus';
+export * from './task-executor';
+export * from './perception';
+export * from './mcp';
 export * from './actions/current-time';
 export * from './actions/calculate';
 export * from './actions/set-reminder';
