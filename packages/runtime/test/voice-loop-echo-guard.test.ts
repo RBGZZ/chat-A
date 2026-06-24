@@ -1,8 +1,10 @@
 /**
- * EchoGuard(自打断防护)集成测试:验证 speaking 期连续 N 帧去抖压回声、真人仍打得断、
- * 非说话期灵敏度不变、危机/硬打断豁免。全程确定性 Stub VAD,不触网。
+ * EchoGuard(自打断防护)集成测试:验证 Tier1 硬门控压回声(agent 说话期低能量回声不打断)、
+ * 真人足够响仍打得断、Tier2 冷却窗(低能量混响尾被挡 / 高能量放行)、冷却结束恢复常态、
+ * 危机/硬打断豁免。全程确定性 Stub VAD + 显式帧能量,不触网。
  *
- * 回归硬线另见 voice-loop.test.ts(未注入 EchoGuard 即现状,本文件不重复)。
+ * 关键时间轴:micFrame 的 `timestampMs` 同时驱动 VAD 去抖、endpointing 与 EchoGuard 冷却窗判定,
+ * 故各帧时刻须刻意安排(说话→静音→冷却内/外)。回归硬线另见 voice-loop.test.ts(未注入 EchoGuard 即现状)。
  */
 import { describe, it, expect, vi } from 'vitest';
 import {
@@ -14,19 +16,24 @@ import {
   type BusEvent,
   type PcmFrame,
 } from '@chat-a/protocol';
-import { StubVadDetector, TurnDetector, StubEouModel } from '@chat-a/voice-detect';
+import { StubVadDetector, TurnDetector, StubEouModel, type EchoGuardConfig } from '@chat-a/voice-detect';
 import { FakeStt, FakeTts } from '@chat-a/providers';
 import { LightVoiceBus } from '../src/bus';
 import { VoiceLoop } from '../src/voice-loop';
 import type { VoiceLoopDeps } from '../src/voice-loop';
 
-function micFrame(timestampMs: number): AudioFrame {
-  const pcm: PcmFrame = {
-    samples: new Int16Array(160),
-    sampleRate: SAMPLE_RATE_HZ,
-    channels: CHANNELS,
-    timestampMs,
-  };
+/** Int16 满量程(与 VoiceLoop 内部归一化分母一致),便于按目标归一化能量反推样本幅度。 */
+const FULL_SCALE = 32_768;
+
+/**
+ * 构造上行 audio:input 帧;`energy01`(0~1)指定**归一化 RMS 能量**:
+ * 全样本取常量幅度 a 时 RMS=a,故 a = energy01*FULL_SCALE。energy01=0 → 全零(静音/无能量)。
+ */
+function micFrame(timestampMs: number, energy01 = 0): AudioFrame {
+  const amp = Math.round(energy01 * FULL_SCALE);
+  const samples = new Int16Array(160);
+  if (amp > 0) samples.fill(amp);
+  const pcm: PcmFrame = { samples, sampleRate: SAMPLE_RATE_HZ, channels: CHANNELS, timestampMs };
   return makeDataFrame('audio:input', {
     audio: pcm,
     format: { sampleRate: SAMPLE_RATE_HZ, channels: CHANNELS, sampleFormat: 's16le' },
@@ -49,6 +56,20 @@ function recorders(transport: InProcessAudioTransport, bus: LightVoiceBus) {
   const events: BusEvent[] = [];
   bus.onAny((e) => events.push(e));
   return { down, events };
+}
+
+/** 双层阈值显式的基础 EchoGuard 配置(cooldown 高阈 0.03,base 常态阈 0)。 */
+function guard(over: Partial<EchoGuardConfig> = {}): EchoGuardConfig {
+  return {
+    enabled: true,
+    confirmFrames: 1,
+    minSpeechProb: 0.5,
+    minEnergy: 0,
+    cooldownMs: 1500,
+    baseRmsThreshold: 0,
+    cooldownRmsThreshold: 0.03,
+    ...over,
+  };
 }
 
 function makeDeps(over: Partial<VoiceLoopDeps> = {}): {
@@ -78,14 +99,15 @@ function makeDeps(over: Partial<VoiceLoopDeps> = {}): {
   return { deps, transport, bus };
 }
 
+/** 驱动「4 帧有声(均带能量,触 speech_start)→ 3 帧静音(长时跳)→ endpointing 判说完进 thinking」。 */
 async function driveSpeechThenSilence(transport: InProcessAudioTransport): Promise<void> {
-  transport.sendAudio(micFrame(0));
-  transport.sendAudio(micFrame(10));
-  transport.sendAudio(micFrame(20));
-  transport.sendAudio(micFrame(30));
-  transport.sendAudio(micFrame(40));
-  transport.sendAudio(micFrame(50));
-  transport.sendAudio(micFrame(10_050));
+  transport.sendAudio(micFrame(0, 0.5));
+  transport.sendAudio(micFrame(10, 0.5));
+  transport.sendAudio(micFrame(20, 0.5));
+  transport.sendAudio(micFrame(30, 0.5));
+  transport.sendAudio(micFrame(40, 0));
+  transport.sendAudio(micFrame(50, 0));
+  transport.sendAudio(micFrame(10_050, 0));
   await flush();
 }
 
@@ -95,19 +117,18 @@ async function flush(): Promise<void> {
 
 // ───────────────────────────── 测试 ─────────────────────────────
 
-describe('runtime/VoiceLoop EchoGuard 自打断防护', () => {
-  it('说话期回声样式(断续,连续达标不足 N)被压制:不打断、不 clearBuffer、不写半句', async () => {
+describe('runtime/VoiceLoop EchoGuard 硬门控 + RMS 双层冷却', () => {
+  it('Tier1:agent 说话期低能量回声帧被丢 → 不打断、不 clearBuffer、不写半句', async () => {
     const mem = fakeMemory();
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => {
       release = r;
     });
-    // 索引 0~6:driveSpeechThenSilence(4 有声 + 3 静音);
-    // 7~14:speaking 期断续回声样式(高-低-高-低...),连续达标永不足 N=3。
+    // speaking 期回声帧:VAD 高概率(被当有声)但**能量 0.01 < cooldownRms 0.03** → Tier1 挡。
     const { deps, transport, bus } = makeDeps({
       memory: { appendMessage: mem.appendMessage },
-      vad: new StubVadDetector([0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.9, 0.0, 0.9, 0.0, 0.9, 0.0, 0.9, 0.0]),
-      echoGuard: { enabled: true, confirmFrames: 3, minSpeechProb: 0.5, minEnergy: 0 },
+      vad: new StubVadDetector([0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9]),
+      echoGuard: guard({ confirmFrames: 1, cooldownRmsThreshold: 0.03 }),
       send: async (_t, onToken) => {
         onToken('我正在说一句话。');
         await gate;
@@ -124,13 +145,10 @@ describe('runtime/VoiceLoop EchoGuard 自打断防护', () => {
     expect(loop.state).toBe('speaking');
     const downBefore = down.length;
 
-    // 断续回声帧序列(高-低交替,VAD 因 2 帧去抖根本进不了 speech_start;即便算高置信也不连续 3 帧)
-    for (let i = 0; i < 8; i++) {
-      transport.sendAudio(micFrame(20_000 + i * 10));
-    }
+    // 连续低能量回声帧(0.01 < 0.03)→ Tier1 全挡
+    for (let i = 0; i < 6; i++) transport.sendAudio(micFrame(20_000 + i * 10, 0.01));
     await flush();
 
-    // 未被打断:仍在 speaking,无 clearBuffer,无半句写回
     expect(loop.state).toBe('speaking');
     expect(clearSpy).not.toHaveBeenCalled();
     expect(mem.appendMessage).not.toHaveBeenCalled();
@@ -140,17 +158,17 @@ describe('runtime/VoiceLoop EchoGuard 自打断防护', () => {
     await flush();
   });
 
-  it('真人连续 N 帧高置信仍能打断:回 listening + clearBuffer + 半句写回(证打得断)', async () => {
+  it('Tier1:真人足够响 + 连续 N 帧仍能打断 → 回 listening + clearBuffer + 半句写回(证打得断)', async () => {
     const mem = fakeMemory();
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => {
       release = r;
     });
-    // 7~12:speaking 期连续 6 帧高置信(>=N=3)→ 必确认打断。
+    // speaking 期连续 6 帧高能量(0.5 ≥ 0.03)+ 高概率 → 达 N=3 必打断。
     const { deps, transport, bus } = makeDeps({
       memory: { appendMessage: mem.appendMessage },
       vad: new StubVadDetector([0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9]),
-      echoGuard: { enabled: true, confirmFrames: 3, minSpeechProb: 0.5, minEnergy: 0 },
+      echoGuard: guard({ confirmFrames: 3, cooldownRmsThreshold: 0.03 }),
       send: async (_t, onToken) => {
         onToken('我正在说一句话。');
         await gate;
@@ -167,10 +185,7 @@ describe('runtime/VoiceLoop EchoGuard 自打断防护', () => {
     await flush();
     expect(loop.state).toBe('speaking');
 
-    // 连续 6 帧高置信真语音
-    for (let i = 0; i < 6; i++) {
-      transport.sendAudio(micFrame(20_000 + i * 10));
-    }
+    for (let i = 0; i < 6; i++) transport.sendAudio(micFrame(20_000 + i * 10, 0.5));
     await flush();
 
     expect(loop.state).toBe('listening'); // 打得断
@@ -183,9 +198,80 @@ describe('runtime/VoiceLoop EchoGuard 自打断防护', () => {
     await flush();
   });
 
-  it('非说话期灵敏度不变:注入 EchoGuard 后正常闭环仍走通(EchoGuard 只在 speaking 生效)', async () => {
+  it('Tier2 冷却窗:agent 说完 1.5s 内低能量混响尾被挡(不开启虚假回合)', async () => {
+    // send 同步出尽 → speaking→listening(turn:end 时以最近帧时刻 50ms 开冷却窗到 1550ms)。
+    // 7 帧闭环 + 2 帧高概率:若无 EchoGuard 抑制,这 2 帧会触 speech_start 进 endpointing;
+    // 故「仍 listening」证明是冷却窗低能量抑制起了作用(而非 VAD 没检出)。
     const { deps, transport, bus } = makeDeps({
-      echoGuard: { enabled: true, confirmFrames: 5, minSpeechProb: 0.5, minEnergy: 0 },
+      vad: new StubVadDetector([0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.9, 0.9]),
+      echoGuard: guard({ confirmFrames: 1, cooldownMs: 1500, cooldownRmsThreshold: 0.03 }),
+    });
+    const { events } = recorders(transport, bus);
+    const loop = new VoiceLoop(deps);
+    loop.start();
+
+    await driveSpeechThenSilence(transport);
+    await flush();
+    expect(loop.state).toBe('listening'); // 回合走完
+
+    const before = events.length;
+    // 冷却窗起点 = turn:end 时最近帧时刻(10_050ms)→ 窗到 11_550ms;取窗内帧(1000ms < 11_550)。
+    // 低能量混响尾(0.01 < 0.03)→ 被挡,不进 endpointing。
+    transport.sendAudio(micFrame(1000, 0.01));
+    transport.sendAudio(micFrame(1010, 0.01));
+    await flush();
+
+    expect(loop.state).toBe('listening'); // 未被混响尾带进 endpointing
+    expect(events.length).toBe(before); // 无新 vad:speech_start 事件
+  });
+
+  it('Tier2 冷却窗:窗内高能量真语音放行 → 进 endpointing(允许用户立刻回话)', async () => {
+    const { deps, transport, bus } = makeDeps({
+      // 7 帧闭环 + 2 帧高概率(供窗内 speech_start)。
+      vad: new StubVadDetector([0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.9, 0.9]),
+      echoGuard: guard({ confirmFrames: 1, cooldownMs: 1500, cooldownRmsThreshold: 0.03 }),
+    });
+    const loop = new VoiceLoop(deps);
+    loop.start();
+
+    await driveSpeechThenSilence(transport);
+    await flush();
+    expect(loop.state).toBe('listening');
+
+    // 冷却窗内(1000ms < 11_550ms)高能量(0.5 ≥ 0.03)+ 连续 2 帧触 VAD speech_start → 放行进 endpointing。
+    transport.sendAudio(micFrame(1000, 0.5));
+    transport.sendAudio(micFrame(1010, 0.5));
+    await flush();
+
+    expect(loop.state).toBe('endpointing'); // 高能量真语音放行
+  });
+
+  it('Tier2→常态:冷却窗结束后恢复 base 阈,低能量也放行(灵敏度回常态)', async () => {
+    // base=0 → 冷却窗外任何被 VAD 判有声的帧都放行(常态灵敏度)。
+    const { deps, transport, bus } = makeDeps({
+      // 7 帧闭环 + 2 帧高概率(供冷却窗外 speech_start)。
+      vad: new StubVadDetector([0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.9, 0.9]),
+      echoGuard: guard({ confirmFrames: 1, cooldownMs: 1500, baseRmsThreshold: 0, cooldownRmsThreshold: 0.03 }),
+    });
+    const loop = new VoiceLoop(deps);
+    loop.start();
+
+    await driveSpeechThenSilence(transport);
+    await flush();
+    expect(loop.state).toBe('listening');
+
+    // 冷却窗起点 = turn:end 时最近帧时刻(10_050ms)→ 窗到 11_550ms。
+    // 取窗外帧时刻(13_000ms > 11_550ms)低能量(0.01)但 base=0 → 放行;连续 2 帧触 speech_start 进 endpointing。
+    transport.sendAudio(micFrame(13_000, 0.01));
+    transport.sendAudio(micFrame(13_010, 0.01));
+    await flush();
+
+    expect(loop.state).toBe('endpointing'); // 冷却结束恢复常态,低能量也放行
+  });
+
+  it('非说话期常态(未注入冷却影响):注入 EchoGuard 后正常闭环仍走通', async () => {
+    const { deps, transport, bus } = makeDeps({
+      echoGuard: guard({ confirmFrames: 1, baseRmsThreshold: 0 }),
     });
     const { down, events } = recorders(transport, bus);
     const loop = new VoiceLoop(deps);
@@ -194,14 +280,13 @@ describe('runtime/VoiceLoop EchoGuard 自打断防护', () => {
     await driveSpeechThenSilence(transport);
     await flush();
 
-    // 正常闭环不受 EchoGuard 影响(端点检测在 listening/endpointing,EchoGuard 不参与)
     expect(loop.state).toBe('listening');
     const actions = events.map((e) => e.action).filter((a) => a !== 'turn:start');
     expect(actions).toEqual(['vad:speech_start', 'stt:final', 'tts:first_audio', 'turn:end']);
     expect(down.length).toBeGreaterThan(0);
   });
 
-  it('危机/硬打断豁免:hardInterrupt 标注下单帧即打断(不被 N 帧拖延)', async () => {
+  it('危机/硬打断豁免:hardInterrupt 标注下低能量单帧即打断(不被 RMS/N 帧拖延)', async () => {
     const mem = fakeMemory();
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => {
@@ -209,10 +294,9 @@ describe('runtime/VoiceLoop EchoGuard 自打断防护', () => {
     });
     const { deps, transport, bus } = makeDeps({
       memory: { appendMessage: mem.appendMessage },
-      // 7~8:speaking 期两帧高置信触 speech_start;但 confirmFrames=10 远大于此 → 唯豁免才打断。
       vad: new StubVadDetector([0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.9, 0.9]),
-      echoGuard: { enabled: true, confirmFrames: 10, minSpeechProb: 0.5, minEnergy: 0 },
-      // 注入 attention + buildSignal 恒标 hardInterrupt → 豁免去抖立即打断。
+      // 高阈 + 高 N + 低能量帧:唯豁免才能打断。
+      echoGuard: guard({ confirmFrames: 10, cooldownRmsThreshold: 0.9 }),
       attention: {
         mode: 'companion',
         buildSignal: () => ({ sustainedMs: 0, hardInterrupt: true }),
@@ -232,9 +316,8 @@ describe('runtime/VoiceLoop EchoGuard 自打断防护', () => {
     await flush();
     expect(loop.state).toBe('speaking');
 
-    // 仅一帧:因 hardInterrupt 豁免绕过 N 帧去抖,首帧即打断(若无豁免,N=10 远不够)。
-    // 只发一帧避免打断回 listening 后又被多余高帧带回 endpointing(那会掩盖「单帧即打断」的断言)。
-    transport.sendAudio(micFrame(20_000));
+    // 仅一帧低能量(0.01),因 hardInterrupt 豁免绕过 RMS/N 帧去抖,首帧即打断。
+    transport.sendAudio(micFrame(20_000, 0.01));
     await flush();
 
     expect(loop.state).toBe('listening');
@@ -245,24 +328,22 @@ describe('runtime/VoiceLoop EchoGuard 自打断防护', () => {
     await flush();
   });
 
-  it('能量门:speaking 期连续帧 prob 达标但能量为 0 且 minEnergy>0 → 不打断', async () => {
-    const mem = fakeMemory();
+  it('可观测:注入 echoGuardObserver → speaking 期每帧决策(tier/rms/pass)经回调抛出(day1 RMS 日志)', async () => {
+    const decisions: { tier: string; pass: boolean; energy01: number }[] = [];
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => {
       release = r;
     });
-    // micFrame 的 samples 全 0 → 能量 0;minEnergy=0.3 → 永不达标 → 压制。
     const { deps, transport, bus } = makeDeps({
-      memory: { appendMessage: mem.appendMessage },
-      vad: new StubVadDetector([0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.9, 0.9, 0.9, 0.9, 0.9]),
-      echoGuard: { enabled: true, confirmFrames: 2, minSpeechProb: 0.5, minEnergy: 0.3 },
+      vad: new StubVadDetector([0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.9, 0.9, 0.9]),
+      echoGuard: guard({ confirmFrames: 1, cooldownRmsThreshold: 0.03 }),
+      echoGuardObserver: (d) => decisions.push({ tier: d.tier, pass: d.pass, energy01: d.energy01 }),
       send: async (_t, onToken) => {
         onToken('我正在说一句话。');
         await gate;
         return '我正在说一句话。';
       },
     });
-    const clearSpy = vi.spyOn(transport, 'clearBuffer');
     recorders(transport, bus);
     const loop = new VoiceLoop(deps);
     loop.start();
@@ -271,12 +352,13 @@ describe('runtime/VoiceLoop EchoGuard 自打断防护', () => {
     await flush();
     expect(loop.state).toBe('speaking');
 
-    for (let i = 0; i < 5; i++) transport.sendAudio(micFrame(20_000 + i * 10));
+    transport.sendAudio(micFrame(20_000, 0.01)); // speaking 期低能量回声 → 挡
     await flush();
 
-    // 能量恒 0 < 0.3 → EchoGuard 永不确认 → 不打断
-    expect(loop.state).toBe('speaking');
-    expect(clearSpy).not.toHaveBeenCalled();
+    const speakingDecisions = decisions.filter((d) => d.tier === 'speaking');
+    expect(speakingDecisions.length).toBeGreaterThan(0);
+    expect(speakingDecisions.every((d) => d.pass === false)).toBe(true);
+    expect(speakingDecisions[0]!.energy01).toBeCloseTo(0.01, 2);
 
     release();
     await flush();

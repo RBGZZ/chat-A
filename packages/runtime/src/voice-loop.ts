@@ -22,7 +22,12 @@
  */
 import type { AudioFrame, AudioTransport, Unsubscribe } from '@chat-a/protocol';
 import { makeBusEvent, makeDataFrame, type PcmFrame } from '@chat-a/protocol';
-import type { VadDetector, TurnDetector, EchoGuardConfig } from '@chat-a/voice-detect';
+import type {
+  VadDetector,
+  TurnDetector,
+  EchoGuardConfig,
+  EchoGuardDecision,
+} from '@chat-a/voice-detect';
 import { EchoGuardGate } from '@chat-a/voice-detect';
 import type { SttProvider, TtsProvider, PcmChunk, SttEmotion, TtsOptions } from '@chat-a/providers';
 import type { SttEmotionLike } from '@chat-a/persona';
@@ -126,6 +131,13 @@ export interface VoiceLoopDeps {
    * ⚠️ 这**不是** AEC(回声消除需声学/原生方案);仅软件侧部分缓解。危机/硬打断信号豁免 N 帧去抖。
    */
   readonly echoGuard?: EchoGuardConfig;
+  /**
+   * EchoGuard 决策观测回调(day1 RMS instrument,§3.1「看不见就调不动」,**可选**、纯加法)。
+   * 注入后每帧门控决策(RMS 值/当前 tier/是否放行/连续计数)经此抛出,供装配层打结构化日志/接 trace;
+   * 不注入(缺省)→ VoiceLoop 用一个最简结构化日志默认观测(仅在注入了 echoGuard 时生效)。
+   * 仅在 `echoGuard.enabled` 时被装上;回调抛错被 Gate 吞,绝不影响门控本身(§3.2)。
+   */
+  readonly echoGuardObserver?: (decision: EchoGuardDecision) => void;
   /**
    * audio-in 直路端口（path B，§4 双路径 / §7#5 prosody，**可选**、纯加法）。
    * 不注入（缺省）→ 纯走现有 STT→LLM 路径，行为与产出**逐字不变**。
@@ -277,9 +289,12 @@ export class VoiceLoop {
     this.#now = deps.clock ?? Date.now;
     this.#attention = deps.attention;
     // EchoGuard:仅在注入且 enabled 时启用;否则 undefined → speaking 期 barge-in 逐字现状。
+    // 可观测(§3.1 day1 RMS instrument):优先用注入的 echoGuardObserver,否则用最简结构化日志默认观测。
     this.#echoGuard =
       deps.echoGuard !== undefined && deps.echoGuard.enabled
-        ? new EchoGuardGate(deps.echoGuard)
+        ? new EchoGuardGate(deps.echoGuard, {
+            onDecision: deps.echoGuardObserver ?? VoiceLoop.#defaultEchoGuardObserver,
+          })
         : undefined;
     this.#omni = deps.omni;
     this.#composeOmniInstructions = deps.composeOmniInstructions;
@@ -372,6 +387,7 @@ export class VoiceLoop {
     this.#replyAccum = '';
     this.#audioBuf = [];
     this.#userSpeechStartAtMs = null;
+    this.#echoGuard?.resetTiers(); // 全量重置 EchoGuard 档位(清说话/冷却,start/stop 干净起步)
   }
 
   /** abort 当前回合的取消控制器（若有）并清空句柄；幂等、不抛（§3.2）。 */
@@ -398,7 +414,16 @@ export class VoiceLoop {
       console.warn(`[VoiceLoop] 非法迁移：${this.#state} --${event}--> (忽略,不抛)`);
       return false;
     }
+    const from = this.#state;
     this.#state = to;
+    // EchoGuard Tier1/Tier2 切换:进入 speaking → 硬门控;离开 speaking → 开冷却窗(承 §3.1)。
+    // 集中在迁移处驱动,避免散落各调用点漏配;未注入 EchoGuard 时此调用为 no-op(#echoGuard undefined)。
+    // 冷却窗起点用**最近一帧时间戳**对齐 push 的帧时间轴(确定性,不读墙钟);无帧时回落注入时钟。
+    if (from !== 'speaking' && to === 'speaking') {
+      this.#echoGuard?.setSpeaking(true, this.#lastFrameAtMs);
+    } else if (from === 'speaking' && to !== 'speaking') {
+      this.#echoGuard?.setSpeaking(false, this.#lastFrameAtMs);
+    }
     try {
       this.#emit(event, opts);
     } catch (err) {
@@ -441,13 +466,21 @@ export class VoiceLoop {
     if (frame.type !== 'audio:input') return; // 只消费上行麦克风帧
     try {
       const pcm = frame.payload.audio; // payload.audio 本就是 PcmFrame，直接喂 VAD
-      this.#lastFrameSamples = pcm.samples; // 供 EchoGuard 算本帧能量(仅 minEnergy>0 时用)
+      this.#lastFrameSamples = pcm.samples; // 供 EchoGuard 算本帧能量
+      this.#lastFrameAtMs = pcm.timestampMs; // 供 EchoGuard 冷却窗起点对齐帧时间轴(确定性)
       const result = this.#vad.pushFrame(pcm);
       const evt = result.event;
 
-      // listening：检出语音起点 → endpointing，开始累积
+      // listening：检出语音起点 → endpointing，开始累积。
+      // EchoGuard Tier2 冷却窗(§3.1):agent 刚说完 cooldownMs 内,用更高 RMS 门槛吸收混响衰减尾巴——
+      // 低能量的混响尾被挡(不开启虚假回合),高能量真语音放行(允许用户立刻回话)。
+      // 仅在注入 EchoGuard 时介入;冷却窗外(open 态)以 base 门槛判,常态灵敏度逐字不变。
       if (this.#state === 'listening') {
         if (evt?.type === 'speech_start') {
+          // Tier2 冷却窗抑制查询(纯查询、不动 barge-in 去抖计数):冷却窗内低能量混响尾 → 挡。
+          if (this.#echoGuard !== undefined && this.#echoGuardSuppresses(pcm.timestampMs)) {
+            return; // 冷却窗内低能量混响尾 → 不进 endpointing
+          }
           this.#audioBuf = [pcm];
           this.#lastVoiceAtMs = pcm.timestampMs;
           this.#go('vad:speech_start');
@@ -858,15 +891,30 @@ export class VoiceLoop {
   static readonly #FULL_SCALE = 32_768;
 
   /**
-   * speaking 期 EchoGuard 去抖确认（仅在注入 `#echoGuard` 时调用）。
+   * 默认 EchoGuard 决策观测(§3.1 day1 RMS instrument):未注入自定义观测时用此最简结构化日志。
+   * 只在「被门控挡住」时打 debug(放行属常态,不刷屏);RMS/tier/门槛/连续计数全带,便于真机调阈。
+   * 装配层可经 `echoGuardObserver` 注入接 observability 包的 trace(本模块不反向依赖 observability)。
+   */
+  static readonly #defaultEchoGuardObserver = (d: EchoGuardDecision): void => {
+    if (d.tier === 'disabled') return;
+    if (!d.pass) {
+      console.debug(
+        `[EchoGuard] 挡 tier=${d.tier} rms=${d.energy01.toFixed(4)} thr=${d.rmsThreshold.toFixed(4)} run=${d.run}`,
+      );
+    }
+  };
+
+  /**
+   * speaking 期 EchoGuard Tier1 硬门控放行判定（仅在注入 `#echoGuard` 时调用）。
    *
    * 返回 true 表示「应放行到既有打断判定」：
    *   1. **危机/硬打断豁免**：若注入了 attention 的 `buildSignal` 且其信号标 `crisis`/`hardInterrupt`，
-   *      绕过 N 帧去抖立即放行（承「救命不可配」§法律底线）。
-   *   2. 否则把本帧 `{prob, energy01, speakingFromVad}` 喂 `EchoGuardGate`，连续 N 帧高置信才放行；
-   *      未确认 → 返回 false（保持 speaking，只感知不打断）。
+   *      绕过 RMS/N 帧去抖立即放行（承「救命不可配」§法律底线）。
+   *   2. 否则把本帧喂 `EchoGuardGate.push`：speaking 档用**最高 RMS 门槛**(`cooldownRmsThreshold`)
+   *      压住自家 TTS 回声(低能量回声被挡),真人足够响 + 连续 N 帧高置信才放行(不变「打不断」)；
+   *      未放行 → 返回 false（保持 speaking，只感知不打断）。
    *
-   * `prob` 取自 VAD 结果；`energy01` 由帧样本 RMS 归一化（仅 `minEnergy>0` 时参与，纯计算无副作用）。
+   * `prob` 取自 VAD 结果；`energy01` 由帧样本 RMS 归一化喂双层门槛；`atMs` 喂 Gate 判档(确定性)。
    * 任何异常被捕获（§3.2 优雅降级）：兜底放行（宁可不漏掉用户，也不因防护 bug 变「打不断」）。
    */
   #echoGuardConfirms(
@@ -888,20 +936,44 @@ export class VoiceLoop {
           return true;
         }
       }
-      const verdict = gate.push({
+      const decision = gate.push({
         prob: result.prob,
         energy01: this.#frameEnergy01(),
         // VAD「说话中」或本帧即 speech_start 事件都视作有声(speech_start 当帧 result.speaking 可能尚未翻真)。
         speakingFromVad: result.speaking || isSpeechStart,
+        atMs: nowFrameMs, // 帧时刻喂 Gate 判冷却窗内/外(确定性,不读墙钟)
       });
-      return verdict.confirmed;
+      return decision.pass;
     } catch (err) {
       console.warn('[VoiceLoop] EchoGuard 判定抛错(兜底放行,不变打不断):', err);
       return true;
     }
   }
 
-  /** 本帧归一化 RMS 能量(0~1);仅 EchoGuard `minEnergy>0` 时实际影响判定。 */
+  /** 最近一帧时间戳(ms);供 EchoGuard 冷却窗起点对齐帧时间轴(确定性,不读墙钟)。 */
+  #lastFrameAtMs = 0;
+  /**
+   * Tier2 冷却窗输入抑制(listening 期,仅在注入 `#echoGuard` 时调用):
+   * 问 Gate「这帧是不是 agent 刚说完的低能量混响尾」——是则抑制(不开启虚假回合),否则放行。
+   * 纯查询、不动 barge-in 去抖计数;异常被吞 → 兜底不抑制(宁可多接一句也不漏掉用户,§3.2)。
+   */
+  #echoGuardSuppresses(nowFrameMs: number): boolean {
+    const gate = this.#echoGuard;
+    if (gate === undefined) return false;
+    try {
+      return gate.shouldSuppressInput({
+        prob: 1,
+        energy01: this.#frameEnergy01(),
+        speakingFromVad: true,
+        atMs: nowFrameMs,
+      });
+    } catch (err) {
+      console.warn('[VoiceLoop] EchoGuard 冷却窗抑制判定抛错(兜底不抑制):', err);
+      return false;
+    }
+  }
+
+  /** 本帧归一化 RMS 能量(0~1);喂 EchoGuard 双层 RMS 门槛判定。 */
   #lastFrameSamples: Int16Array | null = null;
   #frameEnergy01(): number {
     const s = this.#lastFrameSamples;
