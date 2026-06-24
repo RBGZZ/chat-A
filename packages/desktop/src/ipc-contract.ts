@@ -39,6 +39,16 @@ export const IPC = {
   // —— 记忆/设置(代理D) ——
   /** 渲染 → 主:只读列出最近 N 条记忆(陪伴工具记忆查看面板;绝不触发写/巩固)。 */
   memoryList: 'memory:list',
+  // —— 语种控制(本批次:显示/合成/复刻三独立语种 + 朗读开关) ——
+  /** 渲染 → 主:读当前三语种 + 朗读开关 + 朗读是否可用(语言面板初值)。 */
+  langGet: 'lang:get',
+  /** 渲染 → 主:应用语种/朗读设置(运行时生效 + 持久化到 .env.local)。 */
+  langSet: 'lang:set',
+  // —— 朗读(本批次:文字回复 → 渲染层 Web Audio 播放) ——
+  /** 主 → 渲染:一块合成 PCM(Int16@sampleRate),渲染层排队无缝播放。 */
+  ttsAudio: 'tts:audio',
+  /** 主 → 渲染:停止并清空播放队列(回合结束/被打断)。 */
+  ttsAudioStop: 'tts:audio-stop',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
@@ -465,3 +475,224 @@ export function toMemoryItems(records: readonly MemoryRecordLike[]): readonly Me
     createdAtMs: r.createdAtMs,
   }));
 }
+
+// ═══════════════════════════════ 三独立语种控制 + 朗读(本批次) ═══════════════════════════════
+//
+// 显示/合成/复刻**三个独立语种**(承 canonical §4.1 语种解耦)+ 朗读开关。语言面板里:
+//  1) 显示文字语种 displayLang(看到的)→ 驱动 LLM 回复语言(Conversation 的 outputLang),env CHAT_A_DISPLAY_LANG;
+//  2) 合成音频语种 ttsLang(听到的)→ TTS 的 language + 决定是否翻译,env CHAT_A_TTS_LANG,特殊值 follow=跟随显示;
+//  3) 复刻参考语种 cloneRefLang(复刻录音是什么语言)→ 复刻时用,env CHAT_A_VOICE_CLONE_REF_LANG。
+//
+// **显示/合成解耦是一等概念**:displayText(进气泡)与 spokenText(喂 TTS)是两个独立字段,绝不假设相等。
+// 下列纯函数把「语种解析(effectiveTtsLang / 是否翻译 / 默认值)」钉死成 ipc-contract 风格纯逻辑(headless 可单测)。
+
+/** ttsLang 的特殊值:跟随显示语种(默认)。大小写不敏感。 */
+export const TTS_LANG_FOLLOW = 'follow';
+
+/** 显示语种特殊值/空 = 自动(不强制 LLM 回复语言;TTS 也不下发 language)。 */
+export const DISPLAY_LANG_AUTO = '';
+
+/** 语言面板可编辑表单(渲染↔主):三独立语种(ISO 码;空=自动/跟随)+ 朗读开关 + 朗读是否可用。 */
+export interface LangForm {
+  /** 显示文字语种(ISO:''=自动 / zh / en / ja / ko …)。 */
+  readonly displayLang: string;
+  /** 合成音频语种(''/follow=跟随显示 / 具体 ISO)。 */
+  readonly ttsLang: string;
+  /** 复刻参考语种(''=不指定 / 具体 ISO);用于即时复刻/未来 provider(qwen 云复刻语种中性)。 */
+  readonly cloneRefLang: string;
+  /** 朗读开关(渲染层据此决定是否朗读小雪文字回复)。 */
+  readonly speak: boolean;
+  /** 朗读是否可用(TTS provider 解析为真合成才 true;Fake/无真合成→false,渲染层禁开关并提示)。 */
+  readonly speakAvailable: boolean;
+}
+
+/** 规整一个语种码(纯):trim;`auto`/空 → ''(自动)。不强制大小写(ISO 码与 Qwen 名映射另在 providers 侧做)。 */
+export function normalizeLangCode(raw: string | undefined): string {
+  const s = (raw ?? '').trim();
+  if (s.length === 0 || s.toLowerCase() === 'auto') return DISPLAY_LANG_AUTO;
+  return s;
+}
+
+/**
+ * 规整 ttsLang(纯):trim;空 → follow(默认跟随);`follow`(大小写不敏感)→ 'follow';否则视作语种码(经 normalizeLangCode)。
+ * 返回 'follow' 或具体语种码或 ''(用户显式填 auto)。
+ */
+export function normalizeTtsLang(raw: string | undefined): string {
+  const s = (raw ?? '').trim();
+  if (s.length === 0) return TTS_LANG_FOLLOW; // 缺省=跟随显示。
+  if (s.toLowerCase() === TTS_LANG_FOLLOW) return TTS_LANG_FOLLOW;
+  return normalizeLangCode(s);
+}
+
+/**
+ * 算「实际生效的合成语种」(纯,§4.1):
+ * - ttsLang 为 follow / 空 → = displayLang(跟随显示);
+ * - 否则 → = ttsLang(已规整的具体码或 ''=自动)。
+ * 返回空串表示自动(TTS 不下发 language)。
+ */
+export function resolveEffectiveTtsLang(displayLang: string, ttsLang: string): string {
+  const dl = normalizeLangCode(displayLang);
+  const tl = normalizeTtsLang(ttsLang);
+  if (tl === TTS_LANG_FOLLOW) return dl;
+  return tl;
+}
+
+/** 朗读合成计划(纯解析结果):喂 TTS 的语种 + 是否需先翻译(displayText→spokenText)。 */
+export interface SpokenPlan {
+  /**
+   * 喂 TTS 的目标语种(effectiveTtsLang);空串=自动(TTS opts 不下发 language)。
+   * 渲染/合成时:空 → opts.language 省略;非空 → opts.language=该码。
+   */
+  readonly ttsLang: string;
+  /**
+   * 是否需要走一次轻量 LLM 翻译把显示文字译成合成语种:
+   * - effectiveTtsLang 为空/自动 → false(直接合成显示 reply,零额外开销);
+   * - effectiveTtsLang == displayLang → false(同语种,直接合成);
+   * - effectiveTtsLang 具体且 ≠ displayLang(含 displayLang 为空时)→ true(走翻译通道)。
+   */
+  readonly needsTranslation: boolean;
+}
+
+/**
+ * 算朗读合成计划(纯,§4.1 显示/合成解耦核心;golden 钉死跟随/相同/不同/自动各分支):
+ * 入参为面板里的 displayLang(可空=自动)与 ttsLang(可 follow/空/具体)。
+ */
+export function resolveSpokenPlan(displayLang: string, ttsLang: string): SpokenPlan {
+  const dl = normalizeLangCode(displayLang);
+  const effective = resolveEffectiveTtsLang(displayLang, ttsLang);
+  // 自动(空)→ 直接合成显示 reply,不发 language、不翻译。
+  if (effective.length === 0) return { ttsLang: '', needsTranslation: false };
+  // 与显示语种相同 → 直接合成显示 reply。
+  if (effective === dl) return { ttsLang: effective, needsTranslation: false };
+  // 具体且与显示不同(含 displayLang 为空) → 走翻译通道。
+  return { ttsLang: effective, needsTranslation: true };
+}
+
+/** ISO 语种码 → 翻译提示用的中文语言名(单一真相源;未知码回落原码)。 */
+const LANG_NAME_ZH: Readonly<Record<string, string>> = {
+  zh: '中文',
+  en: '英文',
+  ja: '日文',
+  ko: '韩文',
+  de: '德文',
+  fr: '法文',
+  es: '西班牙文',
+  ru: '俄文',
+  it: '意大利文',
+  pt: '葡萄牙文',
+};
+
+/** 取语种码的中文名(纯;未知 → 原码)。 */
+export function langNameZh(code: string): string {
+  return LANG_NAME_ZH[code.trim().toLowerCase()] ?? code;
+}
+
+/**
+ * 组装「轻量翻译」的 system 提示(纯,§4.1 翻译通道):把显示文字按目标语种自然口语翻译,
+ * 保留语气与人格,**只输出译文**。具体语种名用 {@link langNameZh}。
+ */
+export function buildTranslateSystemPrompt(targetLang: string): string {
+  const name = langNameZh(targetLang);
+  return (
+    `把下面这句话**按${name}的语言习惯自然口语地翻译**,保留说话人的语气与人格,` +
+    `**只输出译文**,不加任何解释、不加引号、不加前后缀。`
+  );
+}
+
+/** translateForSpeech 注入面(便于 headless 单测;不依赖真 LLM)。 */
+export interface TranslatePort {
+  /** 真翻译:吃 system + user(显示文字)→ resolve 译文;失败可抛(调用方降级)。 */
+  readonly complete: (system: string, user: string) => Promise<string>;
+}
+
+/**
+ * 把显示文字翻译成合成语种(纯编排,§4.1;翻译失败 → 降级返回原文,有声优先、不崩):
+ * - 组装翻译 system → port.complete;trim 非空 → 返回译文;
+ * - 抛错 / 译文空白 → 返回原 displayText(降级直接合成显示 reply)。
+ */
+export async function translateForSpeech(
+  port: TranslatePort,
+  displayText: string,
+  targetLang: string,
+): Promise<string> {
+  try {
+    const out = (await port.complete(buildTranslateSystemPrompt(targetLang), displayText)).trim();
+    return out.length > 0 ? out : displayText;
+  } catch {
+    return displayText; // 降级:有声优先,直接合成显示 reply。
+  }
+}
+
+// ───────────────────────────── 朗读:合成块编排(纯) ─────────────────────────────
+
+/** 一块合成 PCM(主→渲染):Int16 样本 + 采样率;渲染层 Web Audio 排队无缝播放。 */
+export interface TtsAudioChunk {
+  /** Int16 PCM 样本(mono);经 IPC 结构化克隆透传。 */
+  readonly pcm: Int16Array;
+  /** 采样率(Hz;TTS 出常为 24000)。 */
+  readonly sampleRate: number;
+}
+
+/** runSpeakReply 注入面(headless 单测:不依赖真 TTS / 分句器 / electron)。 */
+export interface SpeakReplyPort {
+  /** 把整段回复分句(传 SentenceSplitter 风格:push+flush;此处简化为一次性分句函数)。 */
+  readonly splitSentences: (text: string) => readonly string[];
+  /** 逐句合成:吃句子 + 目标语种(空=不下发)→ 异步产出 Int16 PCM 块流;signal 可取消。 */
+  readonly synthesize: (
+    sentence: string,
+    ttsLang: string,
+    signal: AbortSignal,
+  ) => AsyncIterable<TtsAudioChunk>;
+  /** 翻译通道(needsTranslation 时调;返回 spokenText)。 */
+  readonly translate: (displayText: string, targetLang: string) => Promise<string>;
+  /** 向渲染层推一块音频(主进程传 emit(IPC.ttsAudio, chunk))。 */
+  readonly emitAudio: (chunk: TtsAudioChunk) => void;
+}
+
+/**
+ * 编排「朗读一条回复」(纯,可单测,§3.2,§4.1):
+ * - 据 {@link resolveSpokenPlan} 算合成语种 + 是否翻译;needsTranslation → 先 translate 得 spokenText;
+ * - spokenText 分句 → 逐句 synthesize → 每块经 emitAudio 推渲染层;
+ * - 全程尊重 signal:已 abort 即提前返回(被打断/回合切换);任何合成错误吞掉(有声尽力、不崩)。
+ * 返回实际朗读用的 spokenText(便于追溯/单测:解耦后它可能 ≠ displayText)。
+ */
+export async function runSpeakReply(
+  port: SpeakReplyPort,
+  displayText: string,
+  displayLang: string,
+  ttsLang: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const plan = resolveSpokenPlan(displayLang, ttsLang);
+  const spokenText = plan.needsTranslation
+    ? await port.translate(displayText, plan.ttsLang)
+    : displayText;
+  if (signal.aborted) return spokenText; // 翻译期间被打断 → 不再合成。
+  const sentences = port.splitSentences(spokenText);
+  for (const sentence of sentences) {
+    if (signal.aborted) break;
+    if (sentence.trim().length === 0) continue;
+    try {
+      for await (const chunk of port.synthesize(sentence, plan.ttsLang, signal)) {
+        if (signal.aborted) break;
+        port.emitAudio(chunk);
+      }
+    } catch {
+      // 单句合成失败 → 跳过该句,继续后续(有声尽力,不崩);被 abort 抛出也在此吞掉。
+      if (signal.aborted) break;
+    }
+  }
+  return spokenText;
+}
+
+/**
+ * 解析「朗读是否可用」(纯):TTS 配置 kind 为 'fake' 视为无真合成 → 不可用(朗读开关禁用、UI 提示)。
+ * 其余 kind(qwen-tts/openai-compat/kokoro/gpt-sovits/edge)视为可用(真机有 key/服务时合成)。
+ */
+export function isSpeakAvailable(ttsKind: string): boolean {
+  return ttsKind !== 'fake';
+}
+
+/** 朗读不可用的标准中文提示(单一真相源)。 */
+export const SPEAK_UNAVAILABLE_REASON =
+  '朗读需要可用的语音合成(TTS);请在项目根 .env.local 配置 CHAT_A_TTS_KIND/MODEL/KEY(如 qwen-tts)后重启。';

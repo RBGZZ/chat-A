@@ -74,6 +74,11 @@ export interface XiaoxueApi {
   updatePersona(form: PersonaForm): Promise<PersonaForm>;
   // —— 记忆查看(代理D)——
   listMemories(limit?: number): Promise<readonly MemoryItem[]>;
+  // —— 三语种 + 朗读(本批次)——
+  getLang(): Promise<LangForm>;
+  setLang(form: Partial<LangForm>): Promise<LangForm>;
+  onTtsAudio(cb: (chunk: TtsAudioChunk) => void): () => void;
+  onTtsAudioStop(cb: () => void): () => void;
 }
 
 // —— 代理B:主动消息形态(与 ipc-contract 的 ProactiveMessage 同名同义)。
@@ -101,4 +106,21 @@ export interface MemoryItem {
   readonly importance: number;
   readonly lastSeenAtMs: number;
   readonly createdAtMs: number;
+}
+
+// —— 三语种 + 朗读(本批次;与 ipc-contract 的 LangForm/TtsAudioChunk 形态一致) ——
+
+/** 语言面板表单:三独立语种 + 朗读开关 + 朗读是否可用。 */
+export interface LangForm {
+  readonly displayLang: string;
+  readonly ttsLang: string;
+  readonly cloneRefLang: string;
+  readonly speak: boolean;
+  readonly speakAvailable: boolean;
+}
+
+/** 一块合成 PCM(Int16@sampleRate);渲染层 Web Audio 排队播放。 */
+export interface TtsAudioChunk {
+  readonly pcm: Int16Array;
+  readonly sampleRate: number;
 }

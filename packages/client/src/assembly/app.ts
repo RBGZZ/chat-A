@@ -20,7 +20,16 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { cwd as procCwd, env as procEnv } from 'node:process';
 import { Conversation, LightVoiceBus } from '@chat-a/runtime';
-import { createLlm, loadLlmConfig, type LlmConfig, type LlmProvider } from '@chat-a/providers';
+import {
+  createLlm,
+  loadLlmConfig,
+  createTts,
+  loadTtsConfig,
+  type LlmConfig,
+  type LlmProvider,
+  type TtsProvider,
+  type TtsConfig,
+} from '@chat-a/providers';
 import { initTelemetry } from '@chat-a/observability';
 import { createMemoryStoreFromEnv, type MemoryStore } from '@chat-a/memory';
 import {
@@ -55,6 +64,21 @@ export function loadEnvLocal(env: NodeJS.ProcessEnv = procEnv, cwd: string = pro
 export interface MemoryInfo {
   readonly backend: string;
   readonly dbPath?: string;
+}
+
+/**
+ * 三独立语种 + 朗读运行时设置(承 canonical §4.1 语种解耦):
+ * - `displayLang`:显示文字语种(驱动 LLM 回复语言 = Conversation 的 outputLang;''=自动)。
+ * - `ttsLang`:合成音频语种(TTS 的 language;'follow'/''=跟随显示)。**desktop 侧解析,app 只透传给 voice-profile env**。
+ * - `cloneRefLang`:复刻参考语种(复刻录音是什么语言;''=不指定)。
+ * - `speak`:朗读开关(on/off)。
+ * 各字段省略 = 不改动该项(部分更新友好)。
+ */
+export interface LangSettings {
+  readonly displayLang?: string;
+  readonly ttsLang?: string;
+  readonly cloneRefLang?: string;
+  readonly speak?: boolean;
 }
 
 /**
@@ -99,6 +123,23 @@ export interface AppHandle {
    * 返回应用后的可编辑视图。
    */
   applyPersona(patch: PersonaPatch): PersonaView;
+  /**
+   * TTS provider(本批次「朗读」用):文字回合后据语种解耦合成 PCM 推渲染层。
+   * 由 `createTts(loadTtsConfig(env))` 装配;Fake/无真合成时朗读不可用(见 ttsConfig.kind),
+   * 主进程据此禁用朗读开关、绝不崩。语音模式(VoiceLoop)另有自己的 TTS 装配,互不影响。
+   */
+  readonly tts: TtsProvider;
+  /** TTS 配置(横幅/朗读可用性判定用;kind==='fake' → 朗读不可用)。 */
+  readonly ttsConfig: TtsConfig;
+  /** 当前显示文字语种(''=自动);经 getter 暴露,`applyLang` 改后读取拿最新。 */
+  readonly displayLang: string;
+  /**
+   * 应用语种/朗读设置(运行时生效,§4.1):
+   * - 改 `displayLang` → **重建 Conversation**(沿用 sessionId,保留 memory/PAD)让新 outputLang 进系统提示;
+   * - `ttsLang`/`cloneRefLang`/`speak` → 同步对应 env(供 voice-profile / 复刻 / 朗读读取),不重建 convo。
+   * 返回应用后的最终设置(各字段已规整)。
+   */
+  applyLang(settings: LangSettings): Required<LangSettings>;
   /** omni 直路系统提示组装(与文字链路同源 persona/记忆/语气);语音 omni 路用。 */
   readonly composeOmniInstructions: () => string | Promise<string>;
   /** 幂等收尾:关库 / 关 trace / 关 telemetry(失败吞,绝不抛);多次调只跑一次。 */
@@ -148,10 +189,21 @@ export function assembleApp(opts: AssembleAppOptions = {}): AppHandle {
   // 状态一致)。desktop 状态栏 / cli persona 摘要读它的 tone()。applyPersona 时随新种子重建。
   let personaEngine = new PersonaEngine({ seed, store: personaStore });
 
+  // 朗读 TTS(本批次,§4.1):desktop 文字回合后据语种解耦合成 PCM 推渲染层。
+  // createTts(loadTtsConfig(env)):有 key/服务 → 真合成;缺关键项自动降级 fake(kind==='fake' → 朗读不可用)。
+  // 语音模式(VoiceLoop)在 startVoiceMode 内另有自己的 TTS 装配,二者互不影响(此处仅供文字路朗读)。
+  const ttsConfig = loadTtsConfig(env);
+  const tts = createTts(ttsConfig);
+
+  // 显示文字语种(§4.1):驱动 LLM 回复语言(Conversation 的 outputLang)。CHAT_A_DISPLAY_LANG 空=自动(不注入)。
+  // 用 let + getter 暴露(仿 seed):applyLang 切换时重建 convo,读取始终拿最新。
+  let displayLang = (env['CHAT_A_DISPLAY_LANG'] ?? '').trim();
+
   // Conversation 工厂:`reset()` 用新 sessionId 重建全新上下文(同一套核心依赖)。
   // 注意:本共享层只装配**核心** Conversation(persona/memory/总线/trace 缺省);cli 的
   // LLM 认知升级 / 策略 / 语义召回 / 自我一致性等 opt-in 子系统仍由 cli 自己装配注入
   // (cli 不调用本工厂、用自己的 makeConvo)。desktop MVP 用本核心工厂即可文字可用。
+  // §4.1:仅在 displayLang 非空时传 outputLang(让 LLM 用该语种回复);空 → 不传 → 逐字现状(自动)。
   const makeConvo = (sid: string): Conversation =>
     new Conversation({
       bus,
@@ -160,6 +212,7 @@ export function assembleApp(opts: AssembleAppOptions = {}): AppHandle {
       personaSeed: seed,
       personaStore,
       sessionId: sid,
+      ...(displayLang.length > 0 ? { outputLang: displayLang } : {}),
     });
 
   let sessionId = randomUUID().slice(0, 8);
@@ -217,6 +270,45 @@ export function assembleApp(opts: AssembleAppOptions = {}): AppHandle {
       // 重建 Conversation:沿用同一 sessionId(对话不断、记忆续接),让新 seed 进系统提示。
       convo = makeConvo(sessionId);
       return personaViewOf(seed);
+    },
+    tts,
+    ttsConfig,
+    get displayLang(): string {
+      return displayLang;
+    },
+    applyLang(settings: LangSettings): Required<LangSettings> {
+      // displayLang 变更 → 同步 env(供横幅/复读)+ **重建 Conversation**(沿用 sessionId,保留 memory/PAD)让新 outputLang 生效。
+      if (settings.displayLang !== undefined) {
+        const next = settings.displayLang.trim();
+        if (next !== displayLang) {
+          displayLang = next;
+          env['CHAT_A_DISPLAY_LANG'] = next;
+          // 语音模式输出语种(voice-profile 读 CHAT_A_VOICE_OUTPUT_LANG)与显示语种对齐:
+          // 让免提路小雪也按显示语种说(空=自动,与文字路 outputLang 缺省一致)。
+          env['CHAT_A_VOICE_OUTPUT_LANG'] = next;
+          // 重建会话:对话不断、记忆续接,仅换 outputLang(空 → 不注入 = 自动)。
+          convo = makeConvo(sessionId);
+        }
+      }
+      // 合成语种:同步 voice-profile 读取的 CHAT_A_VOICE_OUTPUT_LANG(供语音模式)+ 本批次 CHAT_A_TTS_LANG(供朗读解析)。
+      // 注:朗读侧的 follow/翻译解析在 desktop ipc-contract 纯函数里做;此处只透传 env 真相,convo 不依赖它。
+      if (settings.ttsLang !== undefined) {
+        env['CHAT_A_TTS_LANG'] = settings.ttsLang;
+      }
+      // 复刻参考语种:同步 voice-profile 读取的 CHAT_A_VOICE_CLONE_REF_LANG(即时复刻/未来 provider 用)。
+      if (settings.cloneRefLang !== undefined) {
+        env['CHAT_A_VOICE_CLONE_REF_LANG'] = settings.cloneRefLang;
+      }
+      // 朗读开关:同步 CHAT_A_DESKTOP_SPEAK(desktop 主进程读它决定是否朗读)。
+      if (settings.speak !== undefined) {
+        env['CHAT_A_DESKTOP_SPEAK'] = settings.speak ? 'on' : 'off';
+      }
+      return {
+        displayLang,
+        ttsLang: (env['CHAT_A_TTS_LANG'] ?? '').trim(),
+        cloneRefLang: (env['CHAT_A_VOICE_CLONE_REF_LANG'] ?? '').trim(),
+        speak: (env['CHAT_A_DESKTOP_SPEAK'] ?? '').trim().toLowerCase() === 'on',
+      };
     },
     composeOmniInstructions: () => convo.composeOmniInstructions(),
     cleanup,

@@ -17,6 +17,8 @@ import {
   type ProactiveMessage,
   type PersonaForm, // 代理C
   type MemoryItem, // 代理D
+  type LangForm, // 三语种 + 朗读
+  type TtsAudioChunk, // 朗读 PCM 块
 } from './ipc-contract';
 
 /** 包装一个主→渲染推送订阅,返回退订函数(不泄漏 ipcRenderer / event 对象)。 */
@@ -58,6 +60,15 @@ export interface XiaoxueApi {
   // —— 记忆查看(代理D)——
   /** 只读列出最近 N 条记忆(陪伴工具记忆面板;主进程绝不触发写/巩固)。 */
   listMemories(limit?: number): Promise<readonly MemoryItem[]>;
+  // —— 三语种 + 朗读(本批次)——
+  /** 读当前三语种 + 朗读开关 + 朗读是否可用(语言面板初值)。 */
+  getLang(): Promise<LangForm>;
+  /** 应用语种/朗读设置(运行时生效 + 持久化);resolve 规整后的最终设置。 */
+  setLang(form: Partial<LangForm>): Promise<LangForm>;
+  /** 订阅一块合成 PCM(Int16@sampleRate);渲染层 Web Audio 排队播放。返回退订函数。 */
+  onTtsAudio(cb: (chunk: TtsAudioChunk) => void): () => void;
+  /** 订阅停播信号(回合结束/被打断):立即停并清队列。返回退订函数。 */
+  onTtsAudioStop(cb: () => void): () => void;
 }
 
 const api: XiaoxueApi = {
@@ -83,6 +94,11 @@ const api: XiaoxueApi = {
   updatePersona: (form) => ipcRenderer.invoke(IPC.personaUpdate, form),
   // —— 记忆查看(代理D)——
   listMemories: (limit) => ipcRenderer.invoke(IPC.memoryList, limit),
+  // —— 三语种 + 朗读(本批次)——
+  getLang: () => ipcRenderer.invoke(IPC.langGet),
+  setLang: (form) => ipcRenderer.invoke(IPC.langSet, form),
+  onTtsAudio: (cb) => subscribe<TtsAudioChunk>(IPC.ttsAudio, cb),
+  onTtsAudioStop: (cb) => subscribe<void>(IPC.ttsAudioStop, () => cb()),
 };
 
 contextBridge.exposeInMainWorld('xiaoxue', api);
