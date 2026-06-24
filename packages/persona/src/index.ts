@@ -17,4 +17,5 @@ export * from './llm-self-notion-evolver';
 export * from './stance';
 export * from './self-consistency';
 export * from './llm-self-consistency';
+export * from './self-consistency-factory';
 export * from './config-loader';

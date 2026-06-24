@@ -37,7 +37,7 @@ export class ToolCallingStrategy implements TurnStrategy {
   }
 
   async run(ctx: TurnContext): Promise<string> {
-    const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs, turn, signal } = ctx;
+    const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs, turn, signal, pendingAnchor, setPendingAnchor } = ctx;
     const tools = this.#registry.toolDefs();
     // 降级:Provider 不支持工具 / 未实现 completeWithTools / 空注册表 → 走单趟(§3.2)。
     if (deps.llm.supportsTools !== true || typeof deps.llm.completeWithTools !== 'function' || tools.length === 0) {
@@ -53,7 +53,7 @@ export class ToolCallingStrategy implements TurnStrategy {
     const stance = await detectStance(deps, userText);
     turnSpan.setAttribute('chat_a.stance_notions', stance.notions.length);
     const qe = embedP ? await embedP : null;
-    const { assembled, recalled } = composeSystem(deps, userText, mood.toneFragment, stance, qe?.vector ?? undefined);
+    const { assembled, recalled } = composeSystem(deps, userText, mood.toneFragment, stance, qe?.vector ?? undefined, pendingAnchor);
     const { system } = assembled;
     // 工作消息随工具往返增长(初始 = assembler 产出的 [...history, userMsg])。
     const working: ChatMessage[] = [...assembled.messages];
@@ -105,6 +105,7 @@ export class ToolCallingStrategy implements TurnStrategy {
       messages: working.map((m) => ({ role: m.role, content: m.content })),
       turn,
       ...(qe ? { semantic: qe } : {}),
+      ...(setPendingAnchor ? { setPendingAnchor } : {}),
     });
     return reply;
   }

@@ -16,13 +16,20 @@ import type { LlmProvider } from '@chat-a/providers';
 import {
   Consolidator,
   type ConsolidationInput,
+  type ConsolidationState,
   type MemoryStore,
 } from '@chat-a/memory';
 
-/** 巩固触发运行句柄:`consolidateSession` 触发一次会话级巩固(后台);`stop` 收尾(无资源,占位)。 */
+/** 巩固触发运行句柄:会话级 + 节奏(daily/每 N 轮)触发(均后台幂等);`stop` 收尾(无资源,占位)。 */
 export interface ConsolidationHandle {
   /** 触发一个单元的 session-end 巩固(fire-and-forget,失败仅告警,幂等)。返回触发用的 Promise 供测试 await。 */
   consolidateSession(unit: string): Promise<void>;
+  /**
+   * 节奏触发(companion-coherence-wiring,§5.1):据 `state`(距上次巩固轮数 / 上次巩固时刻)判定
+   * `every-n-turns` 或 `daily` 是否到阈值(任一命中即触发);命中则后台 fire-and-forget 巩固该 `unit`
+   * (失败仅告警、绝不阻塞热路径)。返回是否触发(`true`=判定应巩固并已起后台 run,供调用方重置计数)。
+   */
+  maybeConsolidateByCadence(unit: string, state: ConsolidationState): Promise<boolean>;
   stop(): void;
 }
 
@@ -73,20 +80,36 @@ export function assembleConsolidation(
   });
   const buildInput = deps.buildInput ?? defaultBuildInput;
 
+  // 后台 fire-and-forget 跑一次巩固(run 内部已幂等 + 失败仅告警;此处再兜底 catch,绝不阻塞)。
+  const runUnit = async (unit: string): Promise<void> => {
+    await consolidator.run(unit, buildInput(deps.store)).then(
+      () => {},
+      (err) =>
+        stdout.write(`[巩固] run 异常(已告警):${err instanceof Error ? err.message : String(err)}\n`),
+    );
+  };
+
   return {
     consolidateSession: async (unit: string): Promise<void> => {
       try {
         if (!consolidator.shouldRun({ kind: 'session-end', unit }, {})) return;
-        // 后台 fire-and-forget:run 内部已幂等 + 失败仅告警;此处再兜底 catch,绝不阻塞退出。
-        await consolidator.run(unit, buildInput(deps.store)).then(
-          () => {},
-          (err) =>
-            stdout.write(
-              `[巩固] run 异常(已告警):${err instanceof Error ? err.message : String(err)}\n`,
-            ),
-        );
+        await runUnit(unit);
       } catch (err) {
         stdout.write(`[巩固] 触发异常(已告警):${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    },
+    maybeConsolidateByCadence: async (unit: string, state: ConsolidationState): Promise<boolean> => {
+      try {
+        // every-n-turns 与 daily 任一到阈值即触发(纯函数判定,用编排器配置 + 注入时钟,确定性可测)。
+        const due =
+          consolidator.shouldRun({ kind: 'every-n-turns', unit }, state) ||
+          consolidator.shouldRun({ kind: 'daily', unit }, state);
+        if (!due) return false;
+        await runUnit(unit); // 后台幂等;同 unit 二次由 run 内存在性检查跳过。
+        return true;
+      } catch (err) {
+        stdout.write(`[巩固] 节奏触发异常(已告警):${err instanceof Error ? err.message : String(err)}\n`);
+        return false;
       }
     },
     stop: () => {
