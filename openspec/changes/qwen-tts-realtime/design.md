@@ -18,14 +18,13 @@
 - 握手配置:
   ```json
   { "type": "session.update",
-    "session": { "voice": "Cherry", "response_format": "PCM_24000HZ_MONO_16BIT", "mode": "server_commit" } }
+    "session": { "voice": "Cherry", "response_format": "pcm", "sample_rate": 24000, "mode": "server_commit" } }
   ```
+  ✅ **已据官方 client-events 文档核实(2026-06-24)**:`response_format` 合法值为小写 **`pcm`|`wav`|`mp3`|`opus`**,采样率走**独立字段 `sample_rate`**(8000/16000/24000/48000,默认 24000)。早稿用的 `PCM_24000HZ_MONO_16BIT` 是 Java SDK 的 AudioFormat 枚举名、**非** WS 协议值——已改正(否则真机回 `error: invalid_value`)。
   可选(仅 instruct 版生效):`session.instructions`(自然语言情感/风格,≤1600 token)、`optimize_instructions`(bool);
   另有 `speech_rate` / `volume` / `pitch_rate` / `language_type` 等微调位。
 - 送文本:`{ "type": "input_text_buffer.append", "text": "..." }`
-  - ⚠️ **协议歧义**:官方文档抓取里 `append` 的文本字段一处呈 `{ "text": "..." }`、另一处呈
-    `{ "arguments": { "text": "..." } }`。本实现采用更常见、与 OpenAI-Realtime 一致的 **`{ type, text }`** 形态,
-    并把「append 消息体构造」抽成一个**可注入/可改的内部函数**(爆炸半径可控:真机若证实是 `arguments` 形态,改一处即可)。
+  - ✅ **歧义已定案(2026-06-24,官方 client-events 逐字 JSON 核实)**:文本字段是根对象上的 **`text`**(即 `{ type, text }`),**不是** `arguments.text`。`buildAppend` 实现正确,无需改。
 - 收尾(`commit` 模式才需要;`server_commit` 模式服务端自动切分):
   `{ "type": "input_text_buffer.commit" }`
 - 结束本次合成会话:`{ "type": "session.finish" }`
@@ -33,12 +32,12 @@
 
 ### 1.3 服务端 → 客户端事件
 - `session.created`(含 `session.id`)、`session.updated`(配置确认)。
-- `response.audio.delta`:音频块,base64 文本在 **`delta`** 字段;默认 `PCM_24000HZ_MONO_16BIT`(s16le, 24kHz, mono)。
+- `response.audio.delta`:音频块,base64 文本在 **`delta`** 字段;默认 pcm/24kHz(s16le, 24kHz, mono)。
 - `response.audio.done` / `response.done` / `session.finished`:合成/会话结束。
 - `error`:含错误详情(鉴权失败、参数错、配额等)。
 
 ### 1.4 输出音频格式 → PcmChunk 对齐
-- 默认 `PCM_24000HZ_MONO_16BIT` = **24000Hz / mono / Int16 小端**,与项目 `TTS_SAMPLE_RATE_HZ=24000`、
+- 默认 `pcm` + `sample_rate:24000` = **24000Hz / mono / Int16 小端**,与项目 `TTS_SAMPLE_RATE_HZ=24000`、
   `PcmChunk{samples:Int16Array, sampleRate, channels:1}` **天然对齐**。
 - 解码:`Buffer.from(delta, 'base64')` → Uint8Array → 按 Int16 边界(每 2 字节)切;跨帧半样本残留进位到下一帧
   (沿用 `openai-compat-tts.ts` 的 `carry` 写法,保证不产半样本)。

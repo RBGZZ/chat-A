@@ -123,10 +123,12 @@ describe('QwenTtsRealtime(注入 mock WS,不触网)', () => {
     // server_commit 模式默认不发 commit。
     expect(types).not.toContain('input_text_buffer.commit');
     const update = created[0]!.sent.find((m) => (m as { type: string }).type === 'session.update') as {
-      session: { voice: string; response_format: string };
+      session: { voice: string; response_format: string; sample_rate: number };
     };
     expect(update.session.voice).toBe('Serena'); // voiceId 覆盖默认音色。
-    expect(update.session.response_format).toBe('PCM_24000HZ_MONO_16BIT');
+    // 官方 WS 协议:response_format 小写 'pcm' + 独立 sample_rate 字段(非 Java SDK 枚举名)。
+    expect(update.session.response_format).toBe('pcm');
+    expect(update.session.sample_rate).toBe(TTS_SAMPLE_RATE_HZ);
     const append = created[0]!.sent.find(
       (m) => (m as { type: string }).type === 'input_text_buffer.append',
     ) as { text: string };

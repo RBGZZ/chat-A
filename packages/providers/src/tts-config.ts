@@ -153,7 +153,7 @@ export interface QwenTtsRealtimeConfig {
   readonly voice: string;
   /** WebSocket 端点(默认北京区;海外区 dashscope-intl 可覆盖)。 */
   readonly endpoint?: string;
-  /** 输出格式(默认 'PCM_24000HZ_MONO_16BIT')。 */
+  /** 输出格式(WS 协议值 'pcm'|'wav'|'mp3'|'opus';默认 'pcm')。 */
   readonly responseFormat?: string;
   /** 切分模式(默认 'server_commit')。 */
   readonly mode?: 'server_commit' | 'commit';

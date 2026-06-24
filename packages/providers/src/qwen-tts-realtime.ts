@@ -80,8 +80,12 @@ export interface QwenTtsRealtimeOptions {
 
 /** 北京区默认 WebSocket 端点(具名常量,无 magic number;海外区见 design.md)。 */
 export const QWEN_TTS_REALTIME_ENDPOINT = 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime';
-/** 默认输出格式:PCM 24kHz/16bit/mono(直对齐 PcmChunk)。 */
-export const QWEN_TTS_DEFAULT_RESPONSE_FORMAT = 'PCM_24000HZ_MONO_16BIT';
+/**
+ * 默认输出格式:`pcm`(裸 PCM,配合 session.sample_rate=24000 → 24kHz/16bit/mono,直对齐 PcmChunk)。
+ * 注:官方 WS JSON 协议 `response_format` 合法值为小写 `pcm|wav|mp3|opus`,采样率走独立字段 `sample_rate`;
+ * `PCM_24000HZ_MONO_16BIT` 是 Java SDK 的 AudioFormat 枚举名、**非** WS 协议值(已据官方 client-events 文档核实)。
+ */
+export const QWEN_TTS_DEFAULT_RESPONSE_FORMAT = 'pcm';
 
 export class QwenTtsRealtime implements TtsProvider {
   readonly id: string;
@@ -159,6 +163,7 @@ export class QwenTtsRealtime implements TtsProvider {
           session: {
             voice,
             response_format: this.#responseFormat,
+            sample_rate: this.#sampleRate,
             mode: this.#mode,
             ...(this.#instructions !== undefined ? { instructions: this.#instructions } : {}),
           },
