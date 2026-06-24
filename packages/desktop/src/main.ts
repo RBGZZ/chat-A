@@ -47,6 +47,9 @@ import {
   toProactiveMessage,
   isProactiveEnabled,
   type PersonaForm,
+  // —— 代理D:记忆面板纯格式化 ——
+  toMemoryItems,
+  type MemoryItem,
 } from './ipc-contract';
 
 let mainWindow: BrowserWindow | null = null;
@@ -314,6 +317,17 @@ function registerIpc(handle: AppHandle): void {
     // 应用后刷新横幅信息(三档/名字已变)与心情(新引擎)。
     emit(IPC.mood, toMoodSummary(handle.persona.tone()));
     return result;
+  });
+
+  // —— 记忆查看(代理D)——
+  // 只读列出最近 N 条记忆 → 纯格式化为 UI 条目;**绝不触发写/巩固**(listRecent 只读快照)。
+  // 读失败优雅降级为空数组(memory.listRecent 内部已吞错;此处再兜底,主进程绝不崩,§3.2)。
+  ipcMain.handle(IPC.memoryList, (_e, limit?: number): readonly MemoryItem[] => {
+    try {
+      return toMemoryItems(handle.memory.listRecent(limit));
+    } catch {
+      return [];
+    }
   });
 }
 

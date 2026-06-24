@@ -72,6 +72,8 @@ export interface XiaoxueApi {
   // —— 人格自定义(代理C) ——
   getPersona(): Promise<PersonaForm>;
   updatePersona(form: PersonaForm): Promise<PersonaForm>;
+  // —— 记忆查看(代理D)——
+  listMemories(limit?: number): Promise<readonly MemoryItem[]>;
 }
 
 // —— 代理B:主动消息形态(与 ipc-contract 的 ProactiveMessage 同名同义)。
@@ -88,4 +90,15 @@ export interface PersonaForm {
   readonly warmth: number;
   readonly expressiveness: number;
   readonly volatility: number;
+}
+
+// —— 记忆/设置(代理D) ——
+
+/** 记忆面板展示条目(与 ipc-contract.ts 的 MemoryItem 形态一致;渲染层本地声明,不跨进程模块 import)。 */
+export interface MemoryItem {
+  readonly text: string;
+  readonly kindLabel: string;
+  readonly importance: number;
+  readonly lastSeenAtMs: number;
+  readonly createdAtMs: number;
 }

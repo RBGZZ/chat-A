@@ -14,6 +14,7 @@ import type {
   // —— 代理B:主动消息类型 ——
   ProactiveMessage,
   PersonaForm, // 代理C
+  MemoryItem, // 代理D
 } from './api';
 
 declare global {
@@ -303,3 +304,72 @@ $pSave.addEventListener('click', () => {
 
 // 启动:取当前人格回填面板。
 void xiaoxue.getPersona().then(renderPersonaForm);
+// ───────────────────────────── 记忆查看 + 设置 + 换段对话(代理D) ─────────────────────────────
+
+const $reset = document.getElementById('reset') as HTMLButtonElement;
+const $memory = document.getElementById('memory') as HTMLElement;
+const $memoryList = document.getElementById('memory-list') as HTMLElement;
+const $memoryEmpty = document.getElementById('memory-empty') as HTMLElement;
+const $memoryToggle = document.getElementById('memory-toggle') as HTMLButtonElement;
+const $memoryRefresh = document.getElementById('memory-refresh') as HTMLButtonElement;
+const $settings = document.getElementById('settings') as HTMLElement;
+const $settingsToggle = document.getElementById('settings-toggle') as HTMLButtonElement;
+const $setProvider = document.getElementById('set-provider') as HTMLElement;
+const $setModel = document.getElementById('set-model') as HTMLElement;
+const $setMemory = document.getElementById('set-memory') as HTMLElement;
+
+// —— 换段对话:换新 session(长期记忆保留)+ 清空消息区,给一条分隔提示 ——
+$reset.addEventListener('click', () => {
+  void xiaoxue.reset();
+  // 清空当前对话气泡;丢弃进行中的占位气泡(若有)。
+  pendingBubble = null;
+  $messages.replaceChildren();
+  addBubble('xiao', '（开了新的一段对话——我还记得我们之前聊过的事。）');
+});
+
+// —— 记忆只读查看:渲染一批 MemoryItem 到列表 ——
+function renderMemories(items: readonly MemoryItem[]): void {
+  $memoryList.replaceChildren();
+  $memoryEmpty.hidden = items.length > 0;
+  for (const it of items) {
+    const li = document.createElement('li');
+    li.className = 'memory-item';
+    const text = document.createElement('div');
+    text.className = 'memory-text';
+    text.textContent = it.text;
+    const meta = document.createElement('div');
+    meta.className = 'memory-meta muted';
+    const when = new Date(it.lastSeenAtMs).toLocaleString('zh-CN', { hour12: false });
+    meta.textContent = `${it.kindLabel} · 重要度 ${it.importance.toFixed(2)} · ${when}`;
+    li.append(text, meta);
+    $memoryList.appendChild(li);
+  }
+}
+
+/** 拉取最近记忆并渲染(只读;主进程绝不触发写/巩固)。失败静默(不崩、不打扰对话)。 */
+function refreshMemories(): void {
+  void xiaoxue
+    .listMemories(50)
+    .then(renderMemories)
+    .catch(() => {
+      $memoryEmpty.hidden = false;
+    });
+}
+
+$memoryToggle.addEventListener('click', () => {
+  const show = $memory.hidden;
+  $memory.hidden = !show;
+  if (show) refreshMemories(); // 展开时拉一次最新。
+});
+$memoryRefresh.addEventListener('click', refreshMemories);
+
+// —— 设置面板:只读展示 getInfo() 已有的 provider/model/记忆后端 ——
+$settingsToggle.addEventListener('click', () => {
+  $settings.hidden = !$settings.hidden;
+});
+
+void xiaoxue.getInfo().then((info) => {
+  $setProvider.textContent = info.isFake ? `${info.provider}(占位）` : info.provider;
+  $setModel.textContent = info.model;
+  $setMemory.textContent = info.memory;
+});

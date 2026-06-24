@@ -16,6 +16,7 @@ import {
   // —— 代理B:主动消息类型 ——
   type ProactiveMessage,
   type PersonaForm, // 代理C
+  type MemoryItem, // 代理D
 } from './ipc-contract';
 
 /** 包装一个主→渲染推送订阅,返回退订函数(不泄漏 ipcRenderer / event 对象)。 */
@@ -54,6 +55,9 @@ export interface XiaoxueApi {
   getPersona(): Promise<PersonaForm>;
   /** 应用人格修改(运行时生效 + 持久化);resolve 规整后的最终人格。 */
   updatePersona(form: PersonaForm): Promise<PersonaForm>;
+  // —— 记忆查看(代理D)——
+  /** 只读列出最近 N 条记忆(陪伴工具记忆面板;主进程绝不触发写/巩固)。 */
+  listMemories(limit?: number): Promise<readonly MemoryItem[]>;
 }
 
 const api: XiaoxueApi = {
@@ -77,6 +81,8 @@ const api: XiaoxueApi = {
   // —— 人格自定义(代理C) ——
   getPersona: () => ipcRenderer.invoke(IPC.personaGet),
   updatePersona: (form) => ipcRenderer.invoke(IPC.personaUpdate, form),
+  // —— 记忆查看(代理D)——
+  listMemories: (limit) => ipcRenderer.invoke(IPC.memoryList, limit),
 };
 
 contextBridge.exposeInMainWorld('xiaoxue', api);

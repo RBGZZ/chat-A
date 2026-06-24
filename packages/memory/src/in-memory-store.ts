@@ -736,6 +736,15 @@ export class InMemoryMemoryStore implements MemoryStore {
     return r === undefined ? undefined : this.#toRecord(r);
   }
 
+  listRecent(limit: number = this.#cfg.recallLimit): readonly MemoryRecord[] {
+    // 只读快照(承 §5;陪伴工具记忆面板):按近因降序取前 N,**不触发检索即强化**(查看 ≠ 被想起)。
+    // 与 SQLite listRecent 同一排序(last_seen DESC, id DESC),两实现零漂移。
+    return [...this.#memories.values()]
+      .sort((a, b) => b.lastSeenAtMs - a.lastSeenAtMs || b.id - a.id)
+      .slice(0, Math.max(0, limit))
+      .map((r) => this.#toRecord(r));
+  }
+
   updateMemory(id: number, patch: MemoryUpdate): boolean {
     const r = this.#byIdIndex.get(id);
     if (r === undefined) return false;

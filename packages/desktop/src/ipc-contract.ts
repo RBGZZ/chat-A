@@ -36,6 +36,9 @@ export const IPC = {
   voiceCloneResult: 'voice:clone-result',
   voiceCloneStatus: 'voice:clone-status',
   proactiveMessage: 'proactive:message', // —— 主动消息(代理B) ——
+  // —— 记忆/设置(代理D) ——
+  /** 渲染 → 主:只读列出最近 N 条记忆(陪伴工具记忆查看面板;绝不触发写/巩固)。 */
+  memoryList: 'memory:list',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
@@ -405,4 +408,60 @@ export function sanitizePersonaForm(raw: Partial<PersonaForm>, fallback: Persona
       fallback.volatility,
     ),
   };
+}
+
+// ───────────────────────────── 记忆/设置(代理D) ─────────────────────────────
+
+/**
+ * 记忆面板用的展示条目(主→渲染;只读):把 memory 的 `MemoryRecord` 蒸馏成 UI 需要的最小面。
+ * 与 `@chat-a/memory` 的 `MemoryRecord` 字段同义(text/memoryKind/createdAtMs/lastSeenAtMs/importance),
+ * 但本类型**自含**(不跨包 import memory 类型,保持 ipc-contract 纯逻辑、不引入新依赖)。
+ */
+export interface MemoryItem {
+  /** 记忆正文。 */
+  readonly text: string;
+  /** 认知分层中文标签(episodic→情景 / semantic→事实 / core→核心)。 */
+  readonly kindLabel: string;
+  /** 重要度 [0,1],保留两位(供 UI 直接展示)。 */
+  readonly importance: number;
+  /** 最近被想起/更新的时间(毫秒;UI 自行本地化展示)。 */
+  readonly lastSeenAtMs: number;
+  /** 首次记下的时间(毫秒)。 */
+  readonly createdAtMs: number;
+}
+
+/**
+ * `toMemoryItems` 入参的最小结构形(只读 memory 条目需要的字段子集)。
+ * `@chat-a/memory` 的 `MemoryRecord` 结构上满足它,故 main.ts 可直接传 `memory.listRecent()` 结果,
+ * 而本模块无需 import memory 包(保持纯逻辑可 headless 单测)。
+ */
+export interface MemoryRecordLike {
+  readonly text: string;
+  readonly memoryKind?: 'episodic' | 'semantic' | 'core';
+  readonly importance?: number;
+  readonly lastSeenAtMs: number;
+  readonly createdAtMs: number;
+}
+
+/** 认知分层 → 中文展示标签(单一真相源;未知值兜底为「情景」,与 memory 读列兜底一致)。 */
+const MEMORY_KIND_LABEL: Record<'episodic' | 'semantic' | 'core', string> = {
+  episodic: '情景',
+  semantic: '事实',
+  core: '核心',
+};
+
+/**
+ * 把只读记忆记录映射为 UI 展示条目(纯函数,可 headless 单测,§3.2):
+ * - 分层取中文标签(缺省/未知 → 情景);
+ * - importance 缺省 0、夹到 [0,1] 并保留两位;
+ * - 时间戳原样透传(UI 侧本地化)。**只做格式化,不读库不触发任何写/巩固**。
+ */
+export function toMemoryItems(records: readonly MemoryRecordLike[]): readonly MemoryItem[] {
+  return records.map((r) => ({
+    text: r.text,
+    kindLabel: MEMORY_KIND_LABEL[r.memoryKind ?? 'episodic'],
+    importance: Math.round(Math.min(Math.max(r.importance ?? 0, 0), 1) * 100) / 100,
+    lastSeenAtMs: r.lastSeenAtMs,
+    createdAtMs: r.createdAtMs,
+  }));
 }
