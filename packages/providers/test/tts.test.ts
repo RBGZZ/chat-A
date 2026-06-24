@@ -7,6 +7,7 @@ import {
   loadTtsConfig,
   chunkByteLength,
   OpenAiCompatTts,
+  GptSoVitsTts,
   TTS_SAMPLE_RATE_HZ,
 } from '../src/index';
 import type { PcmChunk, TtsConfig, TtsRefAudio } from '../src/index';
@@ -122,10 +123,11 @@ describe('createTts(工厂按判别联合切换)+ loadTtsConfig', () => {
     expect(tts.capabilities.sampleRate).toBe(TTS_SAMPLE_RATE_HZ);
   });
 
-  it('kind: gpt-sovits → 占位抛错(复刻引擎以后接)', () => {
-    expect(() =>
-      createTts({ kind: 'gpt-sovits', baseURL: 'http://127.0.0.1:9880', textLang: 'zh' }),
-    ).toThrow(/gpt-sovits TTS.*尚未接入/);
+  it('kind: gpt-sovits → GptSoVitsTts(真复刻引擎已接入,voiceCloning=true)', () => {
+    const tts = createTts({ kind: 'gpt-sovits', baseURL: 'http://127.0.0.1:9880', textLang: 'zh' });
+    expect(tts).toBeInstanceOf(GptSoVitsTts);
+    expect(tts.capabilities.voiceCloning).toBe(true);
+    expect(tts.capabilities.streaming).toBe(true);
   });
 
   it('kind: edge → 占位抛错(真引擎以后接)', () => {

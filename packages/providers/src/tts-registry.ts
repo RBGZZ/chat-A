@@ -6,6 +6,8 @@ import { KokoroTts } from './kokoro-tts';
 import type { KokoroSession } from './kokoro-tts';
 import { QwenTtsRealtime } from './qwen-tts-realtime';
 import type { QwenWsFactory } from './qwen-tts-realtime';
+import { GptSoVitsTts } from './gpt-sovits-tts';
+import type { FetchLike } from './gpt-sovits-tts';
 
 /**
  * 运行时注入的 TTS 端口(R1 注入式接缝)。
@@ -19,6 +21,11 @@ export interface TtsPorts {
    * 缺省时 QwenTtsRealtime 懒加载 `ws` 包建真连接,测试经此注入 mock WS(不触网)。
    */
   readonly qwenWsFactory?: QwenWsFactory;
+  /**
+   * gpt-sovits 的 fetch 注入端口(可测性接缝,镜像 qwenWsFactory);
+   * 缺省时 GptSoVitsTts 用 `globalThis.fetch` 走真网络,测试经此注入 mock fetch(不触网)。
+   */
+  readonly fetch?: FetchLike;
 }
 
 /** 后端工厂:某一 kind 的子配置(+ 注入端口) → 具体 TtsProvider。 */
@@ -76,11 +83,24 @@ const registry: { [K in TtsConfig['kind']]: TtsFactory<K> } = {
       ...(cfg.languages !== undefined ? { languages: cfg.languages } : {}),
     });
   },
-  'gpt-sovits': (cfg) => {
-    throw new Error(
-      `gpt-sovits TTS(zero-shot 复刻)尚未接入真实引擎;config 已就位:baseURL=${cfg.baseURL}`,
-    );
-  },
+  // gpt-sovits:本地 zero-shot 音色复刻,HTTP /tts 流式裸 PCM。
+  // fetch 端口可注入(测试 mock,不触网);缺省时 GptSoVitsTts 用 globalThis.fetch。
+  'gpt-sovits': (cfg, ports) =>
+    new GptSoVitsTts({
+      id: cfg.id ?? 'gpt-sovits',
+      baseURL: cfg.baseURL,
+      ...(cfg.textLang !== undefined ? { textLang: cfg.textLang } : {}),
+      ...(cfg.refAudioPath !== undefined ? { refAudioPath: cfg.refAudioPath } : {}),
+      ...(cfg.promptText !== undefined ? { promptText: cfg.promptText } : {}),
+      ...(cfg.promptLang !== undefined ? { promptLang: cfg.promptLang } : {}),
+      ...(cfg.textSplitMethod !== undefined ? { textSplitMethod: cfg.textSplitMethod } : {}),
+      ...(cfg.stream !== undefined ? { stream: cfg.stream } : {}),
+      ...(cfg.sampleRate !== undefined ? { sampleRate: cfg.sampleRate } : {}),
+      ...(cfg.voiceId !== undefined ? { voiceId: cfg.voiceId } : {}),
+      ...(cfg.requiresCuda !== undefined ? { requiresCuda: cfg.requiresCuda } : {}),
+      ...(cfg.languages !== undefined ? { languages: cfg.languages } : {}),
+      ...(ports.fetch !== undefined ? { fetch: ports.fetch } : {}),
+    }),
   // qwen-tts:DashScope WebSocket 流式 TTS。缺 apiKey → 构造内 fail-fast(明确报错)。
   // wsFactory 端口可注入(测试 mock WS);缺省时懒加载 `ws` 建真连接。
   'qwen-tts': (cfg, ports) =>
