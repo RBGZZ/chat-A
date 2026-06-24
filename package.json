@@ -13,7 +13,9 @@
     "test:watch": "vitest",
     "dev": "tsx packages/client/src/cli.ts",
     "dev:brain": "tsx packages/client/src/cli-brain.ts",
-    "start": "tsx packages/client/src/cli.ts"
+    "start": "tsx packages/client/src/cli.ts",
+    "test:voice": "tsx scripts/voice-text-to-wav.ts",
+    "smoke:qwen": "tsx scripts/qwen-smoke.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

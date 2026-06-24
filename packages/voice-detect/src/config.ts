@@ -66,6 +66,48 @@ export const DEFAULT_EOU_INFERENCE: EouInferenceConfig = {
   normalize: true,
 };
 
+// ───────────────────────────── 无模型(能量/超时)档 ─────────────────────────────
+
+/**
+ * 能量阈值 VAD 配置(无模型档,承「填 key 即测」):用逐帧 RMS 能量替代 ONNX 推理。
+ * RMS 归一化到 0~1(除以 Int16 满量程)后当「语音概率」喂 {@link VadGate}(复用同一去抖)。
+ */
+export interface EnergyVadConfig {
+  /** RMS 归一化阈值(0~1):归一化能量 ≥ 此值视为有声(对应 VadGate.speechProbThreshold)。 */
+  readonly rmsThreshold: number;
+  /** Int16 满量程(归一化分母);具名常量,无 magic number。 */
+  readonly fullScale: number;
+}
+
+/** 能量 VAD 默认配置(阈值 0.02 ≈ 安静环境人声起点;可被构造参数整表覆盖)。 */
+export const DEFAULT_ENERGY_VAD_CONFIG: EnergyVadConfig = {
+  rmsThreshold: 0.02,
+  fullScale: 32_768,
+};
+
+/**
+ * 静音超时 EOU 配置(无模型档):据音频窗尾连续「低能量」累积时长判「已说完」。
+ * 窗尾连续低能量样本时长 ≥ `silenceTimeoutMs` → 高 eouProb;否则低。无模型、无原生依赖。
+ */
+export interface SilenceEouConfig {
+  /** 窗尾连续静音累积达此时长(ms)判「已说完」。 */
+  readonly silenceTimeoutMs: number;
+  /** 低能量判定:样本归一化绝对值 < 此值视为静音(0~1)。 */
+  readonly silenceRmsThreshold: number;
+  /** 采样率(Hz),用于把样本数换算成时长;与上行 16000 一致。 */
+  readonly sampleRate: number;
+  /** Int16 满量程(归一化分母)。 */
+  readonly fullScale: number;
+}
+
+/** 静音 EOU 默认配置(尾静音 ≥ 600ms 判说完;占位阈值,可覆盖)。 */
+export const DEFAULT_SILENCE_EOU_CONFIG: SilenceEouConfig = {
+  silenceTimeoutMs: 600,
+  silenceRmsThreshold: 0.015,
+  sampleRate: 16_000,
+  fullScale: 32_768,
+};
+
 // ───────────────────────────── 动态 endpointing ─────────────────────────────
 
 /**

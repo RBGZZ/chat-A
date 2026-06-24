@@ -64,6 +64,43 @@ CHAT_A_LLM_API_KEY=sk-你的DashScope-key
 pnpm dev --voice
 ```
 
+## 「填一个 key 即测」语音(无原生依赖,推荐先跑这条)
+
+只想**听一下**小雪用真嗓子说话?不需要装任何原生库(naudiodon)、不需要本地模型、不需要 Windows 构建链——**只填一个 DashScope key 即可**:
+
+1. 在**项目根** `.env.local`(已被 `.gitignore`)写一行:
+   ```dotenv
+   CHAT_A_DASHSCOPE_API_KEY=sk-你的DashScope-key
+   ```
+2. 跑:
+   ```bash
+   pnpm test:voice            # 或 pnpm test:voice "你想对小雪说的话"
+   ```
+   这会走 **100% key-only** 路径:文本输入 → 云 LLM(qwen)→ 云 TTS(qwen-tts)→ 写出 `out.wav`,用任意播放器试听即可。
+
+想先确认 key/网络通(只测 TTS 的真 WebSocket 握手 + PCM 回流):
+```bash
+pnpm smoke:qwen            # 需真网络;无 key 时会跳过并提示。默认不进 CI
+```
+
+### 涉及的 env 开关(默认值)
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `CHAT_A_DASHSCOPE_API_KEY` | 无 | DashScope key;LLM/TTS/(云)STT 都回落到它 |
+| `CHAT_A_AUDIO_DEVICE` | `fake` | `wav` = 无原生依赖的 WAV 文件设备(读 WAV 当麦克风 / 写 WAV 当扬声器);`node` = 真原生(需 naudiodon) |
+| `CHAT_A_AUDIO_IN_WAV` / `CHAT_A_AUDIO_OUT_WAV` | 无 / `out.wav` | WAV 设备的输入(须 16k/mono/s16le)/ 输出路径 |
+| `CHAT_A_VAD` | `stub` | `energy` = 无模型能量 VAD + 静音超时 EOU(零模型/零原生);`silero` = 真 ONNX(需模型) |
+| `CHAT_A_STT_KIND` | 无→`fake` | `qwen` = DashScope 云 ASR(OpenAI 兼容 `/audio/transcriptions`,`qwen3-asr-flash`) |
+| `CHAT_A_TTS_KIND` | 无→`fake` | `qwen-tts` = DashScope WS 流式 TTS |
+| `CHAT_A_LLM_PROVIDER` | 见 start.bat | `qwen` 用 DashScope 纯文本(`pnpm test:voice` 已自动设好) |
+
+### 各路径能跑到什么程度(如实说明)
+
+- **100% key-only(`pnpm test:voice`)**:文本→云 LLM→云 TTS→WAV。只需 key + 网络,**绝对可跑**。
+- **全语音(WAV→云 STT→云 LLM→云 TTS→WAV)**:设 `CHAT_A_AUDIO_DEVICE=wav`、`CHAT_A_STT_KIND=qwen`、`CHAT_A_VAD=energy`、`CHAT_A_VOICE=1` 即可接通;其中**云 STT(`qwen3-asr-flash` 经 OpenAI 兼容端点的 multipart 上传往返)尚待真网络确认**,接缝已就位,若真机不通改一处配置即可。
+- **真麦克风/扬声器**:仍需原生库 **naudiodon**(需 MSVC 构建链),`CHAT_A_AUDIO_DEVICE=node`——**这条 key 解决不了**,本节不涉及。
+
 ## 其它能力开关(行为即配置,默认全关/保守)
 
 均经环境变量开启,详见 `start.bat` 注释与 canonical 设计,例如:

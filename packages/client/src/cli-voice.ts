@@ -23,12 +23,15 @@ import {
   StubEouModel,
   SileroVadDetector,
   SmartTurnEouModel,
+  EnergyVadDetector,
+  SilenceTimeoutEouModel,
   type VadDetector,
 } from '@chat-a/voice-detect';
 import type { LightVoiceBus } from '@chat-a/runtime';
 import type { AudioDevice } from './audio/audio-device';
 import { FakeAudioDevice } from './audio/fake-audio-device';
 import { NodeAudioDevice } from './audio/node-audio-device';
+import { WavFileAudioDevice } from './audio/wav-file-audio-device';
 import { createSherpaVadSession, createSherpaEouSession } from './audio/sherpa-vad-session';
 import { runVoiceLoop, runTerminalBridge } from './audio/voice-runner';
 
@@ -105,6 +108,25 @@ function createStubDetectors(): Detectors {
  */
 export async function createDetectors(env: NodeJS.ProcessEnv): Promise<Detectors> {
   const mode = (env['CHAT_A_VAD'] ?? 'stub').toLowerCase();
+
+  // 无模型档(填 key 即测):纯 JS 能量 VAD + 静音超时 EOU,零模型/零原生依赖。
+  // 构造为纯算术,理论不会失败;仍包一层回落桩以守优雅降级范式(§3.2)。
+  if (mode === 'energy') {
+    try {
+      return {
+        vad: new EnergyVadDetector(),
+        turnDetector: new TurnDetector(new SilenceTimeoutEouModel()),
+        vadKind: 'energy',
+        eouKind: 'silence-timeout',
+      };
+    } catch (err) {
+      stdout.write(
+        `[语音] 能量 VAD/静音 EOU 初始化失败,已回落确定性桩:${err instanceof Error ? err.message : String(err)}\n`,
+      );
+      return createStubDetectors();
+    }
+  }
+
   const wantReal = mode === 'silero' || mode === 'real' || mode === 'sherpa';
   if (!wantReal) return createStubDetectors();
 
@@ -137,6 +159,17 @@ export async function createAudioDevice(
       ...(nativeModule ? { nativeModule } : {}),
     });
     await device.init(); // 装不上 → 抛明确报错(调用方 catch 后回落 Fake)
+    return { device, real: true };
+  }
+  // WAV 文件设备(填 key 即测):从 WAV 读帧当麦克风、把 TTS 产出写 WAV 当扬声器;零原生依赖。
+  if (mode === 'wav') {
+    const inWav = env['CHAT_A_AUDIO_IN_WAV'];
+    const outWav = env['CHAT_A_AUDIO_OUT_WAV'];
+    const device = new WavFileAudioDevice({
+      ...(inWav ? { inputWavPath: inWav } : {}),
+      ...(outWav ? { outputWavPath: outWav } : {}),
+    });
+    // 视作「真」设备(有真音频 I/O,非占位);采集为空时(未给输入 WAV)仍可只测下行播放。
     return { device, real: true };
   }
   return { device: new FakeAudioDevice(), real: false };
