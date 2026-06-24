@@ -12,8 +12,11 @@ import {
   upsertEnvLocal,
   CHAT_ERROR_TEXT,
   VOICE_UNAVAILABLE_REASON,
+  clampDial,
+  sanitizePersonaForm,
   type UiState,
   type VoiceCloneResult,
+  type PersonaForm,
 } from '../src/ipc-contract';
 
 const cid = 's1/t1/0';
@@ -177,5 +180,57 @@ describe('probeVoice naudiodon 探测降级(纯,可单测)', () => {
     }));
     expect(status.available).toBe(false);
     expect(status.reason).toBe(VOICE_UNAVAILABLE_REASON);
+  });
+});
+
+// —— 人格自定义(代理C) ——
+describe('clampDial(单档夹取 [0,1],纯)', () => {
+  it('区间内原样', () => {
+    expect(clampDial(0.6, 0.5)).toBe(0.6);
+    expect(clampDial(0, 0.5)).toBe(0);
+    expect(clampDial(1, 0.5)).toBe(1);
+  });
+  it('超界夹取到边界', () => {
+    expect(clampDial(1.5, 0.5)).toBe(1);
+    expect(clampDial(-0.3, 0.5)).toBe(0);
+  });
+  it('非有限(NaN/Infinity)→ 回落 fallback', () => {
+    expect(clampDial(Number.NaN, 0.42)).toBe(0.42);
+    expect(clampDial(Number.POSITIVE_INFINITY, 0.7)).toBe(0.7);
+  });
+});
+
+describe('sanitizePersonaForm(人格表单规整,纯)', () => {
+  const fallback: PersonaForm = { name: '小雪', warmth: 0.6, expressiveness: 0.5, volatility: 0.5 };
+
+  it('合法输入原样(名字 trim)', () => {
+    expect(sanitizePersonaForm({ name: '  阿狸 ', warmth: 0.9, expressiveness: 0.2, volatility: 0.7 }, fallback)).toEqual({
+      name: '阿狸',
+      warmth: 0.9,
+      expressiveness: 0.2,
+      volatility: 0.7,
+    });
+  });
+
+  it('三档超界夹取 [0,1]', () => {
+    const out = sanitizePersonaForm({ name: 'x', warmth: 2, expressiveness: -1, volatility: 1.2 }, fallback);
+    expect(out.warmth).toBe(1);
+    expect(out.expressiveness).toBe(0);
+    expect(out.volatility).toBe(1);
+  });
+
+  it('空白名字 / 缺省档 → 回落 fallback', () => {
+    const out = sanitizePersonaForm({ name: '   ' }, fallback);
+    expect(out).toEqual(fallback);
+  });
+
+  it('非数字档(NaN/非 number)→ 回落 fallback 对应档', () => {
+    const out = sanitizePersonaForm(
+      { name: '小冬', warmth: Number.NaN, expressiveness: undefined as unknown as number },
+      fallback,
+    );
+    expect(out.name).toBe('小冬');
+    expect(out.warmth).toBe(fallback.warmth);
+    expect(out.expressiveness).toBe(fallback.expressiveness);
   });
 });

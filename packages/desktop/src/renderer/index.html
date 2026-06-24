@@ -32,6 +32,37 @@
       <div id="clone-status" class="clone-status muted"></div>
     </section>
 
+    <!-- —— 人格自定义(代理C) —— 名字 + 三档情绪旋钮;不含语种(语种与人格 dials 正交) -->
+    <section id="persona" aria-label="自定义小雪人格">
+      <div class="persona-head">
+        <span class="persona-title">小雪的人格</span>
+        <span class="muted">改名字与三档脾性，保存后立即生效（长期记忆保留）</span>
+      </div>
+      <div class="persona-row">
+        <label for="persona-name">名字</label>
+        <input id="persona-name" type="text" maxlength="20" placeholder="小雪" />
+      </div>
+      <div class="persona-row">
+        <label for="persona-warmth">温暖</label>
+        <input id="persona-warmth" type="range" min="0" max="1" step="0.05" value="0.6" />
+        <span id="persona-warmth-val" class="persona-val">0.60</span>
+      </div>
+      <div class="persona-row">
+        <label for="persona-expressiveness">表达</label>
+        <input id="persona-expressiveness" type="range" min="0" max="1" step="0.05" value="0.5" />
+        <span id="persona-expressiveness-val" class="persona-val">0.50</span>
+      </div>
+      <div class="persona-row">
+        <label for="persona-volatility">波动</label>
+        <input id="persona-volatility" type="range" min="0" max="1" step="0.05" value="0.5" />
+        <span id="persona-volatility-val" class="persona-val">0.50</span>
+      </div>
+      <div class="persona-foot">
+        <button id="persona-save" type="button">保存人格</button>
+        <span id="persona-status" class="muted"></span>
+      </div>
+    </section>
+
     <footer id="composer">
       <button id="voice" type="button" title="语音对话">🎙</button>
       <textarea id="input" rows="1" placeholder="和小雪说点什么…(Enter 发送，Shift+Enter 换行)"></textarea>

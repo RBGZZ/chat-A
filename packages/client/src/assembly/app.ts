@@ -28,8 +28,12 @@ import {
   seedPersonaMemories,
   createKvPersonaStore,
   PersonaEngine,
+  applyPersonaPatch,
+  personaViewOf,
   type PersonaSeed,
   type PersonaStore,
+  type PersonaPatch,
+  type PersonaView,
 } from '@chat-a/persona';
 import { parseDotEnv, applyDotEnv } from '../env-file';
 
@@ -84,6 +88,17 @@ export interface AppHandle {
   readonly makeConvo: (sid: string) => Conversation;
   /** 换一段新对话:换 sessionId + 重建 convo(长期记忆仍保留)。返回新 sessionId。 */
   reset(): string;
+  /**
+   * 读当前可编辑人格视图(名字 + 三档情绪旋钮);desktop 人格面板初值用(承北极星「人格由用户自定义」)。
+   */
+  readonly personaView: () => PersonaView;
+  /**
+   * 应用人格修改(运行时生效):据补丁产出新种子 → **重建 PersonaEngine + Conversation**
+   * (复用同一 memory 真相源与 personaStore,长期记忆与 PAD 状态续接;sessionId 不变,对话不断)。
+   * engine 不支持运行时改 dials,故走"更新 seed → 重装配"路径(类比 reset 但带新种子、保会话)。
+   * 返回应用后的可编辑视图。
+   */
+  applyPersona(patch: PersonaPatch): PersonaView;
   /** omni 直路系统提示组装(与文字链路同源 persona/记忆/语气);语音 omni 路用。 */
   readonly composeOmniInstructions: () => string | Promise<string>;
   /** 幂等收尾:关库 / 关 trace / 关 telemetry(失败吞,绝不抛);多次调只跑一次。 */
@@ -123,14 +138,15 @@ export function assembleApp(opts: AssembleAppOptions = {}): AppHandle {
 
   // PersonaCard 装配(§6.2,card-as-config):卡优先、env 覆盖;PAD 状态复用 memory SQLite KV(跨重启续接)。
   const persona = loadPersonaFromEnv(env);
-  const seed = persona.seed;
+  // seed 可被 applyPersona 在运行时整体替换(人格自定义),故用 let + getter 暴露,读取始终拿最新。
+  let seed = persona.seed;
   const personaStore = createKvPersonaStore(mem.store);
   // 种子化角色背景/用户画像(经去重幂等,重复启动不新建,§5.8)。
   seedPersonaMemories(mem.store, persona, env['CHAT_A_USER_PROFILE']);
 
   // 供 mood 摘要读取的 PersonaEngine(与 Conversation 内部 persona 独立实例,但同种子 + 同 store,
-  // 状态一致)。desktop 状态栏 / cli persona 摘要读它的 tone()。
-  const personaEngine = new PersonaEngine({ seed, store: personaStore });
+  // 状态一致)。desktop 状态栏 / cli persona 摘要读它的 tone()。applyPersona 时随新种子重建。
+  let personaEngine = new PersonaEngine({ seed, store: personaStore });
 
   // Conversation 工厂:`reset()` 用新 sessionId 重建全新上下文(同一套核心依赖)。
   // 注意:本共享层只装配**核心** Conversation(persona/memory/总线/trace 缺省);cli 的
@@ -172,10 +188,14 @@ export function assembleApp(opts: AssembleAppOptions = {}): AppHandle {
     llmConfig,
     memory: mem.store,
     memoryInfo: { backend: mem.backend, ...(mem.dbPath ? { dbPath: mem.dbPath } : {}) },
-    seed,
+    get seed(): PersonaSeed {
+      return seed;
+    },
     personaStore,
     personaCard: persona,
-    persona: personaEngine,
+    get persona(): PersonaEngine {
+      return personaEngine;
+    },
     get convo(): Conversation {
       return convo;
     },
@@ -187,6 +207,16 @@ export function assembleApp(opts: AssembleAppOptions = {}): AppHandle {
       sessionId = randomUUID().slice(0, 8);
       convo = makeConvo(sessionId);
       return sessionId;
+    },
+    personaView: () => personaViewOf(seed),
+    applyPersona(patch: PersonaPatch): PersonaView {
+      // 1) 据补丁产出新种子(纯,夹取 [0,1] / 空名回落);2) 重建引擎 + 会话以让新人格运行时生效。
+      seed = applyPersonaPatch(seed, patch);
+      // PersonaEngine 从 store 复载 PAD 快照(故情绪状态续接),但用新 seed 的 dials/name 渲染 tone。
+      personaEngine = new PersonaEngine({ seed, store: personaStore });
+      // 重建 Conversation:沿用同一 sessionId(对话不断、记忆续接),让新 seed 进系统提示。
+      convo = makeConvo(sessionId);
+      return personaViewOf(seed);
     },
     composeOmniInstructions: () => convo.composeOmniInstructions(),
     cleanup,

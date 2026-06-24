@@ -13,6 +13,7 @@ import {
   type VoiceCloneInput,
   type VoiceCloneResult,
   type VoiceCloneStatus,
+  type PersonaForm, // 代理C
 } from './ipc-contract';
 
 /** 包装一个主→渲染推送订阅,返回退订函数(不泄漏 ipcRenderer / event 对象)。 */
@@ -44,6 +45,11 @@ export interface XiaoxueApi {
   onVoiceStatus(cb: (status: VoiceStatus) => void): () => void;
   onCloneResult(cb: (result: VoiceCloneResult) => void): () => void;
   onCloneStatus(cb: (status: VoiceCloneStatus) => void): () => void;
+  // —— 人格自定义(代理C) ——
+  /** 读当前可编辑人格(名字 + 三档),供人格面板初值。 */
+  getPersona(): Promise<PersonaForm>;
+  /** 应用人格修改(运行时生效 + 持久化);resolve 规整后的最终人格。 */
+  updatePersona(form: PersonaForm): Promise<PersonaForm>;
 }
 
 const api: XiaoxueApi = {
@@ -62,6 +68,9 @@ const api: XiaoxueApi = {
   onVoiceStatus: (cb) => subscribe<VoiceStatus>(IPC.voiceStatus, cb),
   onCloneResult: (cb) => subscribe<VoiceCloneResult>(IPC.voiceCloneResult, cb),
   onCloneStatus: (cb) => subscribe<VoiceCloneStatus>(IPC.voiceCloneStatus, cb),
+  // —— 人格自定义(代理C) ——
+  getPersona: () => ipcRenderer.invoke(IPC.personaGet),
+  updatePersona: (form) => ipcRenderer.invoke(IPC.personaUpdate, form),
 };
 
 contextBridge.exposeInMainWorld('xiaoxue', api);

@@ -20,3 +20,4 @@ export * from './self-consistency';
 export * from './llm-self-consistency';
 export * from './self-consistency-factory';
 export * from './config-loader';
+export * from './apply-persona';

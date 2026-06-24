@@ -29,9 +29,11 @@ import {
   upsertEnvLocal,
   CLONE_NO_KEY_REASON,
   VOICE_UNAVAILABLE_REASON,
+  sanitizePersonaForm,
   type AppInfo,
   type VoiceCloneInput,
   type VoiceCloneStatus,
+  type PersonaForm,
 } from './ipc-contract';
 
 let mainWindow: BrowserWindow | null = null;
@@ -112,6 +114,27 @@ function persistVoiceId(handle: AppHandle, voiceId: string): void {
     // 文件不存在 → 从空文本新建。
   }
   writeFileSync(path, upsertEnvLocal(text, 'CHAT_A_VOICE_ID', voiceId), 'utf8');
+}
+
+/**
+ * 持久化人格修改(代理C):把名字 + 三档情绪旋钮写项目根 .env.local 的覆盖键
+ * (CHAT_A_PERSONA_NAME / CHAT_A_DIAL_WARMTH / _EXPRESSIVENESS / _VOLATILITY,保留其它行),
+ * 与 config-loader 的 env 覆盖层语义对齐——下次启动 loadPersonaFromEnv 即自动续接本次自定义。
+ * (运行时已由 handle.applyPersona 重装配即时生效;此处只为跨重启留存。)写盘失败抛错由上层降级。
+ */
+function persistPersona(form: PersonaForm): void {
+  const path = join(process.cwd(), '.env.local');
+  let text = '';
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    // 文件不存在 → 从空文本新建。
+  }
+  text = upsertEnvLocal(text, 'CHAT_A_PERSONA_NAME', form.name);
+  text = upsertEnvLocal(text, 'CHAT_A_DIAL_WARMTH', String(form.warmth));
+  text = upsertEnvLocal(text, 'CHAT_A_DIAL_EXPRESSIVENESS', String(form.expressiveness));
+  text = upsertEnvLocal(text, 'CHAT_A_DIAL_VOLATILITY', String(form.volatility));
+  writeFileSync(path, text, 'utf8');
 }
 
 /** 订阅总线:UI 状态派生 + 回合后心情 + 语音转写,推给渲染层。 */
@@ -209,6 +232,40 @@ function registerIpc(handle: AppHandle): void {
     } finally {
       voiceHandle = undefined;
     }
+  });
+
+  // —— 人格自定义(代理C) ——
+  // 读当前可编辑人格(名字 + 三档),供人格面板初值。
+  ipcMain.handle(IPC.personaGet, (): PersonaForm => {
+    const v = handle.personaView();
+    return { name: v.name, warmth: v.warmth, expressiveness: v.expressiveness, volatility: v.volatility };
+  });
+
+  // 应用人格修改:夹取规整 → applyPersona 运行时生效(重装配,保留长期记忆/PAD)→ 可选持久化到 .env.local。
+  // 返回规整后的最终人格(渲染层据此回填滑块/名字)。持久化失败不影响运行时生效(已应用),仅吞掉(§3.2)。
+  ipcMain.handle(IPC.personaUpdate, (_e, raw: Partial<PersonaForm>): PersonaForm => {
+    const current = handle.personaView();
+    const form = sanitizePersonaForm(raw, current);
+    const applied = handle.applyPersona({
+      name: form.name,
+      warmth: form.warmth,
+      expressiveness: form.expressiveness,
+      volatility: form.volatility,
+    });
+    const result: PersonaForm = {
+      name: applied.name,
+      warmth: applied.warmth,
+      expressiveness: applied.expressiveness,
+      volatility: applied.volatility,
+    };
+    try {
+      persistPersona(result);
+    } catch {
+      // 写盘失败不影响本次运行时生效;下次重启可能不续接,但不崩(§3.2)。
+    }
+    // 应用后刷新横幅信息(三档/名字已变)与心情(新引擎)。
+    emit(IPC.mood, toMoodSummary(handle.persona.tone()));
+    return result;
   });
 }
 
