@@ -28,6 +28,12 @@ import type { MemoryStore } from '@chat-a/memory';
 import type { LightVoiceBus } from './bus';
 import { SentenceSplitter } from './sentence-splitter';
 import { nextState, type VoiceBusEvent, type VoiceState } from './voice-turn-state';
+import {
+  evaluateAttention,
+  type AttentionGateOptions,
+  type AttentionMode,
+  type UserVoiceSignal,
+} from './attention';
 
 /** 被打断半句写回记忆时拼接的尾标（承 OLV：小雪记得在哪被打断）。 */
 const INTERRUPT_MARK = '[被用户打断]';
@@ -57,6 +63,30 @@ export interface VoiceLoopDeps {
   readonly sessionId: string;
   /** 注入时钟（测试确定性）；缺省 `Date.now`。 */
   readonly clock?: () => number;
+  /**
+   * 用户语音 URGENT 关注闸（§7 软反转，**可选**、纯加法）。
+   * 不注入时(autonomy 默认关)→ barge-in 路径**逐字不变**(speaking 中一检出语音即即时打断,与现状一致)。
+   * 注入后:speaking 中检出语音 → 经 `evaluateAttention(mode, signal)` 据 attention_mode 决定是否真打断;
+   * 不可配底线(crisis/hardInterrupt)恒立即打断。本闸只影响「是否中断在飞输出」,不改其余状态机。
+   */
+  readonly attention?: VoiceLoopAttentionConfig;
+}
+
+/** VoiceLoop 关注闸配置(可选注入;承 §7 软反转 + attention_mode)。 */
+export interface VoiceLoopAttentionConfig {
+  /**
+   * 当前关注模式;可为常量或现读函数(行为即配置,改配置下次检出生效,无重启)。
+   * 函数形态便于装配层把 `interaction_dials.attention_mode` 热接入。
+   */
+  readonly mode: AttentionMode | (() => AttentionMode);
+  /** 关注闸门槛旋钮(可选;省略用默认 focusSustainMs=600）。 */
+  readonly options?: AttentionGateOptions;
+  /**
+   * 据当前用户语音事件构造 `UserVoiceSignal`(可选)。
+   * 缺省:仅以 VAD speech_start 事件 + 据帧时间戳估算的 sustainedMs 构造(无 crisis/hardInterrupt 标注,
+   * 由上层感知/分类经此回调注入危机/硬打断/在飞标志)。
+   */
+  readonly buildSignal?: (ctx: { readonly sustainedMs: number; readonly speaking: boolean }) => UserVoiceSignal;
 }
 
 export class VoiceLoop {
@@ -70,6 +100,10 @@ export class VoiceLoop {
   readonly #bus: LightVoiceBus;
   readonly #sessionId: string;
   readonly #now: () => number;
+  /** 关注闸配置（§7 软反转）；未注入则保持现状即时打断（autonomy 默认关时逐字不变）。 */
+  readonly #attention: VoiceLoopAttentionConfig | undefined;
+  /** 本次 speaking 回合用户开口的首帧时刻（ms），用于估算 sustainedMs 喂关注闸。 */
+  #userSpeechStartAtMs: number | null = null;
 
   /** 当前状态（稳定四态 + 瞬态）。 */
   #state: VoiceState = 'listening';
@@ -104,6 +138,7 @@ export class VoiceLoop {
     this.#bus = deps.bus;
     this.#sessionId = deps.sessionId;
     this.#now = deps.clock ?? Date.now;
+    this.#attention = deps.attention;
   }
 
   /** 当前状态（供测试断言）。 */
@@ -128,6 +163,7 @@ export class VoiceLoop {
     this.#abortCurrent(); // 真取消在途「想」回合的底层 LLM 流
     this.#replyAccum = '';
     this.#audioBuf = [];
+    this.#userSpeechStartAtMs = null;
   }
 
   /** abort 当前回合的取消控制器（若有）并清空句柄；幂等、不抛（§3.2）。 */
@@ -226,12 +262,26 @@ export class VoiceLoop {
         return;
       }
 
-      // speaking：检出语音起点 → barge_in_pending → v1 即时打断
+      // speaking：检出语音起点 → barge_in_pending → v1 即时打断（或经关注闸据 attention_mode 判定）
       if (this.#state === 'speaking') {
-        if (evt?.type === 'speech_start') {
-          if (this.#go('vad:speech_start')) {
-            this.#interrupt(); // barge_in_pending → listening
+        if (this.#attention === undefined) {
+          // 未注入关注闸（autonomy 默认关）：逐字保持现状——检出语音起点即进 barge_in_pending 即时打断。
+          if (evt?.type === 'speech_start') {
+            if (this.#go('vad:speech_start')) {
+              this.#interrupt(); // barge_in_pending → listening
+            }
           }
+          return;
+        }
+        // 注入关注闸（§7 软反转）：
+        // - 首次检出语音起点：记用户开口起点，立即按 attention_mode 判一次（companion/balanced 即打断；
+        //   focus 未达坚持门槛则仅感知不打断，保持 speaking）。
+        // - 用户持续出声（result.speaking 且已记起点）：随 sustainedMs 增长重判（focus 坚持够即打断）。
+        if (evt?.type === 'speech_start') {
+          this.#userSpeechStartAtMs = pcm.timestampMs;
+          this.#applyAttention(pcm.timestampMs);
+        } else if (result.speaking && this.#userSpeechStartAtMs !== null) {
+          this.#applyAttention(pcm.timestampMs);
         }
         return;
       }
@@ -398,6 +448,42 @@ export class VoiceLoop {
     }
   }
 
+  // ───────────────────────────── 关注闸（§7 软反转）─────────────────────────────
+
+  /**
+   * speaking 期用户开口时据 attention_mode 判定是否真打断（§7 软反转）。
+   * 仅在注入 `#attention` 时调用（未注入走现状即时打断路径，行为逐字不变）。
+   *
+   * 流程：算 sustainedMs → `evaluateAttention(mode, signal)` → 若 `trueInterrupt`：
+   *   `#go('vad:speech_start')`(speaking→barge_in_pending) + `#interrupt()`(→listening)；
+   * 否则（如 focus 未达坚持门槛）保持 speaking，只感知不打断（绝不装聋）。
+   * 任何异常被捕获（§3.2）：兜底退回「即时打断」以不漏掉用户。
+   */
+  #applyAttention(nowFrameMs: number): void {
+    const cfg = this.#attention;
+    if (cfg === undefined) return;
+    try {
+      const startedAt = this.#userSpeechStartAtMs ?? nowFrameMs;
+      const sustainedMs = Math.max(0, nowFrameMs - startedAt);
+      const mode = typeof cfg.mode === 'function' ? cfg.mode() : cfg.mode;
+      const signal: UserVoiceSignal = cfg.buildSignal
+        ? cfg.buildSignal({ sustainedMs, speaking: true })
+        : { sustainedMs, somethingInFlight: true };
+      const verdict = evaluateAttention(mode, signal, cfg.options);
+      if (verdict.trueInterrupt) {
+        this.#userSpeechStartAtMs = null;
+        if (this.#go('vad:speech_start')) {
+          this.#interrupt(); // barge_in_pending → listening
+        }
+      }
+      // trueInterrupt=false：保持 speaking，仅感知不打断（focus 短促出声 / balanced 无在飞）。
+    } catch (err) {
+      console.warn('[VoiceLoop] 关注闸判定抛错(兜底即时打断):', err);
+      this.#userSpeechStartAtMs = null;
+      if (this.#go('vad:speech_start')) this.#interrupt();
+    }
+  }
+
   // ───────────────────────────── 打断 ─────────────────────────────
 
   /**
@@ -432,6 +518,7 @@ export class VoiceLoop {
     }
     this.#replyAccum = '';
     this.#audioBuf = [];
+    this.#userSpeechStartAtMs = null;
     this.#go('turn:interrupt'); // barge_in_pending → listening
   }
 

@@ -7,4 +7,7 @@ export * from './audio-pacer';
 export * from './query-embed';
 export * from './voice-loop';
 export * from './sentence-splitter';
+export * from './sentence-aggregator';
+export * from './classifier-processor';
+export * from './attention';
 export * from './voice-turn-state';
