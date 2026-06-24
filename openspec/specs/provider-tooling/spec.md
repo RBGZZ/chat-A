@@ -223,3 +223,122 @@ TBD - created by archiving change provider-tool-use. Update Purpose after archiv
 - **WHEN** 对同一 Provider 调用 `stream`/`complete`
 - **THEN** 其消息映射与本切片之前一致(非 assistant 含 'tool' 归并为 user 字符串内容),无 `tools`/`tool_choice`/`tool_use` 块
 
+### Requirement: LLM Provider 注册与 DashScope(Qwen)纯文本映射
+
+系统 SHALL 通过 LLM Provider 注册表把开放字符串 `provider` 映射到具体实现;加新厂商 MUST 只需在注册表登记工厂,`createLlm` 核心与系统其余部分 MUST 零改动(承 §3.1 接缝)。其中 `qwen` MUST 注册为复用 `OpenAiCompatLlm` 的**纯文本** Provider,默认指向 DashScope OpenAI 兼容端点 `https://dashscope.aliyuncs.com/compatible-mode/v1`(承 §3.3 OpenAI 兼容复用)。该默认 base URL MUST 为具名常量(无 magic number),且 MUST 可经配置覆盖(`LlmConfig.baseURL` / 环境变量 `CHAT_A_LLM_BASE_URL`,承 §3.2 行为即配置)。`qwen` 工厂在 `apiKey` 缺失或为空时 MUST 抛清晰错误(指向应设的环境变量),而非静默构造不可用实例。本要求 MUST 仅覆盖纯文本 chat/completions + SSE 路径;多模态 audio-in(qwen omni 系列)不在本要求范围,留待后续独立能力。
+
+#### Scenario: createLlm 解析 qwen 为 DashScope OpenAI 兼容 Provider
+
+- **WHEN** 以 `{ provider:'qwen', model:'qwen-plus', apiKey:'<key>' }` 调用 `createLlm`
+- **THEN** 返回 `OpenAiCompatLlm` 实例,其 `id` 为 `'qwen'`,`baseURL` 为 DashScope OpenAI 兼容端点默认值
+
+#### Scenario: qwen 已登记于注册表
+
+- **WHEN** 读取已注册的 LLM Provider 列表
+- **THEN** 列表包含 `'qwen'`,加它未改动 `createLlm` 核心解析逻辑
+
+#### Scenario: 缺 apiKey 抛清晰错误
+
+- **WHEN** 以 `{ provider:'qwen', model:'qwen-plus' }`(无 apiKey)调用 `createLlm`
+- **THEN** 抛出明确错误,提示需要设置 API key(环境变量),不返回不可用实例
+
+#### Scenario: base URL 可经配置覆盖
+
+- **WHEN** 以 `{ provider:'qwen', model, apiKey, baseURL:'https://自托管端点/v1' }` 调用 `createLlm`(或经 `CHAT_A_LLM_BASE_URL` 注入)
+- **THEN** 返回实例的 `baseURL` 为覆盖后的端点(去尾斜杠),而非内置默认值
+
+### Requirement: OpenAiCompatLlm 暴露只读 baseURL
+
+`OpenAiCompatLlm` SHALL 暴露**只读** `baseURL`(已规整、去尾随斜杠),与已公开的 `id`/`model` 对称,仅供 trace/日志与可测性。该字段 MUST 为纯加法,不改变 `stream`/`complete`/工具通道的 fetch 行为。
+
+#### Scenario: 读取规整后的 baseURL
+
+- **WHEN** 以 `baseURL:'https://x.example/v1/'` 构造 `OpenAiCompatLlm` 并读取其 `baseURL`
+- **THEN** 返回 `'https://x.example/v1'`(尾随斜杠被去除),且其 `stream`/`complete` 行为与本切片之前一致
+
+### Requirement: Qwen Omni Realtime(WebSocket 多模态)Provider 注册与 audio-in→文本流
+
+系统 SHALL 通过 LLM Provider 注册表把开放字符串 `provider='qwen-omni'` 映射到基于 DashScope **WebSocket 实时多模态**端点(OpenAI-Realtime 风格协议)的 `QwenOmniLlm`;加它 MUST 只需在注册表登记工厂,`createLlm` 核心与系统其余部分 MUST 零改动(承 §3.1 接缝)。默认 WS 端点 MUST 为具名常量 `QWEN_DASHSCOPE_REALTIME_URL`(`wss://dashscope.aliyuncs.com/api-ws/v1/realtime`,无 magic number),且 MUST 可经 `LlmConfig.baseURL` 覆盖(承 §3.2 行为即配置);model id MUST 由配置传入(不写死快照名)。该 Provider 在 `apiKey` 缺失或为空时 MUST 抛清晰错误(指向应设的环境变量),而非静默构造不可用实例。
+
+该 Provider MUST 实现 `LlmProvider` 的文本兼容面(`stream`/`complete`),把文本 prompt 经 WS(`modalities:["text"]`)送出并聚合 `response.text.delta` 回吐字符串流,使其可作为现有「STT→文本LLM」路径的**可选替代**装入 registry 而**不破坏**现有路径。该 Provider MUST 另提供真多模态面 `respondToAudio`(吃 PCM 块流 → 经 `input_audio_buffer.append` 送出 → 产出 transcript/text/end 判别联合事件),为后续 runtime 接入 audio-in 直路留接缝。该 Provider MUST 支持 `AbortSignal` 真取消(abort 时关闭 WS、停止产出,承 §3.2 真打断),MUST 在鉴权/连接/能力缺失时 fail-fast 抛清晰错误(供上层优雅降级回传统路径),并 MUST 支持 WS 连接注入(工厂模式)以做不依赖真实网络的确定性测试。本要求 MUST 不改动 VoiceLoop / TTS;audio-in 直路接入 VoiceLoop 不在本要求范围。
+
+#### Scenario: createLlm 解析 qwen-omni 为 WS 多模态 Provider
+
+- **WHEN** 以 `{ provider:'qwen-omni', model:'qwen3.5-omni-flash-realtime', apiKey:'<key>' }` 调用 `createLlm`
+- **THEN** 返回 `QwenOmniLlm` 实例,其 `id` 为 `'qwen-omni'`,默认 WS 端点为 `QWEN_DASHSCOPE_REALTIME_URL`
+
+#### Scenario: qwen-omni 已登记于注册表
+
+- **WHEN** 读取已注册的 LLM Provider 列表
+- **THEN** 列表包含 `'qwen-omni'`,加它未改动 `createLlm` 核心解析逻辑,且与纯文本 `'qwen'` 区分
+
+#### Scenario: 缺 apiKey 抛清晰错误
+
+- **WHEN** 以 `{ provider:'qwen-omni', model }`(无 apiKey)调用 `createLlm`
+- **THEN** 抛出明确错误,提示需要设置 API key(环境变量),不返回不可用实例
+
+#### Scenario: 文本兼容面经 WS 流式回吐文本
+
+- **WHEN** 以文本 `LlmRequest` 调用 `stream`,服务端经 WS 回若干 `response.text.delta` 后 `response.done`
+- **THEN** `stream` 依序 yield 各 delta 文本,`response.done` 后结束并关闭 WS;请求中含 `session.update`(`modalities:["text"]`)与文本内容项
+
+#### Scenario: 真多模态面 audio-in 产出 transcript 与回复文本
+
+- **WHEN** 向 `respondToAudio` 喂 PCM 块流,服务端回 `conversation.item.input_audio_transcription.completed`(transcript)与 `response.text.delta`(回复)
+- **THEN** Provider 把音频经 `input_audio_buffer.append`(base64)送出,并产出 `{type:'transcript'}`(用户话语)+ `{type:'text'}`(回复增量)+ `{type:'end'}`
+
+#### Scenario: AbortSignal 中途真取消
+
+- **WHEN** 流式产出进行中其 `signal` 被 abort
+- **THEN** Provider 关闭 WS 并停止产出(生成器终止),不再 yield 后续事件
+
+#### Scenario: 连接/鉴权失败优雅降级
+
+- **WHEN** WS 收到 `error` 事件或发生非正常关闭
+- **THEN** 当前调用抛出清晰错误(不打印鉴权字段),供上层 catch 后降级回传统 STT→文本LLM 路径
+
+#### Scenario: WS 连接可注入以确定性测试
+
+- **WHEN** 构造 `QwenOmniLlm` 时注入自定义 WS 工厂(mock)
+- **THEN** Provider 用注入的连接收发事件,测试无需真实网络即可覆盖正常流式/打断/错误降级
+
+### Requirement: DashScope qwen-tts-realtime 流式 TTS Provider
+
+系统 SHALL 通过 TTS Provider 注册表把判别联合 `kind:'qwen-tts'` 映射到 `QwenTtsRealtime` 实现,经 DashScope WebSocket(OpenAI-Realtime 风格协议)做**流式语音合成**(承 §4 流式优先、§4.3 可换性)。加它 MUST 只需在注册表登记工厂,`createTts` 核心 MUST 零改动。
+
+`QwenTtsRealtime` MUST 实现 `TtsProvider`:`synthesize(text, opts?, signal?)` 返回 `AsyncIterable<PcmChunk>`,产出 **24kHz mono Int16**(对齐 `TTS_SAMPLE_RATE_HZ`,默认 `response_format=PCM_24000HZ_MONO_16BIT`),且 MUST **边收边产**(收到首个 `response.audio.delta` 即 yield,不等整段),以求低首音延迟。`id` MUST 仅供 trace/日志,业务不得据此分支。
+
+能力声明 MUST 含 `languages`(多语种 `['*']`)、`voiceId`(内置音色)、`sampleRate:24000`、`streaming:true`、`voiceCloning:false`。`synthesize` MUST 先过能力门 fail-fast:语种不在 `languages` 内(`assertTtsLanguage`)、或请求复刻(带 `refAudio`)而 `voiceCloning=false`(`assertTtsCloning`)即抛(承 §4.1/§4.3)。
+
+WebSocket 连接 MUST 经**可注入工厂端口**建立(镜像 kokoro 的 R1 注入接缝),以保证单测**不触真网络**;缺省工厂在真实运行时懒加载 WebSocket 实现建连。鉴权 MUST 用 `Authorization: Bearer <key>` 请求头,且**任何日志/错误信息 MUST NOT 含 key 明文**。默认 base URL/model MUST 为可配置项(无 magic number、不写死日期快照),可经配置/环境变量覆盖(承 §3.2)。
+
+#### Scenario: 流式产出 PcmChunk
+
+- **WHEN** 注入的 WebSocket 依次回放 `session.created`→`response.audio.delta`(base64 PCM)×N→`response.done`,调用 `synthesize(text)`
+- **THEN** 迭代器逐个产出对应 `PcmChunk`(`sampleRate===24000`、`channels===1`、`samples` 为 base64 解码后的 Int16 小端样本),首帧到达即产出、不等整段
+
+#### Scenario: AbortSignal 中途取消真停
+
+- **WHEN** `synthesize(text, opts, signal)` 进行中(已建连、尚有未收音频),`signal` 被 `abort()`
+- **THEN** 迭代器停止继续产出,且实现向服务端发 `input_text_buffer.clear` 并关闭 WebSocket(不再后台合成/烧远端额度)
+
+#### Scenario: 连接/鉴权/协议错误优雅降级
+
+- **WHEN** WebSocket 触发 `error`/异常 `close`,或服务端回 `error` 事件
+- **THEN** `synthesize` 抛出带上下文的清晰中文错误(含 provider id 与错误片段,**不含 key 明文**),由上层按既有降级策略处理,而非静默吞或崩溃
+
+#### Scenario: 能力门拒绝复刻与不支持语种
+
+- **WHEN** 调用 `synthesize` 时带 `refAudio`(请求复刻),或 `opts.language` 不在能力 `languages` 内
+- **THEN** 分别因 `voiceCloning=false` / 语种不支持而 fail-fast 抛错,不建立连接
+
+#### Scenario: 缺 apiKey 构造即报错
+
+- **WHEN** 以缺失/空 `apiKey` 构造 `QwenTtsRealtime`(或经工厂)
+- **THEN** 构造即抛清晰错误,提示设置 `CHAT_A_DASHSCOPE_API_KEY`(或 `CHAT_A_TTS_API_KEY`),不返回不可用实例
+
+#### Scenario: qwen-tts 已登记于注册表且可配置解析
+
+- **WHEN** 读取已注册 TTS kinds,并以 `CHAT_A_TTS_KIND=qwen-tts` + 相关 env 调 `loadTtsConfig`
+- **THEN** kinds 列表含 `'qwen-tts'`;`loadTtsConfig` 返回 `kind:'qwen-tts'` 配置(model/voice/endpoint 等正确,apiKey 可回落 `CHAT_A_DASHSCOPE_API_KEY`),加它未改动 `createTts` 核心解析逻辑
+
