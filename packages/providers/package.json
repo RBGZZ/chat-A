@@ -13,6 +13,10 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",
-    "@chat-a/protocol": "workspace:*"
+    "@chat-a/protocol": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.12"
   }
 }
