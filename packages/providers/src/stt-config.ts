@@ -12,6 +12,14 @@ import type { Device, ComputeType } from './hardware';
 
 export type SttConfig = FakeSttConfig | OpenAiCompatSttConfig | WhisperLocalSttConfig;
 
+/**
+ * DashScope(阿里百炼)OpenAI 兼容端点根(纯文本 / ASR transcriptions 共用);与 registry 的
+ * `QWEN_DASHSCOPE_BASE_URL` 同值。云 ASR 经此端点 `/audio/transcriptions` 上传 WAV(qwen3-asr-flash)。
+ */
+export const QWEN_DASHSCOPE_COMPAT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+/** DashScope 录音文件识别默认模型(< 10MB 走 OpenAI 兼容 transcriptions)。 */
+export const QWEN_ASR_DEFAULT_MODEL = 'qwen3-asr-flash';
+
 /** 确定性桩(无依赖、可复现;对应 LLM 侧 fake)。 */
 export interface FakeSttConfig {
   readonly kind: 'fake';
@@ -97,6 +105,28 @@ export function loadSttConfig(env: NodeJS.ProcessEnv = process.env): SttConfig {
   const apiKey = env['CHAT_A_STT_API_KEY'];
   const baseURL = env['CHAT_A_STT_BASE_URL'];
   const language = env['CHAT_A_STT_LANGUAGE'];
+
+  // DashScope 便捷档(填 key 即用):CHAT_A_STT_KIND=qwen → DashScope 云 ASR 经 OpenAI 兼容端点。
+  // key 回落 CHAT_A_DASHSCOPE_API_KEY;model/baseURL 有内置默认,可被 CHAT_A_STT_MODEL/BASE_URL 覆盖。
+  if (kind === 'qwen') {
+    const dashKey = apiKey ?? env['CHAT_A_DASHSCOPE_API_KEY'];
+    const temperatureRawQ = env['CHAT_A_STT_TEMPERATURE'];
+    const temperatureQ =
+      temperatureRawQ && Number.isFinite(Number(temperatureRawQ)) ? Number(temperatureRawQ) : undefined;
+    const responseFormatQ = env['CHAT_A_STT_RESPONSE_FORMAT'] as
+      | OpenAiCompatSttConfig['responseFormat']
+      | undefined;
+    return {
+      kind: 'openai-compat',
+      id: env['CHAT_A_STT_ID'] ?? 'qwen-asr',
+      model: model ?? QWEN_ASR_DEFAULT_MODEL,
+      apiKey: dashKey ?? '',
+      baseURL: baseURL ?? QWEN_DASHSCOPE_COMPAT_BASE_URL,
+      ...(language ? { language } : {}),
+      ...(responseFormatQ ? { responseFormat: responseFormatQ } : {}),
+      ...(temperatureQ !== undefined ? { temperature: temperatureQ } : {}),
+    };
+  }
 
   const hasOpenAi =
     typeof model === 'string' &&
