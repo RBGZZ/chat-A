@@ -22,7 +22,8 @@
  */
 import type { AudioFrame, AudioTransport, Unsubscribe } from '@chat-a/protocol';
 import { makeBusEvent, makeDataFrame, type PcmFrame } from '@chat-a/protocol';
-import type { VadDetector, TurnDetector } from '@chat-a/voice-detect';
+import type { VadDetector, TurnDetector, EchoGuardConfig } from '@chat-a/voice-detect';
+import { EchoGuardGate } from '@chat-a/voice-detect';
 import type { SttProvider, TtsProvider, PcmChunk } from '@chat-a/providers';
 import type { MemoryStore } from '@chat-a/memory';
 import type { LightVoiceBus } from './bus';
@@ -70,6 +71,15 @@ export interface VoiceLoopDeps {
    * 不可配底线(crisis/hardInterrupt)恒立即打断。本闸只影响「是否中断在飞输出」,不改其余状态机。
    */
   readonly attention?: VoiceLoopAttentionConfig;
+  /**
+   * 自打断防护(EchoGuard,§4 行 162/176 缺口的**软件侧部分缓解**,**可选**、纯加法)。
+   * 不注入时(缺省)→ speaking 期 barge-in 逐字不变(检出语音即按既有路径打断,等价 N=1 即时确认)。
+   * 注入后:speaking 期检出的上行语音帧先喂 `EchoGuardGate`,**连续 N 帧高置信**(可选叠能量阈值)
+   * 才确认为真打断;压制自家 TTS 回声引起的误打断,但真人连续 N 帧仍能可靠打断(不变「打不断」)。
+   * 与 attention 闸正交:EchoGuard 先去抖确认「是不是真语音」,确认后再(若注入 attention)按 mode 判。
+   * ⚠️ 这**不是** AEC(回声消除需声学/原生方案);仅软件侧部分缓解。危机/硬打断信号豁免 N 帧去抖。
+   */
+  readonly echoGuard?: EchoGuardConfig;
 }
 
 /**
@@ -117,6 +127,11 @@ export class VoiceLoop {
   readonly #now: () => number;
   /** 关注闸配置（§7 软反转）；未注入则保持现状即时打断（autonomy 默认关时逐字不变）。 */
   readonly #attention: VoiceLoopAttentionConfig | undefined;
+  /**
+   * 自打断防护去抖件(§4 软件侧部分缓解);未注入则 undefined → speaking 期 barge-in 逐字现状。
+   * 注入后在 speaking 期累计「连续高置信语音帧数」,达 N 才确认真打断(压回声毛刺,真人仍打得断)。
+   */
+  readonly #echoGuard: EchoGuardGate | undefined;
   /** 本次 speaking 回合用户开口的首帧时刻（ms），用于估算 sustainedMs 喂关注闸。 */
   #userSpeechStartAtMs: number | null = null;
 
@@ -154,6 +169,11 @@ export class VoiceLoop {
     this.#sessionId = deps.sessionId;
     this.#now = deps.clock ?? Date.now;
     this.#attention = deps.attention;
+    // EchoGuard:仅在注入且 enabled 时启用;否则 undefined → speaking 期 barge-in 逐字现状。
+    this.#echoGuard =
+      deps.echoGuard !== undefined && deps.echoGuard.enabled
+        ? new EchoGuardGate(deps.echoGuard)
+        : undefined;
   }
 
   /** 当前状态（供测试断言）。 */
@@ -309,6 +329,7 @@ export class VoiceLoop {
     if (frame.type !== 'audio:input') return; // 只消费上行麦克风帧
     try {
       const pcm = frame.payload.audio; // payload.audio 本就是 PcmFrame，直接喂 VAD
+      this.#lastFrameSamples = pcm.samples; // 供 EchoGuard 算本帧能量(仅 minEnergy>0 时用)
       const result = this.#vad.pushFrame(pcm);
       const evt = result.event;
 
@@ -338,11 +359,23 @@ export class VoiceLoop {
         return;
       }
 
-      // speaking：检出语音起点 → barge_in_pending → v1 即时打断（或经关注闸据 attention_mode 判定）
+      // speaking：检出语音起点 → barge_in_pending → v1 即时打断（或经关注闸据 attention_mode 判定）。
+      // EchoGuard（§4 软件侧自打断防护）若注入,则在进入打断判定**之前**做连续 N 帧高置信去抖,
+      // 压制自家 TTS 回声引起的误打断（真人连续 N 帧仍能可靠打断）。危机/硬打断豁免去抖。
       if (this.#state === 'speaking') {
+        if (this.#echoGuard !== undefined) {
+          // 危机/硬打断豁免:经 attention 的 buildSignal 取信号,若标 crisis/hardInterrupt 则绕过 N 帧去抖。
+          if (!this.#echoGuardConfirms(result, pcm.timestampMs, evt?.type === 'speech_start')) {
+            return; // 未确认(回声毛刺/连续帧不足)→ 保持 speaking,只感知不打断
+          }
+          // 已确认(连续 N 帧 / 危机豁免):落到下方既有打断判定(未注入 attention→即时;注入→按 mode)。
+        }
+
         if (this.#attention === undefined) {
           // 未注入关注闸（autonomy 默认关）：逐字保持现状——检出语音起点即进 barge_in_pending 即时打断。
-          if (evt?.type === 'speech_start') {
+          // 注:EchoGuard 注入时,确认由 #echoGuardConfirms 决定(上方已 return 拦截未确认帧),
+          //     故此处确认后无论本帧是否 speech_start 事件都应打断（连续第 N 帧可能非 start 事件）。
+          if (evt?.type === 'speech_start' || this.#echoGuard !== undefined) {
             if (this.#go('vad:speech_start')) {
               this.#interrupt(); // barge_in_pending → listening
             }
@@ -356,7 +389,11 @@ export class VoiceLoop {
         if (evt?.type === 'speech_start') {
           this.#userSpeechStartAtMs = pcm.timestampMs;
           this.#applyAttention(pcm.timestampMs);
-        } else if (result.speaking && this.#userSpeechStartAtMs !== null) {
+        } else if ((result.speaking || this.#echoGuard !== undefined) && this.#userSpeechStartAtMs !== null) {
+          this.#applyAttention(pcm.timestampMs);
+        } else if (this.#echoGuard !== undefined && this.#userSpeechStartAtMs === null) {
+          // EchoGuard 确认但尚未记起点(连续帧确认在 start 事件之外):补记起点并判一次。
+          this.#userSpeechStartAtMs = pcm.timestampMs;
           this.#applyAttention(pcm.timestampMs);
         }
         return;
@@ -482,6 +519,7 @@ export class VoiceLoop {
       this.#resetToListening();
     }
     this.#replyAccum = '';
+    this.#echoGuard?.reset(); // 清自打断防护连续计数(回合自然结束)
   }
 
   /** 把累积音频帧转 PcmChunk 流喂 STT，取最后一条 final 文本（无 final 取最后一条）。 */
@@ -560,6 +598,66 @@ export class VoiceLoop {
     }
   }
 
+  // ───────────────────────────── EchoGuard（§4 软件侧自打断防护）─────────────────────────────
+
+  /** Int16 满量程(能量归一化分母);具名常量,无 magic number。 */
+  static readonly #FULL_SCALE = 32_768;
+
+  /**
+   * speaking 期 EchoGuard 去抖确认（仅在注入 `#echoGuard` 时调用）。
+   *
+   * 返回 true 表示「应放行到既有打断判定」：
+   *   1. **危机/硬打断豁免**：若注入了 attention 的 `buildSignal` 且其信号标 `crisis`/`hardInterrupt`，
+   *      绕过 N 帧去抖立即放行（承「救命不可配」§法律底线）。
+   *   2. 否则把本帧 `{prob, energy01, speakingFromVad}` 喂 `EchoGuardGate`，连续 N 帧高置信才放行；
+   *      未确认 → 返回 false（保持 speaking，只感知不打断）。
+   *
+   * `prob` 取自 VAD 结果；`energy01` 由帧样本 RMS 归一化（仅 `minEnergy>0` 时参与，纯计算无副作用）。
+   * 任何异常被捕获（§3.2 优雅降级）：兜底放行（宁可不漏掉用户，也不因防护 bug 变「打不断」）。
+   */
+  #echoGuardConfirms(
+    result: { readonly prob: number; readonly speaking: boolean },
+    nowFrameMs: number,
+    isSpeechStart: boolean,
+  ): boolean {
+    const gate = this.#echoGuard;
+    if (gate === undefined) return true; // 未注入:即时确认(逐字现状)
+    try {
+      // 危机/硬打断豁免:只在有 attention buildSignal 通道时有意义(纯语音无危机分类来源)。
+      const cfg = this.#attention;
+      if (cfg?.buildSignal) {
+        const startedAt = this.#userSpeechStartAtMs ?? nowFrameMs;
+        const sustainedMs = Math.max(0, nowFrameMs - startedAt);
+        const sig = cfg.buildSignal({ sustainedMs, speaking: true });
+        if (sig.crisis === true || sig.hardInterrupt === true) {
+          gate.reset(); // 豁免立即打断后清计数,避免残留影响下一回合
+          return true;
+        }
+      }
+      const verdict = gate.push({
+        prob: result.prob,
+        energy01: this.#frameEnergy01(),
+        // VAD「说话中」或本帧即 speech_start 事件都视作有声(speech_start 当帧 result.speaking 可能尚未翻真)。
+        speakingFromVad: result.speaking || isSpeechStart,
+      });
+      return verdict.confirmed;
+    } catch (err) {
+      console.warn('[VoiceLoop] EchoGuard 判定抛错(兜底放行,不变打不断):', err);
+      return true;
+    }
+  }
+
+  /** 本帧归一化 RMS 能量(0~1);仅 EchoGuard `minEnergy>0` 时实际影响判定。 */
+  #lastFrameSamples: Int16Array | null = null;
+  #frameEnergy01(): number {
+    const s = this.#lastFrameSamples;
+    if (s === null || s.length === 0) return 0;
+    let sum = 0;
+    for (let i = 0; i < s.length; i++) sum += s[i]! * s[i]!;
+    const rms = Math.sqrt(sum / s.length);
+    return Math.min(1, rms / VoiceLoop.#FULL_SCALE);
+  }
+
   // ───────────────────────────── 打断 ─────────────────────────────
 
   /**
@@ -598,6 +696,7 @@ export class VoiceLoop {
     this.#replyAccum = '';
     this.#audioBuf = [];
     this.#userSpeechStartAtMs = null;
+    this.#echoGuard?.reset(); // 清自打断防护连续计数(回合结束)
     this.#go('turn:interrupt', { reason }); // barge_in_pending → listening(reason 透传可追溯)
   }
 
@@ -608,6 +707,7 @@ export class VoiceLoop {
    * 否则直接硬置 listening（不 emit，避免非法迁移 warn 噪声）。
    */
   #resetToListening(): void {
+    this.#echoGuard?.reset(); // 清自打断防护连续计数(降级回 listening)
     if (this.#state === 'listening') return;
     // 优先走合法迁移以保持 BusEvent 可追溯
     if (this.#state === 'endpointing') {
