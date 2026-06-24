@@ -15,7 +15,14 @@
  */
 import { stdout, env as procEnv } from 'node:process';
 import { connectClientTransport } from '@chat-a/gateway';
-import { createStt, loadSttConfig, createTts, loadTtsConfig } from '@chat-a/providers';
+import {
+  createStt,
+  loadSttConfig,
+  createTts,
+  loadTtsConfig,
+  QwenOmniLlm,
+  QWEN_DASHSCOPE_REALTIME_URL,
+} from '@chat-a/providers';
 import type { MemoryStore } from '@chat-a/memory';
 import {
   StubVadDetector,
@@ -27,7 +34,7 @@ import {
   SilenceTimeoutEouModel,
   type VadDetector,
 } from '@chat-a/voice-detect';
-import type { LightVoiceBus, SpeakStateView } from '@chat-a/runtime';
+import type { LightVoiceBus, SpeakStateView, OmniAudioPort, VoicePath } from '@chat-a/runtime';
 import type { AudioDevice } from './audio/audio-device';
 import { FakeAudioDevice } from './audio/fake-audio-device';
 import { NodeAudioDevice } from './audio/node-audio-device';
@@ -49,6 +56,52 @@ export const DEFAULT_GATEWAY_URL = 'ws://127.0.0.1:8787';
 /** 解析传输档:仅识别 websocket;其它/缺省一律回落 inprocess(缺省零行为变更)。 */
 export function loadTransportKind(env: NodeJS.ProcessEnv): TransportKind {
   return (env['CHAT_A_TRANSPORT'] ?? '').toLowerCase() === 'websocket' ? 'websocket' : 'inprocess';
+}
+
+/** omni audio-in 直路默认 model id(承 provider design §0:目录可用 realtime id,无 .5,可经 env 覆盖)。 */
+export const DEFAULT_OMNI_MODEL = 'qwen3-omni-flash-realtime';
+
+/**
+ * 解析语音路径档(§4 双路径,行为即配置):`CHAT_A_VOICE_PATH=stt|omni`,**缺省 `stt`**(逐字不变)。
+ *   - `stt`(缺省/空/其它):现有 VAD→EOU→STT→LLM→TTS 路径。
+ *   - `omni`:audio-in 直路(path B,§7#5 prosody)——尝试构造 omni 端口注入 VoiceLoop;
+ *     构造/key 缺失失败则回落 STT(见 {@link createOmniAudioPort})。
+ */
+export function loadVoicePath(env: NodeJS.ProcessEnv): VoicePath {
+  return (env['CHAT_A_VOICE_PATH'] ?? '').toLowerCase() === 'omni' ? 'omni' : 'stt';
+}
+
+/**
+ * 按 env 构造 omni audio-in 端口(path B):直接构造 `QwenOmniLlm`(它**不在 LLM registry**,
+ * 因 DashScope realtime 不接纯文本 item)。`QwenOmniLlm.respondToAudio` 形态满足 `OmniAudioPort`,
+ * 故可直接当端口注入 VoiceLoop。
+ *   - key 读 `CHAT_A_DASHSCOPE_API_KEY`;缺失 → 打印明确中文提示,返回 undefined(回落 STT,绝不崩)。
+ *   - model 读 `CHAT_A_OMNI_MODEL`(缺省 {@link DEFAULT_OMNI_MODEL});
+ *     baseURL 读 `CHAT_A_OMNI_BASE_URL`(缺省 {@link QWEN_DASHSCOPE_REALTIME_URL})。
+ *   - 构造抛错 → catch、打印中文提示、返回 undefined(回落 STT)。
+ * 惰性连接:构造不触网(QwenOmniLlm 首次 respondToAudio 才建连),装配安全。
+ */
+export function createOmniAudioPort(env: NodeJS.ProcessEnv): OmniAudioPort | undefined {
+  const apiKey = env['CHAT_A_DASHSCOPE_API_KEY'];
+  if (apiKey === undefined || apiKey.length === 0) {
+    stdout.write(
+      '[语音] CHAT_A_VOICE_PATH=omni 但缺 CHAT_A_DASHSCOPE_API_KEY,已回落 STT 路径(请设置后重试)\n',
+    );
+    return undefined;
+  }
+  try {
+    return new QwenOmniLlm({
+      id: 'qwen-omni',
+      model: env['CHAT_A_OMNI_MODEL'] ?? DEFAULT_OMNI_MODEL,
+      apiKey,
+      baseURL: env['CHAT_A_OMNI_BASE_URL'] ?? QWEN_DASHSCOPE_REALTIME_URL,
+    });
+  } catch (err) {
+    stdout.write(
+      `[语音] omni audio-in 端口构造失败,已回落 STT 路径:${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return undefined;
+  }
 }
 
 /**
@@ -99,6 +152,8 @@ export interface VoiceModeHandle {
     readonly eou: string;
     /** 传输档(inprocess 缺省 / websocket);websocket 档下 stt/tts/vad/eou 标注「大脑侧」。 */
     readonly transport: TransportKind;
+    /** 语音路径(stt 缺省 / omni audio-in 直路);omni 端口回落时标 'stt'。 */
+    readonly path: VoicePath;
   };
   stop(): void;
 }
@@ -233,6 +288,14 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
   // VAD / TurnDetector:按 CHAT_A_VAD 选真/桩;真路径加载/构造失败回落桩(明确提示,绝不崩)。
   const detectors = await createDetectors(env);
 
+  // 语音路径(§4 双路径):缺省 stt(逐字不变);omni 档尝试构造 audio-in 端口。
+  // 端口构造/key 缺失失败 → createOmniAudioPort 返回 undefined(已打印提示),此时即便选 omni
+  // 也回落 STT(VoiceLoop 内部双保险:omni 端口为空则不走直路)。
+  const wantOmni = loadVoicePath(env) === 'omni';
+  const omni = wantOmni ? createOmniAudioPort(env) : undefined;
+  // 实际生效路径:仅当 omni 端口真构造出才标 omni,否则 stt(供状态行如实反映回落)。
+  const effectivePath: VoicePath = omni !== undefined ? 'omni' : 'stt';
+
   const handle = runVoiceLoop({
     device,
     bus: deps.bus,
@@ -244,6 +307,7 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
       send: deps.send,
       memory: deps.memory,
       sessionId: deps.sessionId,
+      ...(omni !== undefined ? { omni, voicePath: 'omni' as const } : {}),
     },
   });
 
@@ -268,6 +332,7 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
       vad: detectors.vadKind,
       eou: detectors.eouKind,
       transport: 'inprocess',
+      path: effectivePath,
     },
     stop: () => {
       // 先停 autonomy(停定时器 + 退订总线),再停语音闭环;均幂等、失败吞(§3.2)。
@@ -328,6 +393,8 @@ async function startTerminalWebsocketMode(
       vad: '大脑侧',
       eou: '大脑侧',
       transport: 'websocket',
+      // 语音路径由大脑侧 VoiceLoop 决定(终端是哑收发端);此处标 stt 占位,真值在大脑侧 info。
+      path: 'stt',
     },
     stop: () => {
       if (stopped) return;

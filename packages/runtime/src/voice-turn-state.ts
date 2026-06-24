@@ -41,7 +41,9 @@ export const VOICE_TRANSITIONS: Record<
     'vad:speech_start': 'endpointing', // 检出语音起点，开始累积音频帧
   },
   endpointing: {
-    'stt:final': 'thinking', // EOU 判「说完」→ STT 转写 → 触发 send
+    // EOU 判「说完」→ 取转写 → 触发「想」。转写来源有二，迁移语义相同（故复用同一事件，不新增态）：
+    //   STT 路径=STT final 文本；omni audio-in 直路（path B）=omni 的 transcript 事件文本。
+    'stt:final': 'thinking',
     'vad:speech_end': 'listening', // 长时静音/无语音放弃，丢弃累积
   },
   thinking: {

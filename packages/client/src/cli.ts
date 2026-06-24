@@ -182,7 +182,7 @@ async function main(): Promise<void> {
         // 语音 autonomy(默认关):on 时语音侧拿到 VoiceLoop 回调装配 + 注入真闸/抢占/候选源。
         ...(assembleVoiceAutonomy ? { assembleVoiceAutonomy } : {}),
       });
-      stdout.write(`语音: on  设备=${voice.info.device}  STT=${voice.info.stt}  TTS=${voice.info.tts}  VAD=${voice.info.vad}  EOU=${voice.info.eou}\n`);
+      stdout.write(`语音: on  路径=${voice.info.path}  设备=${voice.info.device}  STT=${voice.info.stt}  TTS=${voice.info.tts}  VAD=${voice.info.vad}  EOU=${voice.info.eou}\n`);
     } catch (err) {
       stdout.write(`语音: 启动失败(回落纯文字):${err instanceof Error ? err.message : String(err)}\n`);
     }
