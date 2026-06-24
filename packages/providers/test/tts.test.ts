@@ -141,7 +141,14 @@ describe('createTts(工厂按判别联合切换)+ loadTtsConfig', () => {
   });
 
   it('已注册 kind 列表', () => {
-    expect([...listTtsKinds()].sort()).toEqual(['edge', 'fake', 'gpt-sovits', 'kokoro', 'openai-compat']);
+    expect([...listTtsKinds()].sort()).toEqual([
+      'edge',
+      'fake',
+      'gpt-sovits',
+      'kokoro',
+      'openai-compat',
+      'qwen-tts',
+    ]);
   });
 
   it('全空 env → 降级 fake', () => {
