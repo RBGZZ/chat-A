@@ -18,7 +18,12 @@ import {
   type AppHandle,
   type VoiceModeHandle,
 } from '@chat-a/client';
-import { createVoice, QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL } from '@chat-a/providers';
+import {
+  createVoice,
+  loadVoiceProfile,
+  QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL,
+  type TtsOptions,
+} from '@chat-a/providers';
 import {
   IPC,
   StateTracker,
@@ -114,6 +119,33 @@ function persistVoiceId(handle: AppHandle, voiceId: string): void {
   writeFileSync(path, upsertEnvLocal(text, 'CHAT_A_VOICE_ID', voiceId), 'utf8');
 }
 
+/**
+ * 由 env(主要是复刻写入的 `CHAT_A_VOICE_ID`,及 voice-profile 其它键)拼语音合成 opts(§4.1)。
+ * **音色复刻闭环关键**:一键复刻把 voiceId 持久化进 `handle.env['CHAT_A_VOICE_ID']`(本进程即时生效),
+ * 这里 `loadVoiceProfile(env)` 读出它拼成 `ttsOptions.voiceId` 注入 `startVoiceMode` → VoiceLoop `#speak`
+ * → `tts.synthesize(sentence, ttsOptions)` → qwen-tts vc 模型据此 voice 合成,小雪即用复刻音色说话。
+ * 各键缺席 → 返回 undefined(不透传,逐字现状,用 provider 默认音色)。
+ */
+function buildVoiceTtsOptions(env: NodeJS.ProcessEnv): TtsOptions | undefined {
+  const p = loadVoiceProfile(env);
+  if (p.outputLang === undefined && p.voiceId === undefined && p.cloneRef === undefined) {
+    return undefined;
+  }
+  return {
+    ...(p.outputLang !== undefined ? { language: p.outputLang } : {}),
+    ...(p.voiceId !== undefined ? { voiceId: p.voiceId } : {}),
+    ...(p.cloneRef !== undefined
+      ? {
+          refAudio: {
+            source: p.cloneRef.source,
+            ...(p.cloneRef.refText !== undefined ? { refText: p.cloneRef.refText } : {}),
+            ...(p.cloneRef.refLang !== undefined ? { refLang: p.cloneRef.refLang } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
 /** 订阅总线:UI 状态派生 + 回合后心情 + 语音转写,推给渲染层。 */
 function wireBus(handle: AppHandle): () => void {
   const tracker = new StateTracker();
@@ -178,13 +210,19 @@ function registerIpc(handle: AppHandle): void {
       // 可用:用既有 startVoiceMode 跑免提(云端 STT/TTS 或 omni;不引本地模型)。
       const env = handle.env;
       if ((env['CHAT_A_AUDIO_DEVICE'] ?? '').length === 0) env['CHAT_A_AUDIO_DEVICE'] = 'node';
+      // 音色复刻闭环:由 env(含复刻写入的 CHAT_A_VOICE_ID)拼 ttsOptions → 注入 → VoiceLoop 合成时用复刻音色。
+      const ttsOptions = buildVoiceTtsOptions(env);
       voiceHandle = await startVoiceMode({
-        send: (t, onToken) => handle.convo.send(t, onToken),
+        // §7#5「从语音读情绪」:转发全部入参(含 signal 真取消 + prosodyEmotion 语音情绪),
+        // 让 STT final 读出的语气情绪经 convo.send → persona.advance 并入 PAD(此前丢 emotion 是缺口)。
+        send: (t, onToken, signal, prosodyEmotion) => handle.convo.send(t, onToken, signal, prosodyEmotion),
         composeOmniInstructions: () => handle.composeOmniInstructions(),
         memory: handle.memory,
         bus: handle.bus,
         sessionId: handle.sessionId,
         env,
+        // §4.1:复刻得到的 CHAT_A_VOICE_ID(及 voice-profile 其它键)拼成的合成 opts;缺省全空 → undefined(逐字现状)。
+        ...(ttsOptions ? { ttsOptions } : {}),
       });
       emit(IPC.voiceStatus, {
         available: true,

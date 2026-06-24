@@ -62,7 +62,8 @@ async function main(): Promise<void> {
       turnDetector: sharedDetectors.turnDetector,
       stt: createStt(loadSttConfig(env)),
       tts: createTts(loadTtsConfig(env)),
-      send: (text, onToken) => convo.send(text, onToken),
+      // §7#5:转发全部入参(含 signal 真取消 + prosodyEmotion 语音情绪),让大脑侧语音路也接通语音情绪驱动 PAD。
+      send: convo.send.bind(convo),
       memory: mem.store,
       sessionId,
     };

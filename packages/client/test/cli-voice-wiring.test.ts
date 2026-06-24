@@ -1,7 +1,8 @@
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, it, expect, vi } from 'vitest';
 import { LightVoiceBus } from '@chat-a/runtime';
-import { startVoiceMode } from '../src/cli-voice';
+import { loadVoiceProfile, type TtsOptions } from '@chat-a/providers';
+import { startVoiceMode, loadEchoGuardConfig } from '../src/cli-voice';
 
 /** 假 sherpa 夹具的 file:// URL(动态 import 可解析的真实模块,导出顶层 infer)。 */
 const FAKE_SHERPA_URL = pathToFileURL(
@@ -85,5 +86,69 @@ describe('client/startVoiceMode 按 CHAT_A_VOICE_PATH 选 STT/omni 语音路径(
     const handle = await startVoiceMode({ ...baseDeps(), env });
     expect(handle.info.path).toBe('omni');
     handle.stop();
+  });
+});
+
+// ───────────────────────────── EchoGuard 默认开(§4 自打断防护)─────────────────────────────
+
+describe('client/loadEchoGuardConfig:语音模式默认开,CHAT_A_ECHO_GUARD=off 关', () => {
+  it('缺省(不设 CHAT_A_ECHO_GUARD)→ 默认开启(enabled:true)', () => {
+    const cfg = loadEchoGuardConfig({});
+    expect(cfg).toBeDefined();
+    expect(cfg?.enabled).toBe(true);
+  });
+
+  it('CHAT_A_ECHO_GUARD=off → 不注入(undefined,回落逐字现状)', () => {
+    expect(loadEchoGuardConfig({ CHAT_A_ECHO_GUARD: 'off' })).toBeUndefined();
+    expect(loadEchoGuardConfig({ CHAT_A_ECHO_GUARD: 'false' })).toBeUndefined();
+    expect(loadEchoGuardConfig({ CHAT_A_ECHO_GUARD: '0' })).toBeUndefined();
+    expect(loadEchoGuardConfig({ CHAT_A_ECHO_GUARD: 'no' })).toBeUndefined();
+    expect(loadEchoGuardConfig({ CHAT_A_ECHO_GUARD: 'disabled' })).toBeUndefined();
+  });
+
+  it('其它非关闭值(如 on)→ 仍默认开启', () => {
+    expect(loadEchoGuardConfig({ CHAT_A_ECHO_GUARD: 'on' })?.enabled).toBe(true);
+  });
+});
+
+describe('client/startVoiceMode:info.echoGuard 反映默认开/env 关', () => {
+  it('缺省 → info.echoGuard=on(语音模式默认启用自打断防护)', async () => {
+    const env: NodeJS.ProcessEnv = { CHAT_A_AUDIO_DEVICE: 'fake' };
+    const handle = await startVoiceMode({ ...baseDeps(), env });
+    expect(handle.info.echoGuard).toBe('on');
+    handle.stop();
+  });
+
+  it('CHAT_A_ECHO_GUARD=off → info.echoGuard=off(显式关闭回落现状)', async () => {
+    const env: NodeJS.ProcessEnv = { CHAT_A_AUDIO_DEVICE: 'fake', CHAT_A_ECHO_GUARD: 'off' };
+    const handle = await startVoiceMode({ ...baseDeps(), env });
+    expect(handle.info.echoGuard).toBe('off');
+    handle.stop();
+  });
+});
+
+// ───────────────────────────── 音色复刻闭环:CHAT_A_VOICE_ID → ttsOptions.voiceId ─────────────────────────────
+// 复刻把 voiceId 写进 CHAT_A_VOICE_ID;装配层(cli/desktop)经 loadVoiceProfile 读出拼成 ttsOptions.voiceId
+// 注入 startVoiceMode → VoiceLoop #speak → tts.synthesize(opts.voiceId)。synthesize 收到 voiceId 由
+// runtime/voice-io-decoupling.test.ts 钉死,此处钉「CHAT_A_VOICE_ID → ttsOptions.voiceId」这一公共转换契约。
+
+describe('client/音色复刻闭环:CHAT_A_VOICE_ID 经 loadVoiceProfile 拼进 ttsOptions.voiceId', () => {
+  /** 复用 cli/desktop 同一转换:profile → 合成 opts(仅有键时带键)。 */
+  function buildTtsOptions(env: NodeJS.ProcessEnv): TtsOptions | undefined {
+    const p = loadVoiceProfile(env);
+    if (p.outputLang === undefined && p.voiceId === undefined && p.cloneRef === undefined) return undefined;
+    return {
+      ...(p.outputLang !== undefined ? { language: p.outputLang } : {}),
+      ...(p.voiceId !== undefined ? { voiceId: p.voiceId } : {}),
+    };
+  }
+
+  it('设了 CHAT_A_VOICE_ID → ttsOptions.voiceId 为该值(复刻音色被合成读取)', () => {
+    const opts = buildTtsOptions({ CHAT_A_VOICE_ID: 'voice-cloned-abc' });
+    expect(opts?.voiceId).toBe('voice-cloned-abc');
+  });
+
+  it('未设 CHAT_A_VOICE_ID 等键 → ttsOptions=undefined(用 provider 默认音色,逐字现状)', () => {
+    expect(buildTtsOptions({})).toBeUndefined();
   });
 });

@@ -204,7 +204,9 @@ async function main(): Promise<void> {
     try {
       voice = await startVoiceMode({
         // 语音用一个稳定的 send 适配器,内部读当前 convo(/reset 后也能拿到新上下文)。
-        send: (text, onToken) => convo.send(text, onToken),
+        // §7#5「从语音读情绪」:**转发全部入参**(含第 3 参 signal 真取消 + 第 4 参 prosodyEmotion 语音情绪),
+        // 让 STT final 读出的语气情绪真正驱动 persona PAD(此前丢 signal/emotion 是语音情绪未接通的缺口)。
+        send: (text, onToken, signal, prosodyEmotion) => convo.send(text, onToken, signal, prosodyEmotion),
         // omni 直路系统提示组装(omni-persona-context):与文字链路同一 Conversation,同源 persona/记忆/语气。
         // 闭包读当前 convo(/reset 后换上下文也跟随);仅 omni 路用到,STT 路与现状逐字不变。
         composeOmniInstructions: () => convo.composeOmniInstructions(),
@@ -218,7 +220,7 @@ async function main(): Promise<void> {
         // 语音 autonomy(默认关):on 时语音侧拿到 VoiceLoop 回调装配 + 注入真闸/抢占/候选源。
         ...(assembleVoiceAutonomy ? { assembleVoiceAutonomy } : {}),
       });
-      stdout.write(`语音: on  路径=${voice.info.path}  设备=${voice.info.device}  STT=${voice.info.stt}  TTS=${voice.info.tts}  VAD=${voice.info.vad}  EOU=${voice.info.eou}\n`);
+      stdout.write(`语音: on  路径=${voice.info.path}  设备=${voice.info.device}  STT=${voice.info.stt}  TTS=${voice.info.tts}  VAD=${voice.info.vad}  EOU=${voice.info.eou}  回声门控=${voice.info.echoGuard}\n`);
     } catch (err) {
       stdout.write(`语音: 启动失败(回落纯文字):${err instanceof Error ? err.message : String(err)}\n`);
     }

@@ -25,6 +25,7 @@ import {
 } from '@chat-a/providers';
 import type { TtsOptions } from '@chat-a/providers';
 import type { MemoryStore } from '@chat-a/memory';
+import type { SttEmotionLike } from '@chat-a/persona';
 import {
   StubVadDetector,
   TurnDetector,
@@ -33,7 +34,9 @@ import {
   SmartTurnEouModel,
   EnergyVadDetector,
   SilenceTimeoutEouModel,
+  DEFAULT_ECHO_GUARD_CONFIG,
   type VadDetector,
+  type EchoGuardConfig,
 } from '@chat-a/voice-detect';
 import type { LightVoiceBus, SpeakStateView, OmniAudioPort, VoicePath } from '@chat-a/runtime';
 import type { AudioDevice } from './audio/audio-device';
@@ -70,6 +73,23 @@ export const DEFAULT_OMNI_MODEL = 'qwen3-omni-flash-realtime';
  */
 export function loadVoicePath(env: NodeJS.ProcessEnv): VoicePath {
   return (env['CHAT_A_VOICE_PATH'] ?? '').toLowerCase() === 'omni' ? 'omni' : 'stt';
+}
+
+/**
+ * 解析语音模式 EchoGuard 档(自打断防护,§4 软件侧部分缓解,行为即配置):
+ * 语音模式**默认开启** EchoGuard(`enabled:true`),压制自家 TTS 回声引起的误打断;
+ * 经 `CHAT_A_ECHO_GUARD=off`(/`false`/`0`/`no`/`disabled`)可显式关闭(回落逐字现状即时打断)。
+ *
+ * 其余阈值沿用 {@link DEFAULT_ECHO_GUARD_CONFIG}(`confirmFrames:1` 等价即时确认时序、回归硬线安全),
+ * 真机标定后可经后续 env 旋钮细调;本切片只把「默认开关」从 false 翻到 true(语音模式范围内)。
+ * 返回 undefined 仅当显式关闭 → VoiceLoop 不注入 → barge-in 逐字现状(与历史等价)。
+ */
+export function loadEchoGuardConfig(env: NodeJS.ProcessEnv): EchoGuardConfig | undefined {
+  const raw = (env['CHAT_A_ECHO_GUARD'] ?? '').trim().toLowerCase();
+  const off = raw === 'off' || raw === 'false' || raw === '0' || raw === 'no' || raw === 'disabled';
+  if (off) return undefined; // 显式关 → 不注入 → 逐字现状
+  // 缺省/其它值 → 语音模式默认开启(enabled 翻 true,其余沿用安全默认)。
+  return { ...DEFAULT_ECHO_GUARD_CONFIG, enabled: true };
 }
 
 /**
@@ -121,8 +141,19 @@ export interface VoiceAutonomyHandle {
 
 /** 语音模式所需的、由 cli.ts 已装配好的依赖(复用文字链路的 convo/memory/bus/session)。 */
 export interface VoiceModeDeps {
-  /** 想:吃用户文本 + onToken,resolve 完整回复(传 conversation.send.bind(conversation))。 */
-  readonly send: (text: string, onToken: (t: string) => void) => Promise<string>;
+  /**
+   * 想:吃用户文本 + onToken(+ 可选 signal 协作取消 + 可选 prosodyEmotion 语音情绪),resolve 完整回复。
+   * 装配处传 `conversation.send.bind(conversation)`(或转发全部入参的等价闭包)。
+   * §7#5「从语音读情绪」:VoiceLoop 会把 STT final 读出的语气情绪经**第 4 参** `prosodyEmotion` 透传至此,
+   * 由 `Conversation.send` 再透传给 `persona.advance` 并入 PAD;不转发即丢失语音情绪驱动(本切片补齐的缺口)。
+   * `signal`(第 3 参)在打断/停止时被 abort,使底层 LLM 流真停(§3.2 真打断);不转发则打断只作废输出、不真停流。
+   */
+  readonly send: (
+    text: string,
+    onToken: (t: string) => void,
+    signal?: AbortSignal,
+    prosodyEmotion?: SttEmotionLike,
+  ) => Promise<string>;
   /** 半句写回只用到 appendMessage(VoiceLoop 最小面)。 */
   readonly memory: Pick<MemoryStore, 'appendMessage'>;
   /** 复用 cli 的总线(与文字链路共享 correlation/历史)。 */
@@ -173,6 +204,8 @@ export interface VoiceModeHandle {
     readonly transport: TransportKind;
     /** 语音路径(stt 缺省 / omni audio-in 直路);omni 端口回落时标 'stt'。 */
     readonly path: VoicePath;
+    /** EchoGuard 自打断防护(语音模式默认 on;CHAT_A_ECHO_GUARD=off 时 off)。 */
+    readonly echoGuard: 'on' | 'off';
   };
   stop(): void;
 }
@@ -315,6 +348,9 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
   // 实际生效路径:仅当 omni 端口真构造出才标 omni,否则 stt(供状态行如实反映回落)。
   const effectivePath: VoicePath = omni !== undefined ? 'omni' : 'stt';
 
+  // EchoGuard(§4 软件侧自打断防护):语音模式默认开;CHAT_A_ECHO_GUARD=off 显式关(回落逐字现状)。
+  const echoGuard = loadEchoGuardConfig(env);
+
   const handle = runVoiceLoop({
     device,
     bus: deps.bus,
@@ -326,6 +362,8 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
       send: deps.send,
       memory: deps.memory,
       sessionId: deps.sessionId,
+      // EchoGuard:默认开(enabled:true);显式关时 echoGuard=undefined → 不带键 → VoiceLoop 逐字现状。
+      ...(echoGuard ? { echoGuard } : {}),
       // §4.1:语音 I/O 语种解耦——仅在提供时透传(缺省不传 → STT 自动检测 + synthesize opts=undefined,逐字现状)。
       ...(deps.sttLanguage ? { sttLanguage: deps.sttLanguage } : {}),
       ...(deps.ttsOptions ? { ttsOptions: deps.ttsOptions } : {}),
@@ -363,6 +401,7 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
       eou: detectors.eouKind,
       transport: 'inprocess',
       path: effectivePath,
+      echoGuard: echoGuard ? 'on' : 'off',
     },
     stop: () => {
       // 先停 autonomy(停定时器 + 退订总线),再停语音闭环;均幂等、失败吞(§3.2)。
@@ -425,6 +464,8 @@ async function startTerminalWebsocketMode(
       transport: 'websocket',
       // 语音路径由大脑侧 VoiceLoop 决定(终端是哑收发端);此处标 stt 占位,真值在大脑侧 info。
       path: 'stt',
+      // EchoGuard 由大脑侧 VoiceLoop 决定(终端不跑 loop);此处标 off 占位,真值在大脑侧 info。
+      echoGuard: 'off',
     },
     stop: () => {
       if (stopped) return;
