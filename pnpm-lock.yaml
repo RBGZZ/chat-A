@@ -25,6 +25,9 @@ importers:
 
   packages/client:
     dependencies:
+      '@chat-a/gateway':
+        specifier: workspace:*
+        version: link:../gateway
       '@chat-a/interaction':
         specifier: workspace:*
         version: link:../interaction
@@ -61,6 +64,19 @@ importers:
       '@chat-a/protocol':
         specifier: workspace:*
         version: link:../protocol
+
+  packages/gateway:
+    dependencies:
+      '@chat-a/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      ws:
+        specifier: ^8.21.0
+        version: 8.21.0
+    devDependencies:
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
 
   packages/interaction:
     dependencies:

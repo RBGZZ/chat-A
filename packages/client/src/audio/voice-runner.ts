@@ -16,6 +16,7 @@ import {
   makeDataFrame,
   STT_AUDIO_FORMAT,
   type AudioFrame,
+  type AudioTransport,
   type PcmFrame,
 } from '@chat-a/protocol';
 import { LightVoiceBus, VoiceLoop } from '@chat-a/runtime';
@@ -29,14 +30,18 @@ export interface RunVoiceLoopDeps {
   readonly loopDeps: Omit<VoiceLoopDeps, 'transport' | 'bus'>;
   /** 复用既有 bus(cli 想与文字链路共享总线时传);缺省 runner 新建一个。 */
   readonly bus?: LightVoiceBus;
-  /** 复用既有 transport(测试想自己持有断言时传);缺省 runner 新建一个。 */
-  readonly transport?: InProcessAudioTransport;
+  /**
+   * 复用既有 transport:缺省进程内 {@link InProcessAudioTransport}(单机形态,行为逐字不变);
+   * websocket 档由 cli-voice 传入 `@chat-a/gateway` 的 `WebSocketTransport`(终端侧),
+   * 二者都满足 {@link AudioTransport} 契约,本函数零业务改动(§3.1 接缝隔离)。
+   */
+  readonly transport?: AudioTransport;
 }
 
 export interface VoiceLoopHandle {
   readonly loop: VoiceLoop;
   readonly bus: LightVoiceBus;
-  readonly transport: InProcessAudioTransport;
+  readonly transport: AudioTransport;
   /** 收尾:停采集 → 停 loop → 关设备/总线(幂等)。 */
   stop(): void;
 }
@@ -99,6 +104,65 @@ export function runVoiceLoop(deps: RunVoiceLoopDeps): VoiceLoopHandle {
       loop.stop();
       unsubDown();
       unsubInterrupt();
+      try {
+        device.close();
+      } catch {
+        /* ignore */
+      }
+    },
+  };
+}
+
+/** runTerminalBridge 入参:终端设备 + 终端侧 transport(WebSocket)。 */
+export interface RunTerminalBridgeDeps {
+  readonly device: AudioDevice;
+  /** 终端侧传输(WS):上行麦克风帧、下行收 tts:chunk;**大脑/VoiceLoop 在另一进程**。 */
+  readonly transport: AudioTransport;
+}
+
+/** 终端桥句柄:停 = 停采集 + 收尾(不关 transport,由调用方掌控其生命周期)。 */
+export interface TerminalBridgeHandle {
+  stop(): void;
+}
+
+/**
+ * 终端桥(B 架构「终端」侧,§2):**只接设备↔transport**,不在本进程跑 VoiceLoop/大脑。
+ *   - 上行:麦克风帧 → `audio:input` → `transport.sendAudio`(经 WS 送大脑)。
+ *   - 下行:`transport.onAudio` 收 tts:chunk → 设备播放(generation 丢弃在 transport 内已做)。
+ *   - 打断:用户再开口由大脑侧 VoiceLoop 判定并下发 interrupt;终端侧 transport 收 interrupt 抬代际,
+ *     播放即时停由设备 playStop——本桥监听 transport 下行帧自然停旧帧,playStop 接缝可后续接。
+ *
+ * 与 {@link runVoiceLoop} 的区别:无 bus / 无 VoiceLoop —— 终端是「哑」收发端,符合 B 方案「大脑在服务端」。
+ */
+export function runTerminalBridge(deps: RunTerminalBridgeDeps): TerminalBridgeHandle {
+  const { device, transport } = deps;
+
+  // 下行:transport 收到大脑下发的 tts:chunk → 设备扬声器(上行 audio:input 不会回灌终端)。
+  const unsubDown = transport.onAudio((frame) => {
+    if (frame.type !== 'tts:chunk') return;
+    device.play({
+      samples: frame.payload.samples,
+      sampleRate: frame.payload.format.sampleRate,
+      channels: frame.payload.format.channels,
+    });
+  });
+
+  // 上行:麦克风帧 → audio:input → transport(经 WS 送大脑 STT)。
+  const stopCapture = device.captureStart((pcm) => {
+    transport.sendAudio(toInputFrame(pcm));
+  });
+
+  let stopped = false;
+  return {
+    stop(): void {
+      if (stopped) return;
+      stopped = true;
+      try {
+        stopCapture();
+      } catch {
+        /* ignore */
+      }
+      unsubDown();
       try {
         device.close();
       } catch {
