@@ -17,6 +17,11 @@ import {
   NodeAudioDevice,
   type AppHandle,
   type VoiceModeHandle,
+  // —— 代理B:主动陪伴桥(autonomy 主动消息通道) ——
+  assembleProactiveBridge,
+  createCompanionCandidateSource,
+  createPresencePort,
+  type ProactiveBridgeHandle,
 } from '@chat-a/client';
 import { createVoice, QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL } from '@chat-a/providers';
 import {
@@ -32,11 +37,16 @@ import {
   type AppInfo,
   type VoiceCloneInput,
   type VoiceCloneStatus,
+  // —— 代理B:主动消息归一/开关(纯逻辑) ——
+  toProactiveMessage,
+  isProactiveEnabled,
 } from './ipc-contract';
 
 let mainWindow: BrowserWindow | null = null;
 let appHandle: AppHandle | null = null;
 let voiceHandle: VoiceModeHandle | undefined;
+// —— 代理B:主动陪伴桥句柄(autonomy on 时装配;off 恒 undefined) ——
+let proactiveHandle: ProactiveBridgeHandle | undefined;
 
 /** 向渲染层推一条 IPC(窗口已关则静默丢弃)。 */
 function emit(channel: string, payload?: unknown): void {
@@ -212,6 +222,49 @@ function registerIpc(handle: AppHandle): void {
   });
 }
 
+// ═══════════════════════════════ 代理B:主动陪伴桥接(autonomy→IPC) ═══════════════════════════════
+//
+// 北极星「会主动开口」:仅 `CHAT_A_AUTONOMY=on` 时装配主动陪伴桥——idle 触发 → 真候选源(未了话题 +
+// idle 想念弧,来自真记忆)→ persona/记忆感知决策(`composeOmniInstructions()` 作决策 system 提示)→
+// 仲裁真说 → `emit(IPC.proactiveMessage, ...)` 推渲染层渲染一条自发气泡。**默认关、绝不擅自开口**。
+//
+// 复用既有 `handle.bus`/`handle.llm`/`handle.memory`/`handle.convo`,不另起大脑;装配失败/降级绝不崩(§3.2)。
+// **不涉及 TTS 语种**:主动话只走文字气泡,不经 TTS;后续若发声须沿用既有 TTS `language_type` 输出语种路径。
+async function wireProactive(handle: AppHandle): Promise<void> {
+  // 启用开关现读(与 client 真装配同一开关 CHAT_A_AUTONOMY=on);off → 不挂任何东西、零开销。
+  if (!isProactiveEnabled(handle.env)) return;
+  try {
+    // 真候选源:未了话题(memory)+ idle 想念弧(装配层在场近似)。用户活跃刷新在场:
+    // 文字回合 turn:end / 语音 stt:final 时 markActive,使 idle 弧据真在场计时。
+    const presence = createPresencePort();
+    const candidateSource = createCompanionCandidateSource({ store: handle.memory, presence });
+    const offActive = handle.bus.on('turn:end', () => presence.markActive());
+    const offStt = handle.bus.on('stt:final', () => presence.markActive());
+
+    proactiveHandle = await assembleProactiveBridge(handle.env, {
+      bus: handle.bus,
+      llm: handle.llm,
+      // persona/记忆感知决策提示:与文字/omni 链路同源(persona 骨架 + 记忆召回 + 语气),零漂移。
+      composeSystemPrompt: () => handle.convo.composeOmniInstructions(),
+      candidateSource,
+      // 推送通道:仲裁真说 → 归一(裁空白/防空气泡)→ 推渲染层渲染自发气泡。
+      onProactiveSpeak: (speech) => {
+        const msg = toProactiveMessage(speech);
+        if (msg !== null) emit(IPC.proactiveMessage, msg);
+      },
+    });
+    // 桥未起(开关 off 或装配返回 undefined)→ 退订在场刷新,避免悬挂订阅。
+    if (proactiveHandle === undefined) {
+      offActive();
+      offStt();
+    }
+  } catch (err) {
+    // 任何装配失败 → 主动陪伴静默不启用,文字/语音路不受影响、绝不崩(§3.2)。
+    console.error('[desktop] 主动陪伴桥装配失败(已降级,不影响其它功能):', err);
+    proactiveHandle = undefined;
+  }
+}
+
 function createWindow(handle: AppHandle): void {
   mainWindow = new BrowserWindow({
     width: 460,
@@ -251,12 +304,23 @@ async function bootstrap(): Promise<void> {
     /* ignore */
   }
 
+  // —— 代理B:主动陪伴桥(默认关;CHAT_A_AUTONOMY=on 才挂)。fire-and-forget,失败已内部降级。
+  void wireProactive(handle);
+
   app.on('before-quit', () => {
     offBus();
     try {
       voiceHandle?.stop();
     } catch {
       /* ignore */
+    }
+    // —— 代理B:收尾主动陪伴桥(停 idle 定时器 + 退订总线;幂等、失败吞)。
+    try {
+      proactiveHandle?.stop();
+    } catch {
+      /* ignore */
+    } finally {
+      proactiveHandle = undefined;
     }
     void handle.cleanup();
   });

@@ -14,6 +14,9 @@ import {
   VOICE_UNAVAILABLE_REASON,
   type UiState,
   type VoiceCloneResult,
+  // —— 代理B:主动消息纯逻辑 ——
+  toProactiveMessage,
+  isProactiveEnabled,
 } from '../src/ipc-contract';
 
 const cid = 's1/t1/0';
@@ -177,5 +180,44 @@ describe('probeVoice naudiodon 探测降级(纯,可单测)', () => {
     }));
     expect(status.available).toBe(false);
     expect(status.reason).toBe(VOICE_UNAVAILABLE_REASON);
+  });
+});
+
+// ═══════════════════════════════ 代理B:主动消息纯逻辑 ═══════════════════════════════
+describe('toProactiveMessage 归一(纯,防空气泡)', () => {
+  it('裁首尾空白,补 signalKind/preempted 缺省', () => {
+    expect(toProactiveMessage({ text: '  在忙吗?  ' })).toEqual({
+      text: '在忙吗?',
+      signalKind: 'unknown',
+      preempted: false,
+    });
+  });
+
+  it('透传 signalKind 与 preempted', () => {
+    expect(toProactiveMessage({ text: '等一下!', signalKind: 'temporal:idle-tick', preempted: true })).toEqual({
+      text: '等一下!',
+      signalKind: 'temporal:idle-tick',
+      preempted: true,
+    });
+  });
+
+  it('空白文本 → null(调用方不推空气泡)', () => {
+    expect(toProactiveMessage({ text: '   ' })).toBeNull();
+    expect(toProactiveMessage({ text: '' })).toBeNull();
+  });
+
+  // IPC 通道常量已注册(防散落字符串)。
+  it('IPC.proactiveMessage 常量为 proactive:message', () => {
+    expect(IPC.proactiveMessage).toBe('proactive:message');
+  });
+});
+
+describe('isProactiveEnabled 开关解析(默认关、安全)', () => {
+  it('CHAT_A_AUTONOMY=on(含大小写/空白)→ 启用;其余 → 关', () => {
+    expect(isProactiveEnabled({ CHAT_A_AUTONOMY: 'on' })).toBe(true);
+    expect(isProactiveEnabled({ CHAT_A_AUTONOMY: ' ON ' })).toBe(true);
+    expect(isProactiveEnabled({})).toBe(false);
+    expect(isProactiveEnabled({ CHAT_A_AUTONOMY: 'off' })).toBe(false);
+    expect(isProactiveEnabled({ CHAT_A_AUTONOMY: '1' })).toBe(false);
   });
 });

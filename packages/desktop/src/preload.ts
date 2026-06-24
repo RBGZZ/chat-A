@@ -13,6 +13,8 @@ import {
   type VoiceCloneInput,
   type VoiceCloneResult,
   type VoiceCloneStatus,
+  // —— 代理B:主动消息类型 ——
+  type ProactiveMessage,
 } from './ipc-contract';
 
 /** 包装一个主→渲染推送订阅,返回退订函数(不泄漏 ipcRenderer / event 对象)。 */
@@ -44,6 +46,8 @@ export interface XiaoxueApi {
   onVoiceStatus(cb: (status: VoiceStatus) => void): () => void;
   onCloneResult(cb: (result: VoiceCloneResult) => void): () => void;
   onCloneStatus(cb: (status: VoiceCloneStatus) => void): () => void;
+  // —— 代理B:订阅小雪主动消息(自发气泡);返回退订函数。
+  onProactive(cb: (msg: ProactiveMessage) => void): () => void;
 }
 
 const api: XiaoxueApi = {
@@ -62,6 +66,8 @@ const api: XiaoxueApi = {
   onVoiceStatus: (cb) => subscribe<VoiceStatus>(IPC.voiceStatus, cb),
   onCloneResult: (cb) => subscribe<VoiceCloneResult>(IPC.voiceCloneResult, cb),
   onCloneStatus: (cb) => subscribe<VoiceCloneStatus>(IPC.voiceCloneStatus, cb),
+  // —— 代理B:主动消息订阅 ——
+  onProactive: (cb) => subscribe<ProactiveMessage>(IPC.proactiveMessage, cb),
 };
 
 contextBridge.exposeInMainWorld('xiaoxue', api);

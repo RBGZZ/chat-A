@@ -63,6 +63,7 @@ export class AutonomyRunnerSkill implements BaseSkill {
   readonly #queue: PriorityEventQueue;
   readonly #onPreempt: ((outcome: SpeakOutcome) => void) | undefined;
   readonly #candidateSource: ProactiveCandidateSource | undefined;
+  readonly #onProactiveSpeak: ((speech: ProactiveSpeech) => void) | undefined;
 
   constructor(deps: {
     readonly runner: ProactiveTurnRunner;
@@ -70,11 +71,18 @@ export class AutonomyRunnerSkill implements BaseSkill {
     readonly onPreempt?: (outcome: SpeakOutcome) => void;
     /** 缝 3:真候选源(open-thread / idle-arc;无则回落现状占位)。 */
     readonly candidateSource?: ProactiveCandidateSource;
+    /**
+     * 主动消息推送钩子(代理B):仲裁判定真说(`outcome.decision==='speak'`)时,
+     * 把决策 LLM 产出的**真实主动话语**经此回调推出去(desktop 据此渲染自发气泡)。
+     * 与 `onPreempt`(只产抢占信号)正交:本钩子产「说什么」,onPreempt 产「要不要打断」。
+     */
+    readonly onProactiveSpeak?: (speech: ProactiveSpeech) => void;
   }) {
     this.#runner = deps.runner;
     this.#queue = deps.queue;
     this.#onPreempt = deps.onPreempt;
     this.#candidateSource = deps.candidateSource;
+    this.#onProactiveSpeak = deps.onProactiveSpeak;
   }
 
   async tick(): Promise<void> {
@@ -107,10 +115,33 @@ export class AutonomyRunnerSkill implements BaseSkill {
       priority: event.priority,
       deferrable: true,
     });
+    // 主动消息推送(代理B):仲裁真说才推(decision==='speak');带上 trace 文本与信号来源,
+    // desktop 据此渲染一条自发的小雪气泡。决策已 silent/defer/drop 则不推(克制优先,绝不刷屏)。
+    if (
+      result.outcome?.decision === 'speak' &&
+      result.decision.text !== undefined &&
+      result.decision.text.trim().length > 0
+    ) {
+      this.#onProactiveSpeak?.({
+        text: result.decision.text,
+        signalKind: event.kind,
+        preempted: result.shouldPreempt,
+      });
+    }
     if (result.shouldPreempt && result.outcome) {
       this.#onPreempt?.(result.outcome);
     }
   }
+}
+
+/** 一条主动话语(代理B):决策 LLM 产出、经仲裁真说,推给上层渲染/旁路。 */
+export interface ProactiveSpeech {
+  /** 经 persona guardrail 后的真实主动话语(非空)。 */
+  readonly text: string;
+  /** 触发本次主动回合的感知信号 kind(便于追溯/UI 标注)。 */
+  readonly signalKind: string;
+  /** 本次真说是否伴随抢占(打断在说者);UI 可据此微调标记。 */
+  readonly preempted: boolean;
 }
 
 /** autonomy 装配运行句柄:`tick` 推一拍调度;`stop` 收尾(停定时器 + 退订总线)。 */
@@ -151,6 +182,17 @@ export interface AssembleAutonomyDeps {
   readonly candidateSource?: ProactiveCandidateSource;
   /** 决策概率闸的 rng(确定性测试可注入恒过/恒拒);缺省 Math.random(restraint-first)。 */
   readonly decisionRng?: () => number;
+  /**
+   * 主动消息推送钩子(代理B):仲裁真说时把主动话语经此推出(desktop 主进程传
+   * `(s) => emit(IPC.proactiveMessage, ...)`)。不传则不推(等价现状,只走 trace/抢占)。
+   */
+  readonly onProactiveSpeak?: (speech: ProactiveSpeech) => void;
+  /**
+   * 决策 LLM 的 system 提示(代理B):注入则覆盖 DecisionLlm 内置「多数沉默」提示——
+   * 装配层可传**人格/记忆感知**提示(如以 `composeOmniInstructions()` 为底),
+   * 让主动话语真走人格/记忆而非硬编码。不传则与现状逐字一致。
+   */
+  readonly decisionSystemPrompt?: string;
 }
 
 /**
@@ -169,11 +211,14 @@ export function assembleAutonomy(
   const queue = new PriorityEventQueue();
 
   // 决策 LLM(失败/超时退 silent;决策落注入 sink)。
+  // 代理B:可注入 persona/记忆感知的决策 system 提示(默认走 DecisionLlm 内置「多数沉默」提示),
+  // 使主动话语真正经人格/记忆生成而非硬编码。
   const decisionLlm = new DecisionLlm({
     llm: deps.llm,
     clock,
     ...(deps.decisionSink ? { sink: deps.decisionSink } : {}),
     ...(deps.decisionRng ? { rng: deps.decisionRng } : {}),
+    ...(deps.decisionSystemPrompt ? { systemPrompt: deps.decisionSystemPrompt } : {}),
   });
 
   // 缝 2:出声仲裁闭包查真实 is_speaking——优先 voiceState(VoiceLoop 真状态),
@@ -195,6 +240,7 @@ export function assembleAutonomy(
     queue,
     ...(onPreempt ? { onPreempt } : {}),
     ...(deps.candidateSource ? { candidateSource: deps.candidateSource } : {}),
+    ...(deps.onProactiveSpeak ? { onProactiveSpeak: deps.onProactiveSpeak } : {}),
   });
 
   // 调度:enabledSetConfig 启用本技能(其余默认关);scheduler 单循环 reconcile。
