@@ -314,6 +314,43 @@ export class Conversation {
     this.#strategy = deps.strategy ?? new SingleShotStrategy();
   }
 
+  /**
+   * 组装 omni audio-in 直路（path B）的系统提示（§5.4/§6 人格，omni-persona-context）。
+   *
+   * **复用**与 `send`(SingleShotStrategy) 完全同一套 prompt 组装:读关系亲密度→渲染 tone、检测立场，
+   * 再走既有 `composeSystem`(persona 骨架 + 记忆召回 + tone + 立场 + 风格纪律)→ 取 `assembled.system`。
+   * persona/记忆/语气一字不差复用,零漂移(不重造组装,§3.1)。
+   *
+   * 与 `send` 的差异(omni 特性):
+   * - userText 用空串——omni 是「音频进、模型直接听」,用户这轮说了什么由模型自己听,instructions 只承载
+   *   人设/记忆/语气背景(不塞 transcript)。
+   * - 记忆召回走既有快路径(空 query → 关键词召回近期/置顶),**不启用语义嵌入**(omni 首音前不引新网络
+   *   阻塞,§5.5 非阻塞硬约束)。
+   * - 只取 `system` 字符串(不要 messages、不落库、不推进情绪/立场——纯只读组装,无副作用)。
+   *
+   * **降级**(§3.2):任一步抛错 → 兜底返回 persona 骨架(身份最小提示),绝不返回空、绝不抛。
+   * 装配层(cli)以 `() => convo.composeOmniInstructions()` 注入 VoiceLoop,使 omni 路与 STT 路同源。
+   */
+  async composeOmniInstructions(): Promise<string> {
+    const deps = this.#deps;
+    try {
+      // 与 send 同源:关系亲密度→当前心情 tone(只读,不推进情绪/closeness)。
+      const closeness = deps.memory.getCloseness(deps.primaryPersonId);
+      const mood = deps.persona.tone(closeness);
+      // 立场检测(空 userText:无话题命中也带 assertiveness 反谄媚基线,与 send 同源,降级见 turn-shared)。
+      const stance = await detectStance(deps, '');
+      // 走既有 composeSystem(关键词快路径,不传 queryVector → 不触语义嵌入,§5.5)。
+      const { assembled } = composeSystem(deps, '', mood.toneFragment, stance);
+      const system = assembled.system.trim();
+      // 兜底:组装意外为空 → 退回骨架(绝不返回空)。
+      return system.length > 0 ? assembled.system : deps.skeleton;
+    } catch (err) {
+      // 降级(§3.2):任一步失败 → 人设骨架最小提示(至少 persona 身份),不抛、不空。
+      console.warn('[Conversation] composeOmniInstructions 组装失败(兜底返回人设骨架):', err);
+      return deps.skeleton;
+    }
+  }
+
   async send(
     userText: string,
     onToken: (token: string) => void,
