@@ -1230,6 +1230,21 @@ export class SqliteMemoryStore implements MemoryStore {
     }
   }
 
+  listRecent(limit: number = this.#cfg.recallLimit): readonly MemoryRecord[] {
+    // 只读快照(承 §5;陪伴工具记忆面板):按近因降序取前 N,**不触发检索即强化**(查看 ≠ 被想起,
+    // 不调 recall、不升 importance/access_count、不更新 last_accessed)。与 InMemory 同一排序,零漂移。
+    // 读失败优雅降级为空数组,不抛(§3.2)。
+    try {
+      const rows = this.#db
+        .prepare(`SELECT ${MEMORY_COLS} FROM memories ORDER BY last_seen_at DESC, id DESC LIMIT ?`)
+        .all(Math.max(0, limit)) as Record<string, unknown>[];
+      return rows.map((r) => this.#rowToRecord(r));
+    } catch (err) {
+      this.#onError(err, 'listRecent');
+      return [];
+    }
+  }
+
   updateMemory(id: number, patch: MemoryUpdate): boolean {
     try {
       const row = this.#db

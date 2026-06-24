@@ -10,10 +10,12 @@ import {
   probeVoice,
   runCloneVoice,
   upsertEnvLocal,
+  toMemoryItems,
   CHAT_ERROR_TEXT,
   VOICE_UNAVAILABLE_REASON,
   type UiState,
   type VoiceCloneResult,
+  type MemoryRecordLike,
 } from '../src/ipc-contract';
 
 const cid = 's1/t1/0';
@@ -177,5 +179,39 @@ describe('probeVoice naudiodon 探测降级(纯,可单测)', () => {
     }));
     expect(status.available).toBe(false);
     expect(status.reason).toBe(VOICE_UNAVAILABLE_REASON);
+  });
+});
+
+describe('toMemoryItems 记忆面板格式化(纯,可单测)(代理D)', () => {
+  it('映射分层为中文标签 + 透传时间 + 夹取并保留两位重要度', () => {
+    const recs: MemoryRecordLike[] = [
+      { text: '用户喜欢咖啡', memoryKind: 'semantic', importance: 0.5, createdAtMs: 10, lastSeenAtMs: 20 },
+      { text: '用户对花生过敏', memoryKind: 'core', importance: 0.987, createdAtMs: 5, lastSeenAtMs: 30 },
+      { text: '某天聊到猫', memoryKind: 'episodic', importance: 0.123, createdAtMs: 1, lastSeenAtMs: 2 },
+    ];
+    const items = toMemoryItems(recs);
+    expect(items.map((i) => i.kindLabel)).toEqual(['事实', '核心', '情景']);
+    expect(items[0]?.text).toBe('用户喜欢咖啡');
+    expect(items[0]?.lastSeenAtMs).toBe(20);
+    expect(items[0]?.createdAtMs).toBe(10);
+    // 保留两位:0.987→0.99、0.123→0.12。
+    expect(items[1]?.importance).toBe(0.99);
+    expect(items[2]?.importance).toBe(0.12);
+  });
+
+  it('缺省/未知分层兜底为「情景」,缺省重要度为 0,越界夹到 [0,1]', () => {
+    const items = toMemoryItems([
+      { text: '无分层无重要度', createdAtMs: 1, lastSeenAtMs: 1 },
+      { text: '超界重要度', importance: 1.5, createdAtMs: 2, lastSeenAtMs: 2 },
+      { text: '负重要度', importance: -0.3, createdAtMs: 3, lastSeenAtMs: 3 },
+    ]);
+    expect(items[0]?.kindLabel).toBe('情景');
+    expect(items[0]?.importance).toBe(0);
+    expect(items[1]?.importance).toBe(1);
+    expect(items[2]?.importance).toBe(0);
+  });
+
+  it('空数组 → 空数组(不崩)', () => {
+    expect(toMemoryItems([])).toEqual([]);
   });
 });

@@ -13,6 +13,7 @@ import {
   type VoiceCloneInput,
   type VoiceCloneResult,
   type VoiceCloneStatus,
+  type MemoryItem, // 代理D
 } from './ipc-contract';
 
 /** 包装一个主→渲染推送订阅,返回退订函数(不泄漏 ipcRenderer / event 对象)。 */
@@ -44,6 +45,9 @@ export interface XiaoxueApi {
   onVoiceStatus(cb: (status: VoiceStatus) => void): () => void;
   onCloneResult(cb: (result: VoiceCloneResult) => void): () => void;
   onCloneStatus(cb: (status: VoiceCloneStatus) => void): () => void;
+  // —— 记忆查看(代理D)——
+  /** 只读列出最近 N 条记忆(陪伴工具记忆面板;主进程绝不触发写/巩固)。 */
+  listMemories(limit?: number): Promise<readonly MemoryItem[]>;
 }
 
 const api: XiaoxueApi = {
@@ -62,6 +66,8 @@ const api: XiaoxueApi = {
   onVoiceStatus: (cb) => subscribe<VoiceStatus>(IPC.voiceStatus, cb),
   onCloneResult: (cb) => subscribe<VoiceCloneResult>(IPC.voiceCloneResult, cb),
   onCloneStatus: (cb) => subscribe<VoiceCloneStatus>(IPC.voiceCloneStatus, cb),
+  // —— 记忆查看(代理D)——
+  listMemories: (limit) => ipcRenderer.invoke(IPC.memoryList, limit),
 };
 
 contextBridge.exposeInMainWorld('xiaoxue', api);

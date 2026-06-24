@@ -32,10 +32,38 @@
       <div id="clone-status" class="clone-status muted"></div>
     </section>
 
+    <!-- 记忆查看 / 设置面板(代理D):只读展示,默认收起,点标题按钮展开/刷新 -->
+    <section id="memory" aria-label="小雪的记忆" hidden>
+      <div class="panel-head">
+        <span class="panel-title">小雪的记忆</span>
+        <button id="memory-refresh" type="button" class="link-btn">刷新</button>
+      </div>
+      <ul id="memory-list" class="memory-list"></ul>
+      <div id="memory-empty" class="muted" hidden>还没有记下什么——多聊聊就有了。</div>
+    </section>
+
+    <section id="settings" aria-label="当前设置" hidden>
+      <div class="panel-head">
+        <span class="panel-title">当前设置</span>
+      </div>
+      <dl class="settings-list">
+        <dt>对话模型</dt>
+        <dd id="set-provider" class="muted">—</dd>
+        <dt>模型</dt>
+        <dd id="set-model" class="muted">—</dd>
+        <dt>记忆后端</dt>
+        <dd id="set-memory" class="muted">—</dd>
+      </dl>
+    </section>
+
     <footer id="composer">
       <button id="voice" type="button" title="语音对话">🎙</button>
       <textarea id="input" rows="1" placeholder="和小雪说点什么…(Enter 发送，Shift+Enter 换行)"></textarea>
       <button id="send" type="button">发送</button>
+      <!-- 代理D:换段对话 + 面板开关 -->
+      <button id="reset" type="button" class="ghost-btn" title="换一段新对话（长期记忆仍保留）">换段对话</button>
+      <button id="memory-toggle" type="button" class="ghost-btn" title="查看小雪的记忆">记忆</button>
+      <button id="settings-toggle" type="button" class="ghost-btn" title="查看当前设置">设置</button>
     </footer>
 
     <script src="./renderer.js"></script>

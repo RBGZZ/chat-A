@@ -29,9 +29,11 @@ import {
   upsertEnvLocal,
   CLONE_NO_KEY_REASON,
   VOICE_UNAVAILABLE_REASON,
+  toMemoryItems, // 代理D:记忆面板纯格式化
   type AppInfo,
   type VoiceCloneInput,
   type VoiceCloneStatus,
+  type MemoryItem, // 代理D
 } from './ipc-contract';
 
 let mainWindow: BrowserWindow | null = null;
@@ -208,6 +210,17 @@ function registerIpc(handle: AppHandle): void {
       /* 幂等收尾,失败吞 */
     } finally {
       voiceHandle = undefined;
+    }
+  });
+
+  // —— 记忆查看(代理D)——
+  // 只读列出最近 N 条记忆 → 纯格式化为 UI 条目;**绝不触发写/巩固**(listRecent 只读快照)。
+  // 读失败优雅降级为空数组(memory.listRecent 内部已吞错;此处再兜底,主进程绝不崩,§3.2)。
+  ipcMain.handle(IPC.memoryList, (_e, limit?: number): readonly MemoryItem[] => {
+    try {
+      return toMemoryItems(handle.memory.listRecent(limit));
+    } catch {
+      return [];
     }
   });
 }

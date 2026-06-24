@@ -393,6 +393,15 @@ export interface MemoryStore {
    * 供回放/审计/测试断言;读失败优雅降级为空数组(§3.2)。
    */
   consolidationTraces(unit?: string): readonly ConsolidationTrace[];
+  /**
+   * **只读**列出最近的若干条记忆(承 §5;陪伴工具「记忆查看面板」用):
+   * 按近因降序(`lastSeenAtMs DESC, id DESC`)返回前 `limit` 条记忆快照,N 省略用配置 `recallLimit`。
+   *
+   * **绝不触发写或巩固**(决策:查看 ≠ 被想起):不调 recall、不升 importance / access_count、
+   * 不更新 last_accessed、不建联想边——纯快照读出。区别于 recall(会检索即强化)与 openThreads
+   * (只巡检未闭合)。读失败优雅降级为空数组,不抛(§3.2)。两实现零漂移。
+   */
+  listRecent(limit?: number): readonly MemoryRecord[];
   /** 通用状态 KV 读(真相源持久化原语;persona 状态等复用)。无则 undefined。 */
   getState(key: string): string | undefined;
   /** 通用状态 KV 写(同 key 覆盖)。 */

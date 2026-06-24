@@ -928,5 +928,63 @@ export function runMemoryStoreContract(name: string, make: MakeStore): void {
       expect(r[0]?.hits).toBe(2);
       s.close();
     });
+
+    // —— listRecent 只读列出最近记忆(承 §5 陪伴工具记忆面板;只读、不触发写/巩固;golden 两实现一致)——
+
+    it('listRecent 按近因降序返回、受上限约束(承 §5)', () => {
+      let t = 0;
+      const s = make({ now: () => ++t });
+      s.addMemory({ text: '记忆甲' }); // last_seen=1
+      s.addMemory({ text: '记忆乙' }); // last_seen=2
+      s.addMemory({ text: '记忆丙' }); // last_seen=3
+      // 近因降序:丙 > 乙 > 甲。
+      expect(s.listRecent(10).map((r) => r.text)).toEqual(['记忆丙', '记忆乙', '记忆甲']);
+      // 受上限约束:取最近 2 条。
+      expect(s.listRecent(2).map((r) => r.text)).toEqual(['记忆丙', '记忆乙']);
+      s.close();
+    });
+
+    it('listRecent 空库返回空数组(承 §3.2)', () => {
+      const s = make();
+      expect(s.listRecent()).toEqual([]);
+      s.close();
+    });
+
+    it('listRecent 不触发检索即强化:不升 importance / access_count(查看 ≠ 被想起,承 §5.5)', () => {
+      let nowMs = 86_400_000;
+      const s = make({ now: () => nowMs });
+      s.addMemory({ text: '被查看的咖啡', createdAtMs: 86_400_000, importance: 0.5 });
+      // 多次只读列出不应强化记忆。
+      s.listRecent();
+      s.listRecent();
+      // 用 recall 读取(recall 第一次返回强化前值):importance 仍为初值、accessCount 仍 0。
+      const r = s.recall('咖啡')[0];
+      expect(r?.importance).toBeCloseTo(0.5, 6);
+      expect(r?.accessCount).toBe(0);
+      s.close();
+    });
+
+    it('listRecent 不触发写:不新建记忆、库内条数不变(承 §5 只读)', () => {
+      const s = make();
+      s.addMemory({ text: '唯一的记忆' });
+      s.listRecent();
+      s.listRecent(5);
+      // 仍只有一条(只读列出不写库)。
+      expect(s.listRecent(100).length).toBe(1);
+      s.close();
+    });
+
+    it('listRecent 携带类型/时间/重要度字段(供面板展示,承 §5)', () => {
+      let nowMs = 0;
+      const s = make({ now: () => nowMs });
+      nowMs = 5;
+      s.addMemory({ text: '核心档:用户对花生过敏', memoryKind: 'core', createdAtMs: 5 });
+      const [item] = s.listRecent(10);
+      expect(item?.text).toBe('核心档:用户对花生过敏');
+      expect(item?.memoryKind).toBe('core');
+      expect(item?.createdAtMs).toBe(5);
+      expect(typeof item?.importance).toBe('number');
+      s.close();
+    });
   });
 }

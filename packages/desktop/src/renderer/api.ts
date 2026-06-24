@@ -67,4 +67,17 @@ export interface XiaoxueApi {
   onVoiceStatus(cb: (status: VoiceStatus) => void): () => void;
   onCloneResult(cb: (result: VoiceCloneResult) => void): () => void;
   onCloneStatus(cb: (status: VoiceCloneStatus) => void): () => void;
+  // —— 记忆查看(代理D)——
+  listMemories(limit?: number): Promise<readonly MemoryItem[]>;
+}
+
+// —— 记忆/设置(代理D) ——
+
+/** 记忆面板展示条目(与 ipc-contract.ts 的 MemoryItem 形态一致;渲染层本地声明,不跨进程模块 import)。 */
+export interface MemoryItem {
+  readonly text: string;
+  readonly kindLabel: string;
+  readonly importance: number;
+  readonly lastSeenAtMs: number;
+  readonly createdAtMs: number;
 }
