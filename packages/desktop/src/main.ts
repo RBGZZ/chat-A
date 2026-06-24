@@ -9,6 +9,7 @@
  * 的纯模块里(可 headless 单测);main 只负责接 electron 生命周期 + 装配 + 订阅总线推 IPC。
  */
 import { join } from 'node:path';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { app, BrowserWindow, ipcMain } from 'electron';
 import {
   assembleApp,
@@ -17,14 +18,20 @@ import {
   type AppHandle,
   type VoiceModeHandle,
 } from '@chat-a/client';
+import { createVoice, QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL } from '@chat-a/providers';
 import {
   IPC,
   StateTracker,
   toMoodSummary,
   runSendTurn,
   probeVoice,
+  runCloneVoice,
+  upsertEnvLocal,
+  CLONE_NO_KEY_REASON,
   VOICE_UNAVAILABLE_REASON,
   type AppInfo,
+  type VoiceCloneInput,
+  type VoiceCloneStatus,
 } from './ipc-contract';
 
 let mainWindow: BrowserWindow | null = null;
@@ -48,6 +55,58 @@ function buildAppInfo(handle: AppHandle): AppInfo {
     expressiveness: handle.seed.dials.expressiveness,
     volatility: handle.seed.dials.emotionalVolatility,
   };
+}
+
+/** 取 DashScope key(复刻复用 CHAT_A_DASHSCOPE_API_KEY,回落 CHAT_A_TTS_API_KEY)。 */
+function dashKey(handle: AppHandle): string {
+  return (
+    handle.env['CHAT_A_DASHSCOPE_API_KEY'] ?? handle.env['CHAT_A_TTS_API_KEY'] ?? ''
+  ).trim();
+}
+
+/** 复刻区可用性:有 key 才可用,否则禁用 + 中文提示。 */
+function cloneStatus(handle: AppHandle): VoiceCloneStatus {
+  return dashKey(handle).length > 0
+    ? { available: true }
+    : { available: false, reason: CLONE_NO_KEY_REASON };
+}
+
+/**
+ * 经 DashScope 千问声音复刻创建专属音色(主进程注入给 runCloneVoice 的 clone 端口)。
+ * 优先用渲染层给的文件路径(读盘 + 按扩展名推 MIME 由 providers 处理);兜底用字节 + mime。
+ * targetModel 取 CHAT_A_TTS_MODEL(若是 vc 模型)否则默认 vc-realtime。
+ */
+async function cloneVoiceViaDashScope(handle: AppHandle, input: VoiceCloneInput): Promise<string> {
+  const apiKey = dashKey(handle);
+  if (apiKey.length === 0) throw new Error(CLONE_NO_KEY_REASON);
+  const configModel = (handle.env['CHAT_A_TTS_MODEL'] ?? '').trim();
+  const targetModel =
+    configModel.includes('vc') ? configModel : QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL;
+  const audio =
+    input.path !== undefined && input.path.length > 0
+      ? { path: input.path }
+      : input.bytes !== undefined
+        ? { data: input.bytes, mime: input.mime ?? 'application/octet-stream' }
+        : undefined;
+  if (audio === undefined) throw new Error('未选择音频文件;请先选择一段约 15 秒的清晰录音。');
+  const { voiceId } = await createVoice(audio, { apiKey, targetModel });
+  return voiceId;
+}
+
+/**
+ * 持久化复刻 voiceId:写项目根 .env.local 的 CHAT_A_VOICE_ID(保留其它行)+ 即时设入当前进程 env
+ * (无需重启即可被后续语音模式装配读到)。写盘失败抛错由 runCloneVoice 降级提示。
+ */
+function persistVoiceId(handle: AppHandle, voiceId: string): void {
+  handle.env['CHAT_A_VOICE_ID'] = voiceId; // 本进程即时生效。
+  const path = join(process.cwd(), '.env.local');
+  let text = '';
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    // 文件不存在 → 从空文本新建。
+  }
+  writeFileSync(path, upsertEnvLocal(text, 'CHAT_A_VOICE_ID', voiceId), 'utf8');
 }
 
 /** 订阅总线:UI 状态派生 + 回合后心情 + 语音转写,推给渲染层。 */
@@ -90,6 +149,18 @@ function registerIpc(handle: AppHandle): void {
 
   // 横幅信息。
   ipcMain.handle(IPC.getInfo, () => buildAppInfo(handle));
+
+  // 一键复刻:读文件/字节 → createVoice → 持久化 CHAT_A_VOICE_ID;全程降级不崩(§3.2)。
+  ipcMain.handle(IPC.voiceClone, async (_e, input: VoiceCloneInput) => {
+    await runCloneVoice(
+      {
+        clone: (i) => cloneVoiceViaDashScope(handle, i),
+        persist: (voiceId) => persistVoiceId(handle, voiceId),
+        emit: (ch, p) => emit(ch, p),
+      },
+      input,
+    );
+  });
 
   // 语音开始:先探测 naudiodon 可用性,不可用即优雅降级(不进 startVoiceMode)。
   ipcMain.handle(IPC.voiceStart, async () => {
@@ -150,6 +221,10 @@ function createWindow(handle: AppHandle): void {
   });
   // 渲染层静态资源在 dist/renderer/index.html(esbuild + 复制产出)。
   void mainWindow.loadFile(join(__dirname, 'renderer', 'index.html'));
+  // 页面就绪后推一次复刻区可用性(有 key 才可用),避免渲染层订阅前丢消息。
+  mainWindow.webContents.on('did-finish-load', () => {
+    emit(IPC.voiceCloneStatus, cloneStatus(handle));
+  });
   mainWindow.on('closed', () => {
     mainWindow = null;
   });

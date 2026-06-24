@@ -3,7 +3,15 @@
  * 不引重框架;esbuild 打成 `renderer.js`(IIFE)。负责:消息气泡、输入发送、流式 token 追加、
  * 语音开关、状态栏(state + 心情)。
  */
-import type { XiaoxueApi, MoodSummary, UiState, VoiceStatus } from './api';
+import type {
+  XiaoxueApi,
+  MoodSummary,
+  UiState,
+  VoiceStatus,
+  VoiceCloneInput,
+  VoiceCloneResult,
+  VoiceCloneStatus,
+} from './api';
 
 declare global {
   interface Window {
@@ -21,6 +29,15 @@ const $state = document.getElementById('state') as HTMLElement;
 const $mood = document.getElementById('mood') as HTMLElement;
 const $name = document.getElementById('name') as HTMLElement;
 const $provider = document.getElementById('provider') as HTMLElement;
+const $cloneFile = document.getElementById('clone-file') as HTMLInputElement;
+const $cloneGo = document.getElementById('clone-go') as HTMLButtonElement;
+const $cloneStatus = document.getElementById('clone-status') as HTMLElement;
+const $cloneHint = document.getElementById('clone-hint') as HTMLElement;
+
+/** 复刻区是否可用(由 onCloneStatus 决定:无 key → 禁用)。 */
+let cloneAvailable = false;
+/** 复刻进行中(防重复点击)。 */
+let cloning = false;
 
 /** 当前正在接收流式 token 的小雪气泡(null = 没有进行中的回合)。 */
 let pendingBubble: HTMLElement | null = null;
@@ -155,4 +172,54 @@ void xiaoxue.getInfo().then((info) => {
     ? '(FakeLLM 占位 · 在 .env.local 填 CHAT_A_DASHSCOPE_API_KEY 启用真模型)'
     : `${info.provider} / ${info.model}`;
   document.title = `和「${info.name}」聊天`;
+});
+
+// ── 一键复刻 ──
+
+/** 复刻按钮可用性:可用(有 key)+ 已选文件 + 非进行中 才允许点。 */
+function refreshCloneButton(): void {
+  const hasFile = ($cloneFile.files?.length ?? 0) > 0;
+  $cloneGo.disabled = !cloneAvailable || !hasFile || cloning;
+}
+
+$cloneFile.addEventListener('change', refreshCloneButton);
+
+$cloneGo.addEventListener('click', () => {
+  if ($cloneGo.disabled) return;
+  const file = $cloneFile.files?.[0];
+  if (file === undefined) return;
+  cloning = true;
+  refreshCloneButton();
+  $cloneStatus.textContent = '正在复刻…(上传录音、云端创建专属音色,请稍候)';
+  void buildCloneInput(file)
+    .then((input) => xiaoxue.voiceClone(input))
+    .catch((err: unknown) => {
+      // 读文件失败等本地错误也走友好降级,不卡死按钮。
+      cloning = false;
+      refreshCloneButton();
+      $cloneStatus.textContent = `复刻没成功——${err instanceof Error ? err.message : String(err)}`;
+    });
+});
+
+/** 把选中的 File 转成复刻载荷:优先 Electron 注入的 .path,否则回落字节。 */
+async function buildCloneInput(file: File): Promise<VoiceCloneInput> {
+  const path = (file as File & { path?: string }).path;
+  if (typeof path === 'string' && path.length > 0) return { path };
+  const buf = await file.arrayBuffer();
+  return { bytes: new Uint8Array(buf), mime: file.type || 'application/octet-stream' };
+}
+
+xiaoxue.onCloneStatus((status: VoiceCloneStatus) => {
+  cloneAvailable = status.available;
+  if (!status.available) {
+    $cloneHint.textContent = status.reason ?? '声音复刻当前不可用';
+  }
+  refreshCloneButton();
+});
+
+xiaoxue.onCloneResult((result: VoiceCloneResult) => {
+  cloning = false;
+  refreshCloneButton();
+  $cloneStatus.textContent = result.message;
+  $cloneStatus.className = `clone-status ${result.ok ? 'ok' : 'err'}`;
 });

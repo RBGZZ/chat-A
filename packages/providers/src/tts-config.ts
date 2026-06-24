@@ -162,6 +162,12 @@ export interface QwenTtsRealtimeConfig {
   /** 输出采样率(默认 24000)。 */
   readonly sampleRate?: number;
   readonly languages?: readonly string[];
+  /**
+   * 是否启用**复刻音色合成**(能力位,§4.1/v2.1)。默认/省略 = false(内置音色)。
+   * 配 vc 实时模型(model=`qwen3-tts-vc-realtime`)+ 此位 true 时,`TtsOptions.voiceId`
+   * (千问声音复刻 voice id,经 CHAT_A_VOICE_ID / voice-profile 流入)当 WS `voice` 透传。
+   */
+  readonly voiceCloning?: boolean;
 }
 
 /**
@@ -253,6 +259,8 @@ export function loadTtsConfig(env: NodeJS.ProcessEnv = process.env): TtsConfig {
         ...(env['CHAT_A_TTS_INSTRUCTIONS'] ? { instructions: env['CHAT_A_TTS_INSTRUCTIONS'] } : {}),
         ...(sampleRate !== undefined ? { sampleRate } : {}),
         ...(language ? { languages: [language] } : {}),
+        // 复刻能力位:CHAT_A_TTS_VOICE_CLONING=1/true 时启用(配 vc 实时模型用);省略=内置音色。
+        ...(isTruthy(env['CHAT_A_TTS_VOICE_CLONING']) ? { voiceCloning: true } : {}),
       };
     }
     case 'gpt-sovits':
@@ -270,4 +278,11 @@ export function loadTtsConfig(env: NodeJS.ProcessEnv = process.env): TtsConfig {
     default:
       return { kind: 'fake' };
   }
+}
+
+/** 解析布尔型环境变量(1/true/yes/on,大小写不敏感)。省略/空/其它 = false。 */
+function isTruthy(v: string | undefined): boolean {
+  if (v === undefined) return false;
+  const s = v.trim().toLowerCase();
+  return s === '1' || s === 'true' || s === 'yes' || s === 'on';
 }

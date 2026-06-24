@@ -76,6 +76,13 @@ export interface QwenTtsRealtimeOptions {
   readonly languages?: readonly string[];
   /** 注入的 WS 工厂(测试用);缺省懒加载 `ws` 建真连接。 */
   readonly wsFactory?: QwenWsFactory;
+  /**
+   * 是否支持**复刻音色合成**(能力位,§4.1/v2.1)。默认 false(内置音色)。
+   * 配 vc 实时模型(如 `qwen3-tts-vc-realtime`)时设 true:`TtsOptions.voiceId` = 千问声音复刻得到的
+   * voice id,直接当 WS `session.update` 的 `voice` 透传(复刻音色 id 即合成 voice)。
+   * **默认 false 时合成路径与产出逐字不变**(回归硬线)。
+   */
+  readonly voiceCloning?: boolean;
 }
 
 /** 北京区默认 WebSocket 端点(具名常量,无 magic number;海外区见 design.md)。 */
@@ -122,7 +129,9 @@ export class QwenTtsRealtime implements TtsProvider {
       voiceId: [opts.voice],
       sampleRate: this.#sampleRate,
       streaming: true,
-      voiceCloning: false, // realtime 内置音色,不支持 zero-shot 复刻。
+      // 默认内置音色(false);配 vc 实时模型时由 opts.voiceCloning 放开为 true:
+      // 复刻 voice id 经 opts.voiceId 当 `voice` 透传(synthesize 主体不变,仅放开能力位)。
+      voiceCloning: opts.voiceCloning ?? false,
     };
   }
 
