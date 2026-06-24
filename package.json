@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "dev": "tsx packages/client/src/cli.ts",
+    "dev:brain": "tsx packages/client/src/cli-brain.ts",
     "start": "tsx packages/client/src/cli.ts"
   },
   "devDependencies": {
