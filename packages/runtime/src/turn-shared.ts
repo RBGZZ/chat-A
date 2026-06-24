@@ -1,7 +1,7 @@
 import { isSpanContextValid, type Span } from '@opentelemetry/api';
 import type { AssembledPrompt, AnchorInput, StanceInput } from '@chat-a/cognition';
 import type { MemoryRecord } from '@chat-a/memory';
-import type { SelfMemoryRef } from '@chat-a/persona';
+import type { SelfMemoryRef, SttEmotionLike } from '@chat-a/persona';
 import type { DecisionTraceRecalled } from '@chat-a/observability';
 import type { TurnDeps } from './conversation';
 import type { QueryEmbedResult } from './query-embed';
@@ -143,9 +143,22 @@ export async function finalizeTurn(
      * drift → 传 AnchorInput,不漂移 → 传 undefined(清空)。缺省 = 不接 Guard(等价现状)。
      */
     readonly setPendingAnchor?: (anchor: AnchorInput | undefined) => void;
+    /**
+     * §7#5:本轮语音 prosody 情绪;提供则经 `persona.advance(userText, { prosodyEmotion })` 并入 PAD,
+     * 并把 `label` 记进决策 trace(可追溯 §8.1)。缺省=无语音情绪=情绪推进与 trace 与现状逐字一致。
+     */
+    readonly prosodyEmotion?: SttEmotionLike;
   },
 ): Promise<void> {
   const at = Date.now();
+  // §8.1 可追溯:有语音 prosody 情绪则把 label 标进 turn span(经既有 OTel 接缝,纯加法、不改 trace schema)。
+  if (args.prosodyEmotion !== undefined) {
+    try {
+      args.turnSpan.setAttribute('chat_a.prosody_emotion', args.prosodyEmotion.label);
+    } catch {
+      /* 可观测性绝不打断回合(§3.2) */
+    }
+  }
   deps.memory.appendMessage({
     sessionId: deps.sessionId,
     turnId: args.turnId,
@@ -163,8 +176,13 @@ export async function finalizeTurn(
     correlationId: args.correlationId,
   });
   // 情绪推进(影响下一轮);appraiser 内部已降级,这里再兜一层不打断回合(§3.2)。
+  // §7#5:有语音 prosody 情绪则并入 PAD(persona 内部按权重合并文本+语音拉力);无则与现状逐字一致。
   try {
-    await deps.persona.advance(args.userText);
+    if (args.prosodyEmotion !== undefined) {
+      await deps.persona.advance(args.userText, { prosodyEmotion: args.prosodyEmotion });
+    } else {
+      await deps.persona.advance(args.userText);
+    }
   } catch {
     /* 心情本轮不更新,回合继续 */
   }

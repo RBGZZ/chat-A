@@ -82,3 +82,54 @@ describe('persona/engine: 持久化与跨重启', () => {
     expect(e2.current().turn).toBe(saved.turn);
   });
 });
+
+describe('persona/engine: advance 并入语音 prosody 情绪(§7#5)', () => {
+  /** 零文本拉力 appraiser:隔离出语音侧贡献,便于断言「是语音改变了心情」。 */
+  const zeroPull: Appraiser = { appraise: () => Promise.resolve({ pleasure: 0, arousal: 0, dominance: 0 }) };
+
+  it('提供 sad prosody → PAD pleasure 低于不提供(语音真实影响心情)', async () => {
+    const withProsody = new PersonaEngine({ seed: XIAOXUE_SEED, appraiser: zeroPull, store: new InMemoryPersonaStore() });
+    const without = new PersonaEngine({ seed: XIAOXUE_SEED, appraiser: zeroPull, store: new InMemoryPersonaStore() });
+    await withProsody.advance('随便说点', { prosodyEmotion: { label: 'sad' } });
+    await without.advance('随便说点');
+    expect(withProsody.current().pad.pleasure).toBeLessThan(without.current().pad.pleasure);
+    expect(withProsody.current().pad.arousal).toBeLessThan(without.current().pad.arousal);
+  });
+
+  it('提供 happy prosody → PAD pleasure 高于不提供', async () => {
+    const withProsody = new PersonaEngine({ seed: XIAOXUE_SEED, appraiser: zeroPull, store: new InMemoryPersonaStore() });
+    const without = new PersonaEngine({ seed: XIAOXUE_SEED, appraiser: zeroPull, store: new InMemoryPersonaStore() });
+    await withProsody.advance('随便说点', { prosodyEmotion: { label: 'happy' } });
+    await without.advance('随便说点');
+    expect(withProsody.current().pad.pleasure).toBeGreaterThan(without.current().pad.pleasure);
+  });
+
+  it('neutral / 未知 prosody 标签 → 与不提供逐字等价(降级零拉力)', async () => {
+    const neutral = new PersonaEngine({ seed: XIAOXUE_SEED, appraiser: zeroPull, store: new InMemoryPersonaStore() });
+    const unknown = new PersonaEngine({ seed: XIAOXUE_SEED, appraiser: zeroPull, store: new InMemoryPersonaStore() });
+    const without = new PersonaEngine({ seed: XIAOXUE_SEED, appraiser: zeroPull, store: new InMemoryPersonaStore() });
+    await neutral.advance('随便说点', { prosodyEmotion: { label: 'neutral' } });
+    await unknown.advance('随便说点', { prosodyEmotion: { label: '__nope__' } });
+    await without.advance('随便说点');
+    expect(neutral.current().pad).toEqual(without.current().pad);
+    expect(unknown.current().pad).toEqual(without.current().pad);
+  });
+
+  it('golden:无 opts 的 advance 与传 undefined opts 逐字一致(纯加法不改默认路径)', async () => {
+    const a = new PersonaEngine({ seed: XIAOXUE_SEED, appraiser: zeroPull, store: new InMemoryPersonaStore() });
+    const b = new PersonaEngine({ seed: XIAOXUE_SEED, appraiser: zeroPull, store: new InMemoryPersonaStore() });
+    await a.advance('随便说点');
+    await b.advance('随便说点', {});
+    expect(a.current().pad).toEqual(b.current().pad);
+    expect(a.current().turn).toBe(b.current().turn);
+  });
+
+  it('confidence 缩放:低置信 sad 对心情的压低弱于满置信 sad(语音强度可调)', async () => {
+    const full = new PersonaEngine({ seed: XIAOXUE_SEED, appraiser: zeroPull, store: new InMemoryPersonaStore() });
+    const low = new PersonaEngine({ seed: XIAOXUE_SEED, appraiser: zeroPull, store: new InMemoryPersonaStore() });
+    await full.advance('随便说点', { prosodyEmotion: { label: 'sad' } });
+    await low.advance('随便说点', { prosodyEmotion: { label: 'sad', confidence: 0.3 } });
+    // 满置信压得更低(pleasure 更小)
+    expect(full.current().pad.pleasure).toBeLessThan(low.current().pad.pleasure);
+  });
+});
