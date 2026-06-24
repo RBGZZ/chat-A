@@ -69,6 +69,9 @@ export interface XiaoxueApi {
   onCloneStatus(cb: (status: VoiceCloneStatus) => void): () => void;
   // —— 代理B:订阅小雪主动消息(自发气泡);返回退订函数。
   onProactive(cb: (msg: ProactiveMessage) => void): () => void;
+  // —— 人格自定义(代理C) ——
+  getPersona(): Promise<PersonaForm>;
+  updatePersona(form: PersonaForm): Promise<PersonaForm>;
 }
 
 // —— 代理B:主动消息形态(与 ipc-contract 的 ProactiveMessage 同名同义)。
@@ -76,4 +79,13 @@ export interface ProactiveMessage {
   readonly text: string;
   readonly signalKind: string;
   readonly preempted: boolean;
+}
+
+// —— 人格自定义(代理C) ——
+/** 人格面板可编辑表单:名字 + 三档情绪旋钮([0,1]);**不含语种**(语种与人格 dials 正交)。 */
+export interface PersonaForm {
+  readonly name: string;
+  readonly warmth: number;
+  readonly expressiveness: number;
+  readonly volatility: number;
 }

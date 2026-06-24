@@ -51,4 +51,44 @@ describe('assembleApp 核心装配(FakeLLM,不触网)', () => {
     expect(typeof tone.emotion).toBe('string');
     await app.cleanup();
   });
+
+  it('personaView() 读名字 + 三档', async () => {
+    const app = assembleApp({ env: fakeEnv(), loadEnv: false });
+    const v = app.personaView();
+    expect(v.name).toBe(app.seed.name);
+    expect(v.warmth).toBe(app.seed.dials.baselineWarmth);
+    expect(v.expressiveness).toBe(app.seed.dials.expressiveness);
+    expect(v.volatility).toBe(app.seed.dials.emotionalVolatility);
+    await app.cleanup();
+  });
+
+  it('applyPersona() 运行时生效:换种子 + 重建引擎/会话(sessionId 不变,记忆续接)', async () => {
+    const app = assembleApp({ env: fakeEnv(), loadEnv: false });
+    const sid0 = app.sessionId;
+    const persona0 = app.persona;
+    const convo0 = app.convo;
+    const view = app.applyPersona({ name: '阿狸', warmth: 1.5, expressiveness: 0, volatility: 0.8 });
+    // 返回值与读路径一致,且夹取生效
+    expect(view.name).toBe('阿狸');
+    expect(view.warmth).toBe(1); // 1.5 → 夹到 1
+    expect(view.volatility).toBe(0.8);
+    expect(app.personaView()).toEqual(view);
+    // seed/persona/convo 已换新;sessionId 不变(对话不断)
+    expect(app.seed.name).toBe('阿狸');
+    expect(app.seed.dials.baselineWarmth).toBe(1);
+    expect(app.persona).not.toBe(persona0);
+    expect(app.convo).not.toBe(convo0);
+    expect(app.sessionId).toBe(sid0);
+    // 新引擎仍可读 tone(PAD 从同一 store 续接)
+    expect(typeof app.persona.tone().emotion).toBe('string');
+    await app.cleanup();
+  });
+
+  it('applyPersona() 空补丁不改名字/三档', async () => {
+    const app = assembleApp({ env: fakeEnv(), loadEnv: false });
+    const before = app.personaView();
+    const after = app.applyPersona({});
+    expect(after).toEqual(before);
+    await app.cleanup();
+  });
 });

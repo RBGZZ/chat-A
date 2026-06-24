@@ -13,6 +13,7 @@ import type {
   VoiceCloneStatus,
   // —— 代理B:主动消息类型 ——
   ProactiveMessage,
+  PersonaForm, // 代理C
 } from './api';
 
 declare global {
@@ -239,3 +240,66 @@ xiaoxue.onProactive((msg: ProactiveMessage) => {
   if (msg.preempted) bubble.classList.add('preempted');
   scrollToBottom();
 });
+// ── 人格自定义(代理C)──:名字 + 三档滑块,保存即运行时生效(主进程重装配,长期记忆保留)。
+const $pName = document.getElementById('persona-name') as HTMLInputElement;
+const $pWarmth = document.getElementById('persona-warmth') as HTMLInputElement;
+const $pExpr = document.getElementById('persona-expressiveness') as HTMLInputElement;
+const $pVol = document.getElementById('persona-volatility') as HTMLInputElement;
+const $pWarmthVal = document.getElementById('persona-warmth-val') as HTMLElement;
+const $pExprVal = document.getElementById('persona-expressiveness-val') as HTMLElement;
+const $pVolVal = document.getElementById('persona-volatility-val') as HTMLElement;
+const $pSave = document.getElementById('persona-save') as HTMLButtonElement;
+const $pStatus = document.getElementById('persona-status') as HTMLElement;
+
+/** 把表单滑块/数字回显;label 跟随滑块值刷新(两位小数)。 */
+function renderPersonaForm(form: PersonaForm): void {
+  $pName.value = form.name;
+  $pWarmth.value = String(form.warmth);
+  $pExpr.value = String(form.expressiveness);
+  $pVol.value = String(form.volatility);
+  refreshPersonaLabels();
+}
+
+/** 三档滑块值标签(实时反映拖动)。 */
+function refreshPersonaLabels(): void {
+  $pWarmthVal.textContent = Number($pWarmth.value).toFixed(2);
+  $pExprVal.textContent = Number($pExpr.value).toFixed(2);
+  $pVolVal.textContent = Number($pVol.value).toFixed(2);
+}
+
+$pWarmth.addEventListener('input', refreshPersonaLabels);
+$pExpr.addEventListener('input', refreshPersonaLabels);
+$pVol.addEventListener('input', refreshPersonaLabels);
+
+$pSave.addEventListener('click', () => {
+  if ($pSave.disabled) return;
+  $pSave.disabled = true;
+  $pStatus.textContent = '正在应用…';
+  $pStatus.className = 'muted';
+  const form: PersonaForm = {
+    name: $pName.value.trim(),
+    warmth: Number($pWarmth.value),
+    expressiveness: Number($pExpr.value),
+    volatility: Number($pVol.value),
+  };
+  void xiaoxue
+    .updatePersona(form)
+    .then((applied) => {
+      // 用主进程规整后的最终值回填(夹取/空名回落已发生),并刷新横幅名字。
+      renderPersonaForm(applied);
+      $name.textContent = applied.name;
+      document.title = `和「${applied.name}」聊天`;
+      $pStatus.textContent = `已生效:${applied.name}(温暖 ${applied.warmth.toFixed(2)} · 表达 ${applied.expressiveness.toFixed(2)} · 波动 ${applied.volatility.toFixed(2)})`;
+      $pStatus.className = 'persona-status ok';
+    })
+    .catch((err: unknown) => {
+      $pStatus.textContent = `保存没成功——${err instanceof Error ? err.message : String(err)}`;
+      $pStatus.className = 'persona-status err';
+    })
+    .finally(() => {
+      $pSave.disabled = false;
+    });
+});
+
+// 启动:取当前人格回填面板。
+void xiaoxue.getPersona().then(renderPersonaForm);

@@ -20,6 +20,11 @@ export const IPC = {
   reset: 'session:reset',
   getInfo: 'app:get-info',
   voiceClone: 'voice:clone',
+  // —— 人格自定义(代理C) ——
+  /** 渲染→主:读当前可编辑人格(名字 + 三档)。 */
+  personaGet: 'persona:get',
+  /** 渲染→主:应用人格修改(运行时生效 + 可选持久化)。 */
+  personaUpdate: 'persona:update',
   // 主 → 渲染(webContents.send)
   token: 'chat:token',
   reply: 'chat:reply',
@@ -355,4 +360,49 @@ export function toProactiveMessage(speech: {
  */
 export function isProactiveEnabled(env: Record<string, string | undefined>): boolean {
   return (env['CHAT_A_AUTONOMY'] ?? '').trim().toLowerCase() === 'on';
+}
+// ───────────────────────────── 人格自定义(代理C) ─────────────────────────────
+
+/**
+ * 人格面板可编辑表单(渲染↔主):名字 + 三档情绪旋钮(warmth/expressiveness/volatility,均 [0,1])。
+ * 与 AppInfo / persona.PersonaView 的三档同名同义;**不含语种字段**——输出语种解耦是项目既定原则,
+ * 人格 dials 与语种正交,人格自定义不引入"输出语种硬绑输入语种"的任何逻辑。
+ */
+export interface PersonaForm {
+  readonly name: string;
+  readonly warmth: number;
+  readonly expressiveness: number;
+  readonly volatility: number;
+}
+
+/** 人格 dial 取值的合法区间(单一真相源;三档同区间)。 */
+export const PERSONA_DIAL_MIN = 0;
+export const PERSONA_DIAL_MAX = 1;
+
+/** 把单个 dial 夹取到 [PERSONA_DIAL_MIN, PERSONA_DIAL_MAX];非有限 → 回落 fallback(纯,可单测)。 */
+export function clampDial(raw: number, fallback: number): number {
+  if (!Number.isFinite(raw)) return fallback;
+  return raw < PERSONA_DIAL_MIN ? PERSONA_DIAL_MIN : raw > PERSONA_DIAL_MAX ? PERSONA_DIAL_MAX : raw;
+}
+
+/**
+ * 规整渲染层提交的人格表单(纯函数,可 headless 单测,§3.2):
+ * - 名字:trim;空白 → 回落 fallback.name(绝不产出空名)。
+ * - 三档:各自经 {@link clampDial} 夹取 [0,1];非有限 → 回落 fallback 对应档。
+ * fallback 传当前人格视图,保证任何缺漏/非法输入都退化为"维持现状"而非破坏人格。
+ */
+export function sanitizePersonaForm(raw: Partial<PersonaForm>, fallback: PersonaForm): PersonaForm {
+  const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+  return {
+    name: name.length > 0 ? name : fallback.name,
+    warmth: clampDial(typeof raw.warmth === 'number' ? raw.warmth : Number.NaN, fallback.warmth),
+    expressiveness: clampDial(
+      typeof raw.expressiveness === 'number' ? raw.expressiveness : Number.NaN,
+      fallback.expressiveness,
+    ),
+    volatility: clampDial(
+      typeof raw.volatility === 'number' ? raw.volatility : Number.NaN,
+      fallback.volatility,
+    ),
+  };
 }

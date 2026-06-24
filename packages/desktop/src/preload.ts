@@ -15,6 +15,7 @@ import {
   type VoiceCloneStatus,
   // —— 代理B:主动消息类型 ——
   type ProactiveMessage,
+  type PersonaForm, // 代理C
 } from './ipc-contract';
 
 /** 包装一个主→渲染推送订阅,返回退订函数(不泄漏 ipcRenderer / event 对象)。 */
@@ -48,6 +49,11 @@ export interface XiaoxueApi {
   onCloneStatus(cb: (status: VoiceCloneStatus) => void): () => void;
   // —— 代理B:订阅小雪主动消息(自发气泡);返回退订函数。
   onProactive(cb: (msg: ProactiveMessage) => void): () => void;
+  // —— 人格自定义(代理C) ——
+  /** 读当前可编辑人格(名字 + 三档),供人格面板初值。 */
+  getPersona(): Promise<PersonaForm>;
+  /** 应用人格修改(运行时生效 + 持久化);resolve 规整后的最终人格。 */
+  updatePersona(form: PersonaForm): Promise<PersonaForm>;
 }
 
 const api: XiaoxueApi = {
@@ -68,6 +74,9 @@ const api: XiaoxueApi = {
   onCloneStatus: (cb) => subscribe<VoiceCloneStatus>(IPC.voiceCloneStatus, cb),
   // —— 代理B:主动消息订阅 ——
   onProactive: (cb) => subscribe<ProactiveMessage>(IPC.proactiveMessage, cb),
+  // —— 人格自定义(代理C) ——
+  getPersona: () => ipcRenderer.invoke(IPC.personaGet),
+  updatePersona: (form) => ipcRenderer.invoke(IPC.personaUpdate, form),
 };
 
 contextBridge.exposeInMainWorld('xiaoxue', api);
