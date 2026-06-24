@@ -1,4 +1,4 @@
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: PAD 情绪步进可并入语音 prosody 拉力
 

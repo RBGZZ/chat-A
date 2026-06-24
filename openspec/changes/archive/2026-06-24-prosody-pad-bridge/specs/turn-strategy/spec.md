@@ -9,6 +9,8 @@
 - **WHEN** 调用方以 `send(userText, onToken, signal?, prosodyEmotion)` 传入 prosody 情绪
 - **THEN** 外壳把该 `prosodyEmotion` 填入 `TurnContext.prosodyEmotion`,策略可经 `ctx.prosodyEmotion` 取得同一值;不传时 `ctx.prosodyEmotion` 为 `undefined`
 
+## ADDED Requirements
+
 ### Requirement: 回合收尾在两策略间零漂移并可携带 prosody 情绪
 
 `SingleShotStrategy` 与 `ToolCallingStrategy` MUST 共用 `turn-shared` 的 `finalizeTurn` 完成回合收尾(落历史、情绪推进、写记忆、决策 trace),使工具回合与单趟回合的记忆/人格/trace 逐字零漂移。`finalizeTurn` 的 args MAY 携带可选 `prosodyEmotion?: SttEmotionLike`;提供时 `finalizeTurn` MUST 调 `deps.persona.advance(userText, { prosodyEmotion })`(仅在提供时带 opts),否则调 `deps.persona.advance(userText)`(与现状逐字一致)。两个策略 MUST 把各自 `ctx.prosodyEmotion`(若有)经 `finalizeTurn` args 透传,确保 STT 路语音情绪在两种回合范式下都能影响心情。当 `prosodyEmotion` 缺省时,情绪推进调用形状与行为 MUST 与现状等价。`finalizeTurn` 写决策 trace 时 MAY 在提供 `prosodyEmotion` 时附带其 `label`(纯加法,经既有 traceSink 接缝)。
