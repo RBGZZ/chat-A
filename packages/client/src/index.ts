@@ -9,3 +9,19 @@ export { startVoiceMode } from './cli-voice';
 export type { VoiceModeHandle, VoiceModeDeps } from './cli-voice';
 export { NodeAudioDevice } from './audio/node-audio-device';
 export type { NodeAudioDeviceOptions } from './audio/node-audio-device';
+
+// —— 主动陪伴(代理B):autonomy 主动消息通道装配 + 真候选源(persona/memory) ——
+export {
+  assembleProactiveBridge,
+  loadProactiveIdleMs,
+  DEFAULT_PROACTIVE_IDLE_MS,
+  PROACTIVE_IDLE_SIGNAL_KIND,
+} from './assembly/proactive-bridge';
+export type {
+  ProactiveBridgeDeps,
+  ProactiveBridgeHandle,
+} from './assembly/proactive-bridge';
+export { assembleAutonomy, AUTONOMY_RUNNER_SKILL_ID } from './assembly/autonomy';
+export type { ProactiveSpeech, AutonomyHandle } from './assembly/autonomy';
+export { createCompanionCandidateSource, createPresencePort } from './assembly/memory-autonomy-ports';
+export type { CompanionCandidateSourceDeps } from './assembly/memory-autonomy-ports';

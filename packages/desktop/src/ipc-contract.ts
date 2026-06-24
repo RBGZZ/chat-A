@@ -30,6 +30,7 @@ export const IPC = {
   voiceStatus: 'voice:status',
   voiceCloneResult: 'voice:clone-result',
   voiceCloneStatus: 'voice:clone-status',
+  proactiveMessage: 'proactive:message', // —— 主动消息(代理B) ——
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
@@ -306,4 +307,52 @@ export async function runCloneVoice(port: CloneVoicePort, input: VoiceCloneInput
     voiceId,
     message: `小雪的新声音已就绪(音色 id 已保存,重启后自动生效)。${persistWarn}`,
   } satisfies VoiceCloneResult);
+}
+
+// ═══════════════════════════════ 代理B:主动消息(自发气泡)═══════════════════════════════
+//
+// 主动陪伴(北极星「会主动开口」):autonomy 引擎在用户空闲时,经真 persona/记忆生成一句主动话,
+// 经 `IPC.proactiveMessage` 推给渲染层,渲染成一条带「主动」标记的小雪气泡(与用户回合 pendingBubble
+// 互不干扰)。下列为该通道的类型 + 不依赖 electron 的纯逻辑(headless 可单测)。
+//
+// **不涉及 TTS 语种**:本通道只把主动话送成文字气泡,不经 TTS 朗读;若后续要发声,应沿用既有
+// VoiceLoop/TTS 的 `language_type` 输出语种路径(输出语种由配置/人格决定、与输入语种解耦),不在此绕过。
+
+/** 一条主动消息(主→渲染):小雪自发说的话 + 来源信号 kind + 是否伴随抢占。 */
+export interface ProactiveMessage {
+  /** 主动话语正文(经 persona guardrail 的真实话语,非空)。 */
+  readonly text: string;
+  /** 触发本次主动回合的感知信号 kind(便于 UI/追溯标注;如 `temporal:idle-tick`)。 */
+  readonly signalKind: string;
+  /** 本次是否伴随抢占(打断在说者);渲染层可据此微调标记。 */
+  readonly preempted: boolean;
+}
+
+/**
+ * 把一条 autonomy `ProactiveSpeech`(client 侧形态)归一为可上 IPC 的 {@link ProactiveMessage}(纯函数,
+ * 可单测,§3.2):裁剪首尾空白;`text` 为空白则返回 null(调用方据此**不推**,绝不推空气泡)。
+ * `signalKind`/`preempted` 缺省给安全值。
+ */
+export function toProactiveMessage(speech: {
+  readonly text: string;
+  readonly signalKind?: string;
+  readonly preempted?: boolean;
+}): ProactiveMessage | null {
+  const text = (speech.text ?? '').trim();
+  if (text.length === 0) return null;
+  return {
+    text,
+    signalKind: speech.signalKind ?? 'unknown',
+    preempted: speech.preempted === true,
+  };
+}
+
+/**
+ * 解析主动陪伴是否启用(纯函数,可单测,§3.2):沿用 autonomy 主开关 `CHAT_A_AUTONOMY=on`
+ * (大小写不敏感、去空白);**缺省/任何其它值 = 关**(默认安全,绝不擅自开口)。
+ * 与 `@chat-a/autonomy` 的 `isAutonomyEnabled` 同义;此处复制一份纯逻辑以便 desktop 侧 headless 单测,
+ * 不引入对 autonomy 的额外依赖(主进程仍以 client 的真装配为准)。
+ */
+export function isProactiveEnabled(env: Record<string, string | undefined>): boolean {
+  return (env['CHAT_A_AUTONOMY'] ?? '').trim().toLowerCase() === 'on';
 }

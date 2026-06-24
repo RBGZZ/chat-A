@@ -67,4 +67,13 @@ export interface XiaoxueApi {
   onVoiceStatus(cb: (status: VoiceStatus) => void): () => void;
   onCloneResult(cb: (result: VoiceCloneResult) => void): () => void;
   onCloneStatus(cb: (status: VoiceCloneStatus) => void): () => void;
+  // —— 代理B:订阅小雪主动消息(自发气泡);返回退订函数。
+  onProactive(cb: (msg: ProactiveMessage) => void): () => void;
+}
+
+// —— 代理B:主动消息形态(与 ipc-contract 的 ProactiveMessage 同名同义)。
+export interface ProactiveMessage {
+  readonly text: string;
+  readonly signalKind: string;
+  readonly preempted: boolean;
 }

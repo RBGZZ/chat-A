@@ -11,6 +11,8 @@ import type {
   VoiceCloneInput,
   VoiceCloneResult,
   VoiceCloneStatus,
+  // —— 代理B:主动消息类型 ——
+  ProactiveMessage,
 } from './api';
 
 declare global {
@@ -222,4 +224,18 @@ xiaoxue.onCloneResult((result: VoiceCloneResult) => {
   refreshCloneButton();
   $cloneStatus.textContent = result.message;
   $cloneStatus.className = `clone-status ${result.ok ? 'ok' : 'err'}`;
+});
+
+// ═══════════════════════════════ 代理B:主动消息(自发气泡) ═══════════════════════════════
+//
+// 小雪主动开口(autonomy 引擎在空闲时经真 persona/记忆生成):渲染成一条带「主动」细标记的小雪气泡。
+// 与用户回合的 pendingBubble **互不干扰**——主动气泡是独立追加的定型气泡(不进 pendingBubble),
+// 即便此刻正有用户回合在流式接收 token,也各渲染各的。加 `proactive` class 供 CSS 细标记。
+xiaoxue.onProactive((msg: ProactiveMessage) => {
+  if (msg.text.trim().length === 0) return; // 防空气泡(主进程已归一,这里再兜一层)
+  const bubble = addBubble('xiao', msg.text);
+  bubble.classList.add('proactive');
+  // 抢占场景(打断在说者)给更显眼的标记,便于追溯主动性强弱。
+  if (msg.preempted) bubble.classList.add('preempted');
+  scrollToBottom();
 });
