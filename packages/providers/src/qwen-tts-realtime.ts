@@ -227,9 +227,11 @@ export class QwenTtsRealtime implements TtsProvider {
       queue.fail(new Error(`${this.id} WebSocket 连接错误: ${describeErr(err)}`));
     });
 
-    ws.on('close', (code) => {
+    ws.on('close', (code: unknown, reason: unknown) => {
       // 正常收尾(finish 已触发)时 close 无害;未收齐就 close → 视为异常结束。
-      queue.closeWith(typeof code === 'number' ? code : undefined);
+      // 带上 close reason(服务端常在此说明真因,如 "Model not found (...)"),便于排查。
+      const r = reason == null ? '' : typeof reason === 'string' ? reason : (reason as { toString?: () => string }).toString?.() ?? String(reason);
+      queue.closeWith(typeof code === 'number' ? code : undefined, r);
     });
 
     if (signal !== undefined) signal.addEventListener('abort', onAbort, { once: true });
@@ -364,6 +366,7 @@ class FrameQueue {
   #done = false;
   #err: Error | undefined;
   #closeCode: number | undefined;
+  #closeReason = '';
   #closed = false;
   #resolve: (() => void) | undefined;
 
@@ -389,9 +392,10 @@ class FrameQueue {
   }
 
   /** 连接关闭:若尚未正常 finish 且无 error,记下 code,pull 到尾时据此判异常。 */
-  closeWith(code: number | undefined): void {
+  closeWith(code: number | undefined, reason = ''): void {
     this.#closed = true;
     this.#closeCode = code;
+    this.#closeReason = reason;
     if (!this.#done) this.#wake();
   }
 
@@ -405,7 +409,7 @@ class FrameQueue {
       // 未 done 但连接已关 + buffer 空 → 异常结束(没收到 finish/done)。
       if (this.#closed) {
         throw new Error(
-          `qwen-tts WebSocket 在合成完成前关闭${this.#closeCode !== undefined ? `(code ${this.#closeCode})` : ''}`,
+          `qwen-tts WebSocket 在合成完成前关闭${this.#closeCode !== undefined ? `(code ${this.#closeCode})` : ''}${this.#closeReason ? `:${this.#closeReason}` : ''}`,
         );
       }
       await new Promise<void>((resolve) => {

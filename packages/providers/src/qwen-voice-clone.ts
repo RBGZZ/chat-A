@@ -33,8 +33,13 @@ export const QWEN_VOICE_CLONE_ENDPOINT = 'https://dashscope.aliyuncs.com';
 export const QWEN_VOICE_CLONE_PATH = '/api/v1/services/audio/tts/customization';
 /** 复刻所用顶层 model(固定;非合成 model)。 */
 export const QWEN_VOICE_ENROLLMENT_MODEL = 'qwen-voice-enrollment';
-/** 默认 target_model(实时复刻;**别写死日期快照**——可经 opts 覆盖)。 */
-export const QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL = 'qwen3-tts-vc-realtime';
+/**
+ * 默认 target_model(实时复刻;可经 opts 覆盖)。
+ * **真机校准(2026-06-25)**:无日期别名 `qwen3-tts-vc-realtime` **服务端不存在**(WS close 1007
+ * `Model not found`)——VC 实时复刻模型**必须带日期快照**。`qwen3-tts-vc-realtime-2025-11-27` 实测
+ * 复刻+合成端到端通过。复刻 target_model 必须与合成 model 逐字一致(音色绑单模型快照)。
+ */
+export const QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL = 'qwen3-tts-vc-realtime-2025-11-27';
 /** 参考音频原始字节上限(DashScope 文档:< 10MB)。 */
 export const QWEN_VOICE_CLONE_MAX_BYTES = 10 * 1024 * 1024;
 /** 创建音色时默认前缀名(preferred_name;仅命名用,可经 opts 覆盖)。 */

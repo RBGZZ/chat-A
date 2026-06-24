@@ -16,7 +16,8 @@
     "@chat-a/runtime": "workspace:*",
     "@chat-a/providers": "workspace:*",
     "@chat-a/persona": "workspace:*",
-    "@chat-a/protocol": "workspace:*"
+    "@chat-a/protocol": "workspace:*",
+    "ws": "^8.21.0"
   },
   "optionalDependencies": {
     "naudiodon": "^2.3.6"

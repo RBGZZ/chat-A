@@ -92,6 +92,9 @@ importers:
       '@chat-a/runtime':
         specifier: workspace:*
         version: link:../runtime
+      ws:
+        specifier: ^8.21.0
+        version: 8.21.0
     devDependencies:
       electron:
         specifier: ^31.0.0

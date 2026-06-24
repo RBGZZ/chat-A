@@ -397,6 +397,18 @@ class PcmPlayer {
     return this.#ctx;
   }
 
+  /**
+   * 在用户交互时主动建并 resume AudioContext(满足自动播放策略):AudioContext 在无用户手势时
+   * 可能初始挂起,导致朗读 PCM 排入却不出声。发送/点击/键入时调用一次即可让其转入 running。
+   */
+  resume(): void {
+    try {
+      void this.#ensureCtx().resume();
+    } catch {
+      /* 忽略:resume 失败不影响文字 */
+    }
+  }
+
   /** 排入一块 PCM:Int16→Float32([-1,1]) → 建单声道 buffer → 接在上一块尾部调度播放。 */
   enqueue(chunk: TtsAudioChunk): void {
     const pcm = chunk.pcm;
@@ -438,6 +450,13 @@ class PcmPlayer {
 const pcmPlayer = new PcmPlayer();
 xiaoxue.onTtsAudio((chunk) => pcmPlayer.enqueue(chunk));
 xiaoxue.onTtsAudioStop(() => pcmPlayer.stop());
+
+// 自动播放策略兜底:首次用户交互(发送/点击/键入)时建并 resume AudioContext,
+// 确保朗读 PCM 排入后真出声(AudioContext 无用户手势时可能初始挂起)。
+const __primeAudio = (): void => pcmPlayer.resume();
+$send.addEventListener('click', __primeAudio);
+window.addEventListener('pointerdown', __primeAudio);
+window.addEventListener('keydown', __primeAudio);
 
 // ═══════════════════════════════ 语言面板:三独立语种 + 朗读开关(本批次) ═══════════════════════════════
 const $langDisplay = document.getElementById('lang-display') as HTMLSelectElement;

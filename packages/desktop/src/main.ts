@@ -295,8 +295,14 @@ function makeSynthesize(
       ...(ttsLang.length > 0 ? { language: ttsLang } : {}),
       ...(profile.voiceId !== undefined ? { voiceId: profile.voiceId } : {}),
     };
-    for await (const chunk of tts.synthesize(sentence, opts, signal)) {
-      yield { pcm: chunk.samples, sampleRate: chunk.sampleRate };
+    try {
+      for await (const chunk of tts.synthesize(sentence, opts, signal)) {
+        yield { pcm: chunk.samples, sampleRate: chunk.sampleRate };
+      }
+    } catch (e) {
+      // 单句合成失败:记一条(便于排查 TTS 模型/音色配置问题),向上抛由 runSpeakReply 跳过该句(§3.2)。
+      if (!signal.aborted) console.warn('[speak] TTS 合成失败(跳过本句):', e instanceof Error ? e.message : e);
+      throw e;
     }
   };
 }
@@ -340,7 +346,8 @@ async function speakReply(handle: AppHandle, reply: string, signal: AbortSignal)
       ttsLang,
       signal,
     );
-  } catch {
+  } catch (err) {
+    console.warn('[speak] 朗读链路失败(不影响文字回复):', err instanceof Error ? err.message : err);
     // 朗读链路任何失败不影响文字气泡(已定型),只吞掉(§3.2)。
   }
 }
