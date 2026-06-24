@@ -20,6 +20,18 @@
 
     <main id="messages" aria-live="polite"></main>
 
+    <section id="clone" aria-label="复刻小雪声音">
+      <div class="clone-head">
+        <span class="clone-title">复刻小雪声音</span>
+        <span id="clone-hint" class="muted">选一段约 15 秒的清晰录音，一键复刻成小雪的专属声音</span>
+      </div>
+      <div class="clone-row">
+        <input id="clone-file" type="file" accept="audio/*" />
+        <button id="clone-go" type="button" disabled>复刻</button>
+      </div>
+      <div id="clone-status" class="clone-status muted"></div>
+    </section>
+
     <footer id="composer">
       <button id="voice" type="button" title="语音对话">🎙</button>
       <textarea id="input" rows="1" placeholder="和小雪说点什么…(Enter 发送，Shift+Enter 换行)"></textarea>

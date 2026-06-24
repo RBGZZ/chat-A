@@ -115,6 +115,7 @@ const registry: { [K in TtsConfig['kind']]: TtsFactory<K> } = {
       ...(cfg.instructions !== undefined ? { instructions: cfg.instructions } : {}),
       ...(cfg.sampleRate !== undefined ? { sampleRate: cfg.sampleRate } : {}),
       ...(cfg.languages !== undefined ? { languages: cfg.languages } : {}),
+      ...(cfg.voiceCloning !== undefined ? { voiceCloning: cfg.voiceCloning } : {}),
       ...(ports.qwenWsFactory !== undefined ? { wsFactory: ports.qwenWsFactory } : {}),
     }),
 };

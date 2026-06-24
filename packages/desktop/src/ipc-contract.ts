@@ -19,6 +19,7 @@ export const IPC = {
   voiceStop: 'voice:stop',
   reset: 'session:reset',
   getInfo: 'app:get-info',
+  voiceClone: 'voice:clone',
   // 主 → 渲染(webContents.send)
   token: 'chat:token',
   reply: 'chat:reply',
@@ -27,6 +28,8 @@ export const IPC = {
   mood: 'mood:change',
   transcript: 'voice:transcript',
   voiceStatus: 'voice:status',
+  voiceCloneResult: 'voice:clone-result',
+  voiceCloneStatus: 'voice:clone-status',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
@@ -53,6 +56,32 @@ export interface VoiceStatus {
   readonly path?: string;
   /** 可用时:设备标识。 */
   readonly device?: string;
+}
+
+/** 复刻一键请求载荷:渲染层给本地文件路径(优先)或字节(兜底,无 .path 时)。 */
+export interface VoiceCloneInput {
+  /** 本地音频文件路径(Electron 渲染层 File.path);可用即用。 */
+  readonly path?: string;
+  /** 兜底:音频字节(无 path 时,渲染层经 arrayBuffer() 传)。 */
+  readonly bytes?: Uint8Array;
+  /** 兜底字节对应的 MIME(随 bytes 给)。 */
+  readonly mime?: string;
+}
+
+/** 复刻结果(主→渲染):成功带 voiceId,失败带中文文案。 */
+export interface VoiceCloneResult {
+  readonly ok: boolean;
+  /** 成功时:复刻得到的 voice id。 */
+  readonly voiceId?: string;
+  /** 文案(成功提示 / 失败友好中文)。 */
+  readonly message: string;
+}
+
+/** 复刻区可用性(主→渲染):无 key 时禁用 + 中文提示。 */
+export interface VoiceCloneStatus {
+  readonly available: boolean;
+  /** 不可用时中文原因(渲染层 tooltip / 提示)。 */
+  readonly reason?: string;
 }
 
 /** 应用信息(横幅用;getInfo 返回)。 */
@@ -197,4 +226,84 @@ export async function probeVoice(makeDevice: () => ProbeDevice): Promise<VoiceSt
   } catch {
     return { available: false, reason: VOICE_UNAVAILABLE_REASON };
   }
+}
+
+// ───────────────────────────── 一键复刻(纯) ─────────────────────────────
+
+/** 复刻区无 key 时的标准中文提示(单一真相源,§3.2)。 */
+export const CLONE_NO_KEY_REASON =
+  '声音复刻需要 DashScope API key;请在项目根 .env.local 填写 CHAT_A_DASHSCOPE_API_KEY 后重启。';
+/** 复刻失败的标准中文降级文案前缀(§3.2,永不崩)。 */
+export const CLONE_ERROR_TEXT = '声音复刻没成功——';
+
+/**
+ * 在 `.env.local` 文本里 upsert 一个键(纯函数,可单测,§3.2):
+ * - 已存在(忽略前导空白、允许 `export ` 前缀)→ 原地替换其值,保留其它行与注释;
+ * - 不存在 → 末尾追加一行(必要时补换行);
+ * - 空文本 → 直接产出 `KEY=value\n`。
+ * 值不做引号包裹(voiceId 为安全字符);返回新文本。
+ */
+export function upsertEnvLocal(text: string, key: string, value: string): string {
+  const line = `${key}=${value}`;
+  const lines = text.split('\n');
+  const re = new RegExp(`^\\s*(?:export\\s+)?${escapeRegExp(key)}\\s*=`);
+  let replaced = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (re.test(lines[i] as string)) {
+      lines[i] = line;
+      replaced = true;
+      break;
+    }
+  }
+  if (replaced) return lines.join('\n');
+  // 追加:确保与既有内容隔一行,文末留换行。
+  if (text.length === 0) return `${line}\n`;
+  const sep = text.endsWith('\n') ? '' : '\n';
+  return `${text}${sep}${line}\n`;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** runCloneVoice 注入面(便于 headless 单测;不依赖 electron / 真网络 / 真盘)。 */
+export interface CloneVoicePort {
+  /** 真复刻:吃载荷 → resolve voiceId(主进程注入:读文件 + 调 createVoice)。 */
+  readonly clone: (input: VoiceCloneInput) => Promise<string>;
+  /** 持久化 voiceId(主进程注入:写 .env.local CHAT_A_VOICE_ID + 设进程 env);失败可抛,会被降级。 */
+  readonly persist: (voiceId: string) => void | Promise<void>;
+  /** 向渲染层推一条 IPC(主进程传 webContents.send 包装)。 */
+  readonly emit: (channel: IpcChannel, payload: unknown) => void;
+}
+
+/**
+ * 编排一次"一键复刻"(纯,可单测,§3.2):
+ * - 成功:`persist(voiceId)` 后 `emit(voiceCloneResult, {ok:true, voiceId, message})`;
+ *   即使 persist 抛错也算复刻成功(voiceId 已拿到),只在文案里提示需手动填,**不丢结果**。
+ * - 失败:`emit(voiceCloneResult, {ok:false, message})`(友好中文 + detail),**不向上抛**(主进程绝不崩)。
+ */
+export async function runCloneVoice(port: CloneVoicePort, input: VoiceCloneInput): Promise<void> {
+  let voiceId: string;
+  try {
+    voiceId = await port.clone(input);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    port.emit(IPC.voiceCloneResult, {
+      ok: false,
+      message: `${CLONE_ERROR_TEXT}${detail}`,
+    } satisfies VoiceCloneResult);
+    return;
+  }
+  let persistWarn = '';
+  try {
+    await port.persist(voiceId);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    persistWarn = `(已复刻,但保存配置失败,请手动把 CHAT_A_VOICE_ID 写入 .env.local:${detail})`;
+  }
+  port.emit(IPC.voiceCloneResult, {
+    ok: true,
+    voiceId,
+    message: `小雪的新声音已就绪(音色 id 已保存,重启后自动生效)。${persistWarn}`,
+  } satisfies VoiceCloneResult);
 }

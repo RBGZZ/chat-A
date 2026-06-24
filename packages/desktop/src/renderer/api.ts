@@ -19,6 +19,26 @@ export interface VoiceStatus {
   readonly device?: string;
 }
 
+/** 一键复刻请求载荷(渲染层给本地文件路径,或字节兜底)。 */
+export interface VoiceCloneInput {
+  readonly path?: string;
+  readonly bytes?: Uint8Array;
+  readonly mime?: string;
+}
+
+/** 复刻结果(主→渲染)。 */
+export interface VoiceCloneResult {
+  readonly ok: boolean;
+  readonly voiceId?: string;
+  readonly message: string;
+}
+
+/** 复刻区可用性(主→渲染);无 key 时禁用。 */
+export interface VoiceCloneStatus {
+  readonly available: boolean;
+  readonly reason?: string;
+}
+
 export interface AppInfo {
   readonly name: string;
   readonly provider: string;
@@ -37,6 +57,7 @@ export interface XiaoxueApi {
   voiceStop(): Promise<void>;
   reset(): Promise<void>;
   getInfo(): Promise<AppInfo>;
+  voiceClone(input: VoiceCloneInput): Promise<void>;
   onToken(cb: (token: string) => void): () => void;
   onReply(cb: (reply: string) => void): () => void;
   onError(cb: (err: { text: string; detail: string }) => void): () => void;
@@ -44,4 +65,6 @@ export interface XiaoxueApi {
   onMood(cb: (mood: MoodSummary) => void): () => void;
   onTranscript(cb: (text: string) => void): () => void;
   onVoiceStatus(cb: (status: VoiceStatus) => void): () => void;
+  onCloneResult(cb: (result: VoiceCloneResult) => void): () => void;
+  onCloneStatus(cb: (status: VoiceCloneStatus) => void): () => void;
 }

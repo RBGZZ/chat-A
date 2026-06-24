@@ -4,7 +4,16 @@
  * 绝不向渲染层泄漏 `ipcRenderer` 本体或任何 node 能力。channel 名对齐 ipc-contract 的 `IPC` 常量。
  */
 import { contextBridge, ipcRenderer } from 'electron';
-import { IPC, type AppInfo, type MoodSummary, type UiState, type VoiceStatus } from './ipc-contract';
+import {
+  IPC,
+  type AppInfo,
+  type MoodSummary,
+  type UiState,
+  type VoiceStatus,
+  type VoiceCloneInput,
+  type VoiceCloneResult,
+  type VoiceCloneStatus,
+} from './ipc-contract';
 
 /** 包装一个主→渲染推送订阅,返回退订函数(不泄漏 ipcRenderer / event 对象)。 */
 function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -23,6 +32,8 @@ export interface XiaoxueApi {
   voiceStop(): Promise<void>;
   reset(): Promise<void>;
   getInfo(): Promise<AppInfo>;
+  /** 一键复刻:给本地文件路径(优先)或字节(兜底);主进程调 createVoice + 持久化。 */
+  voiceClone(input: VoiceCloneInput): Promise<void>;
   // 主 → 渲染(返回退订函数)
   onToken(cb: (token: string) => void): () => void;
   onReply(cb: (reply: string) => void): () => void;
@@ -31,6 +42,8 @@ export interface XiaoxueApi {
   onMood(cb: (mood: MoodSummary) => void): () => void;
   onTranscript(cb: (text: string) => void): () => void;
   onVoiceStatus(cb: (status: VoiceStatus) => void): () => void;
+  onCloneResult(cb: (result: VoiceCloneResult) => void): () => void;
+  onCloneStatus(cb: (status: VoiceCloneStatus) => void): () => void;
 }
 
 const api: XiaoxueApi = {
@@ -39,6 +52,7 @@ const api: XiaoxueApi = {
   voiceStop: () => ipcRenderer.invoke(IPC.voiceStop),
   reset: () => ipcRenderer.invoke(IPC.reset),
   getInfo: () => ipcRenderer.invoke(IPC.getInfo),
+  voiceClone: (input) => ipcRenderer.invoke(IPC.voiceClone, input),
   onToken: (cb) => subscribe<string>(IPC.token, cb),
   onReply: (cb) => subscribe<string>(IPC.reply, cb),
   onError: (cb) => subscribe<{ text: string; detail: string }>(IPC.error, cb),
@@ -46,6 +60,8 @@ const api: XiaoxueApi = {
   onMood: (cb) => subscribe<MoodSummary>(IPC.mood, cb),
   onTranscript: (cb) => subscribe<string>(IPC.transcript, cb),
   onVoiceStatus: (cb) => subscribe<VoiceStatus>(IPC.voiceStatus, cb),
+  onCloneResult: (cb) => subscribe<VoiceCloneResult>(IPC.voiceCloneResult, cb),
+  onCloneStatus: (cb) => subscribe<VoiceCloneStatus>(IPC.voiceCloneStatus, cb),
 };
 
 contextBridge.exposeInMainWorld('xiaoxue', api);

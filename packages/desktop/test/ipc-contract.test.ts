@@ -8,9 +8,12 @@ import {
   toMoodSummary,
   runSendTurn,
   probeVoice,
+  runCloneVoice,
+  upsertEnvLocal,
   CHAT_ERROR_TEXT,
   VOICE_UNAVAILABLE_REASON,
   type UiState,
+  type VoiceCloneResult,
 } from '../src/ipc-contract';
 
 const cid = 's1/t1/0';
@@ -87,6 +90,76 @@ describe('runSendTurn 回合编排(纯,可单测)', () => {
 
     expect(emit).toHaveBeenCalledWith(IPC.error, { text: CHAT_ERROR_TEXT, detail: 'boom' });
     expect(emit).not.toHaveBeenCalledWith(IPC.reply, expect.anything());
+  });
+});
+
+describe('upsertEnvLocal(.env.local 键 upsert,纯)', () => {
+  it('已存在键 → 原地替换值,保留其它行与注释', () => {
+    const text = '# 配置\nCHAT_A_DASHSCOPE_API_KEY=sk-x\nCHAT_A_VOICE_ID=old\nCHAT_A_TTS_VOICE=Cherry\n';
+    const out = upsertEnvLocal(text, 'CHAT_A_VOICE_ID', 'new-voice');
+    expect(out).toContain('CHAT_A_VOICE_ID=new-voice');
+    expect(out).not.toContain('CHAT_A_VOICE_ID=old');
+    expect(out).toContain('# 配置');
+    expect(out).toContain('CHAT_A_DASHSCOPE_API_KEY=sk-x');
+    expect(out).toContain('CHAT_A_TTS_VOICE=Cherry');
+  });
+
+  it('不存在键 → 末尾追加一行', () => {
+    const out = upsertEnvLocal('CHAT_A_TTS_VOICE=Cherry\n', 'CHAT_A_VOICE_ID', 'v1');
+    expect(out).toContain('CHAT_A_TTS_VOICE=Cherry');
+    expect(out.trimEnd().endsWith('CHAT_A_VOICE_ID=v1')).toBe(true);
+  });
+
+  it('空文本 → 直接产出键值行', () => {
+    expect(upsertEnvLocal('', 'CHAT_A_VOICE_ID', 'v1')).toBe('CHAT_A_VOICE_ID=v1\n');
+  });
+
+  it('容忍 export 前缀与前导空白', () => {
+    const out = upsertEnvLocal('  export CHAT_A_VOICE_ID=old\n', 'CHAT_A_VOICE_ID', 'new');
+    expect(out).toBe('CHAT_A_VOICE_ID=new\n');
+  });
+});
+
+describe('runCloneVoice 一键复刻编排(纯,可单测)', () => {
+  it('成功 → persist 后 emit ok 结果(含 voiceId)', async () => {
+    const emit = vi.fn();
+    const persist = vi.fn();
+    await runCloneVoice(
+      { clone: async () => 'voice-abc', persist, emit },
+      { path: '/x.wav' },
+    );
+    expect(persist).toHaveBeenCalledWith('voice-abc');
+    const [ch, payload] = emit.mock.calls[0]!;
+    expect(ch).toBe(IPC.voiceCloneResult);
+    expect((payload as VoiceCloneResult).ok).toBe(true);
+    expect((payload as VoiceCloneResult).voiceId).toBe('voice-abc');
+  });
+
+  it('clone 抛错 → emit 失败结果(友好中文),不向上抛、不 persist', async () => {
+    const emit = vi.fn();
+    const persist = vi.fn();
+    await expect(
+      runCloneVoice(
+        { clone: async () => { throw new Error('音频太短'); }, persist, emit },
+        { path: '/x.wav' },
+      ),
+    ).resolves.toBeUndefined();
+    expect(persist).not.toHaveBeenCalled();
+    const payload = emit.mock.calls[0]![1] as VoiceCloneResult;
+    expect(payload.ok).toBe(false);
+    expect(payload.message).toContain('音频太短');
+  });
+
+  it('persist 抛错 → 仍 emit 成功(已拿 voiceId),文案附手动提示', async () => {
+    const emit = vi.fn();
+    await runCloneVoice(
+      { clone: async () => 'voice-xyz', persist: () => { throw new Error('写盘失败'); }, emit },
+      { bytes: new Uint8Array([1]), mime: 'audio/wav' },
+    );
+    const payload = emit.mock.calls[0]![1] as VoiceCloneResult;
+    expect(payload.ok).toBe(true);
+    expect(payload.voiceId).toBe('voice-xyz');
+    expect(payload.message).toContain('写盘失败');
   });
 });
 
