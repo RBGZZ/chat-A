@@ -36,6 +36,8 @@ export function composeSystem(
   queryVector?: number[],
   /** §6.1:上一轮 Guard 判漂移时的待重锚;提供且 drift 时 ReAnchorContributor 注入温和重锚。缺省=不注入。 */
   anchor?: AnchorInput,
+  /** §4.1:输出语种;非空时 OutputLanguageContributor 注入目标回复语种。缺省=不注入(逐字现状)。 */
+  outputLang?: string,
 ): { assembled: AssembledPrompt; recalled: readonly MemoryRecord[] } {
   let recalled: readonly MemoryRecord[] = [];
   try {
@@ -55,6 +57,8 @@ export function composeSystem(
     expressiveness: deps.expressiveness,
     // 仅在有待重锚时填(默认路径不填 → ReAnchorContributor 返回 null,行为字面不变)。
     ...(anchor ? { anchor } : {}),
+    // §4.1:仅在有输出语种时填(缺省不填 → OutputLanguageContributor 返回 null,系统提示逐字不变)。
+    ...(outputLang ? { outputLang } : {}),
   });
   return { assembled, recalled };
 }

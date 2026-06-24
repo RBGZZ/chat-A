@@ -11,6 +11,7 @@ import {
   StyleDisciplineContributor,
   DissentContributor,
   ReAnchorContributor,
+  OutputLanguageContributor,
   type AnchorInput,
 } from '@chat-a/cognition';
 import {
@@ -82,6 +83,12 @@ export interface ConversationDeps {
   readonly embedder?: Embedder;
   /** query 嵌入预算/缓存(c2b);缺省用 QueryEmbedder 默认(budget 120ms / cache 256)。 */
   readonly queryEmbed?: QueryEmbedOptions;
+  /**
+   * 输出语种(§4.1 输入/输出语种解绑,**可选**、纯加法):非空时经 `OutputLanguageContributor`
+   * 注入"用<目标语种>回复"。由 cli 据 voice 配置 `output_lang` 注入(语种解耦不限语音,文字路同样生效)。
+   * **缺省/空 → 不注入 → 系统提示逐字不变**。
+   */
+  readonly outputLang?: string;
 }
 
 /**
@@ -114,6 +121,8 @@ export interface TurnDeps {
   readonly selfConsistencyGuard?: SelfConsistencyGuard;
   /** 人格名字(§6.1 自我一致性最强核心锚点);构造期从 seed 取,供 Guard 锚定。 */
   readonly agentName: string;
+  /** 输出语种(§4.1,可选);非空时经 OutputLanguageContributor 注入目标回复语种。缺省=不注入(逐字现状)。 */
+  readonly outputLang?: string;
 }
 
 /**
@@ -188,7 +197,7 @@ export class SingleShotStrategy implements TurnStrategy {
     const qe = embedP ? await embedP : null; // 与 stance 并行;超时/失败→vector:null
     // 委托 assembler:system(骨架→记忆→tone→异议)+ messages([...history, userMsg])。
     // 有 queryVector → recallHybrid(关键词+向量);否则关键词快路径(composeSystem 内分流)。
-    const { assembled, recalled } = composeSystem(deps, userText, mood.toneFragment, stance, qe?.vector ?? undefined, pendingAnchor);
+    const { assembled, recalled } = composeSystem(deps, userText, mood.toneFragment, stance, qe?.vector ?? undefined, pendingAnchor, deps.outputLang);
     const { system, messages } = assembled;
     const reply = await deps.tracer.startActiveSpan('llm', async (llmSpan) => {
       // GenAI 语义约定:id/model 仅供 trace,业务不据此分支(承 Provider 接缝)。
@@ -275,11 +284,14 @@ export class Conversation {
     // 构造期建好 assembler(注册四个内置 contributor),实例稳定供 KV 复用(§5.4)。
     // ReAnchorContributor 压轴注册(§6.1):无 ctx.anchor / 未漂移时它恒返回 null → 默认路径零注入、
     // 行为字面不变;仅当本轮 PromptContext.anchor.drift===true(上轮 Guard 判漂移)才注入温和重锚。
+    // OutputLanguageContributor(§4.1):无 ctx.outputLang 时恒返回 null → 默认路径零注入、行为字面不变;
+    // 仅当注入了 outputLang(voice 配置 output_lang 非空)才注入目标回复语种。priority 已定序(在 style 与 dissent 之间)。
     const assembler = new PromptAssembler([
       new PersonaSkeletonContributor(),
       new MemoryRecallContributor(),
       new ToneContributor(),
       new StyleDisciplineContributor(),
+      new OutputLanguageContributor(),
       new DissentContributor(),
       new ReAnchorContributor(),
     ]);
@@ -315,6 +327,8 @@ export class Conversation {
       traceSink,
       primaryPersonId: deps.primaryPersonId ?? 'primary',
       agentName: seed.name,
+      // §4.1:仅在提供 outputLang 时填(exactOptionalPropertyTypes 友好);缺省不填 → contributor 返回 null → 逐字现状。
+      ...(deps.outputLang ? { outputLang: deps.outputLang } : {}),
       ...(queryEmbedder ? { queryEmbedder } : {}),
       ...(deps.embedder ? { embedder: deps.embedder } : {}),
       ...(deps.selfConsistencyGuard ? { selfConsistencyGuard: deps.selfConsistencyGuard } : {}),
@@ -348,7 +362,8 @@ export class Conversation {
       // 立场检测(空 userText:无话题命中也带 assertiveness 反谄媚基线,与 send 同源,降级见 turn-shared)。
       const stance = await detectStance(deps, '');
       // 走既有 composeSystem(关键词快路径,不传 queryVector → 不触语义嵌入,§5.5)。
-      const { assembled } = composeSystem(deps, '', mood.toneFragment, stance);
+      // §4.1:omni 路系统提示同样按输出语种(deps.outputLang 非空时注入;缺省不注入,逐字现状)。
+      const { assembled } = composeSystem(deps, '', mood.toneFragment, stance, undefined, undefined, deps.outputLang);
       const system = assembled.system.trim();
       // 兜底:组装意外为空 → 退回骨架(绝不返回空)。
       return system.length > 0 ? assembled.system : deps.skeleton;

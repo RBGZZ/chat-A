@@ -14,6 +14,8 @@ export const PROMPT_PRIORITY = {
   tone: 900,
   /** 对话风格纪律(§7#4):tone 之后、dissent 之前的高注意力区——风格 steer 比"当前情绪"更想贴近末尾,但仍让立场/反谄媚压轴。 */
   style: 920,
+  /** 输出语种(§4.1):style 之后、dissent 之前的高注意力区——语种是硬约束,比风格更想被遵守(避免长对话稀释),但仍让立场/反谄媚压轴。缺省无 outputLang 时该 contributor 不注入。 */
+  outputLanguage: 935,
   /** 异议(§7#3):tone 之后,作为本轮最强 steer(最靠近末尾)。 */
   dissent: 950,
   /** 重锚(§6.1 自我一致性锚定):dissent 之后,最靠近末尾——"守住核心自我"的最强压轴 steer(仅漂移时注入,措辞克制不否定个性)。 */

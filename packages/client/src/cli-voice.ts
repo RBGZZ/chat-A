@@ -23,6 +23,7 @@ import {
   QwenOmniLlm,
   QWEN_DASHSCOPE_REALTIME_URL,
 } from '@chat-a/providers';
+import type { TtsOptions } from '@chat-a/providers';
 import type { MemoryStore } from '@chat-a/memory';
 import {
   StubVadDetector,
@@ -147,6 +148,16 @@ export interface VoiceModeDeps {
     loop: VoiceLoopAutonomyView,
     bus: LightVoiceBus,
   ) => VoiceAutonomyHandle | undefined;
+  /**
+   * 输入语种(§4.1 听=STT,**可选**、纯加法):由 voice 配置 `input_lang`(非 auto 时)拼好后注入 VoiceLoop。
+   * 省略(缺省)→ VoiceLoop 不下发 language → STT 自动检测 → 逐字现状。
+   */
+  readonly sttLanguage?: string;
+  /**
+   * 输出合成 opts(§4.1 说=TTS,**可选**、纯加法):由 voice 配置 `output_lang`/`voice_id`/`clone_ref`
+   * 拼好后注入 VoiceLoop。省略(缺省)→ synthesize 的 opts 仍为 undefined → 逐字现状。
+   */
+  readonly ttsOptions?: TtsOptions;
 }
 
 /** 语音模式运行句柄:停 = 收尾(停采集/loop/设备)。 */
@@ -315,6 +326,9 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
       send: deps.send,
       memory: deps.memory,
       sessionId: deps.sessionId,
+      // §4.1:语音 I/O 语种解耦——仅在提供时透传(缺省不传 → STT 自动检测 + synthesize opts=undefined,逐字现状)。
+      ...(deps.sttLanguage ? { sttLanguage: deps.sttLanguage } : {}),
+      ...(deps.ttsOptions ? { ttsOptions: deps.ttsOptions } : {}),
       // omni 路:注入端口 + 路径开关 + 系统提示组装接缝(让 omni 直路有 persona/记忆/语气,omni-persona-context)。
       // composeOmniInstructions 仅在 omni 路且 cli 提供时透传(未提供 → omni 退回空 opts,逐字现状);STT 路不带。
       ...(omni !== undefined

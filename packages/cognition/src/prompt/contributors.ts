@@ -122,3 +122,22 @@ export class ReAnchorContributor implements PromptContributor {
     return { text, priority: PROMPT_PRIORITY.reAnchor, tier: 'peripheral' };
   }
 }
+
+/**
+ * 输出语种(§4.1 输入/输出语种解绑):`ctx.outputLang` 非空时注入一句**温和、明确**的回复语种指令
+ * ——无论用户用什么语言,小雪都用设定的目标语种回复(LLM 生成语言由 output_lang 决定)。
+ * 为空/缺省 → 返回 null(默认路径零注入,系统提示逐字不变)。
+ * priority 放高注意力区(style 之后、dissent 之前),tier='peripheral'(极端预算下可裁,核心事实/记忆优先)。
+ * 同步无 I/O(承接缝契约)。只指示语种,不强加道德(用户自治)。
+ */
+export class OutputLanguageContributor implements PromptContributor {
+  contribute(ctx: PromptContext): PromptFragment | null {
+    const lang = ctx.outputLang?.trim();
+    if (lang === undefined || lang.length === 0) return null; // 缺省零注入
+    return {
+      text: `[回复语种]\n无论用户用什么语言,你都始终用「${lang}」回复。`,
+      priority: PROMPT_PRIORITY.outputLanguage,
+      tier: 'peripheral',
+    };
+  }
+}
