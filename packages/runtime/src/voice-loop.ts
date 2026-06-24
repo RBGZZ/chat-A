@@ -43,6 +43,34 @@ const INTERRUPT_MARK = '[被用户打断]';
 const DEFAULT_LANG = 'zh';
 
 /**
+ * omni audio-in 直路（path B，§4 双路径）的产出事件（判别联合）。
+ * 与 providers 的 `OmniEvent` 结构等价；runtime 侧最小重声明，避免反向依赖具体 provider 类。
+ * - `transcript`：用户输入音频的转写（等价 STT 文本，供记忆/召回）。
+ * - `text`：模型回复的文本增量（凑句喂 TTS）。
+ * - `end`：本轮回复结束。
+ */
+export type VoiceOmniEvent =
+  | { readonly type: 'transcript'; readonly text: string }
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'end' };
+
+/**
+ * audio-in 直路端口（path B，§7#5 prosody：让模型直接「听」原始音频、从语气感知情绪）。
+ * 形态等价 `QwenOmniLlm.respondToAudio`（其 opts 全可选，故结构上满足本接口，可直接当端口注入）。
+ * 吃 endpointing 攒好的 PCM 块流，yield transcript/text/end；signal 用于打断时真停底层流（§3.2）。
+ */
+export interface OmniAudioPort {
+  respondToAudio(
+    audio: AsyncIterable<PcmChunk>,
+    opts?: Record<string, never>,
+    signal?: AbortSignal,
+  ): AsyncIterable<VoiceOmniEvent>;
+}
+
+/** 语音路径选择：`stt`=现有 STT→LLM 路径（缺省）；`omni`=audio-in 直路（需注入 `omni` 端口）。 */
+export type VoicePath = 'stt' | 'omni';
+
+/**
  * VoiceLoop 依赖注入（全经接口/接缝，确定性可测）。
  * `send` 由调用方传 `conversation.send.bind(conversation)`；`clock` 缺省用 `Date.now`。
  */
@@ -80,6 +108,19 @@ export interface VoiceLoopDeps {
    * ⚠️ 这**不是** AEC(回声消除需声学/原生方案);仅软件侧部分缓解。危机/硬打断信号豁免 N 帧去抖。
    */
   readonly echoGuard?: EchoGuardConfig;
+  /**
+   * audio-in 直路端口（path B，§4 双路径 / §7#5 prosody，**可选**、纯加法）。
+   * 不注入（缺省）→ 纯走现有 STT→LLM 路径，行为与产出**逐字不变**。
+   * 注入 **且** `voicePath==='omni'` → endpointing 攒的音频帧不喂 STT，而喂
+   * `omni.respondToAudio(...)`：`transcript` 写记忆 + 推进 thinking、`text` 凑句喂 TTS、`end` 收尾。
+   * 复用既有打断/generation/半句写回核心；omni 不可用/失败 → 优雅降级（§3.2，干净回 listening 不崩）。
+   */
+  readonly omni?: OmniAudioPort;
+  /**
+   * 语音路径开关（缺省 `stt`）；仅当为 `omni` **且**注入了 `omni` 端口时走 audio-in 直路，
+   * 否则一律走现有 STT 路径（双保险：端口缺失即便选 omni 也回落 STT，行为逐字不变）。
+   */
+  readonly voicePath?: VoicePath;
 }
 
 /**
@@ -132,6 +173,13 @@ export class VoiceLoop {
    * 注入后在 speaking 期累计「连续高置信语音帧数」,达 N 才确认真打断(压回声毛刺,真人仍打得断)。
    */
   readonly #echoGuard: EchoGuardGate | undefined;
+  /**
+   * audio-in 直路端口（path B）；未注入 → undefined → 走 STT 路径（§4 双路径）。
+   * 仅在 `#voicePath==='omni'` 且本字段非空时,`#beginThinking` 分流到 omni 直路。
+   */
+  readonly #omni: OmniAudioPort | undefined;
+  /** 语音路径开关（缺省 `stt`）；决定 `#beginThinking` 走 STT 还是 omni 直路。 */
+  readonly #voicePath: VoicePath;
   /** 本次 speaking 回合用户开口的首帧时刻（ms），用于估算 sustainedMs 喂关注闸。 */
   #userSpeechStartAtMs: number | null = null;
 
@@ -174,6 +222,8 @@ export class VoiceLoop {
       deps.echoGuard !== undefined && deps.echoGuard.enabled
         ? new EchoGuardGate(deps.echoGuard)
         : undefined;
+    this.#omni = deps.omni;
+    this.#voicePath = deps.voicePath ?? 'stt';
   }
 
   /** 当前状态（供测试断言）。 */
@@ -422,9 +472,19 @@ export class VoiceLoop {
     }
   }
 
-  /** endpointing → thinking：先迁移（emit stt:final 在 #startThinking 内做，带真转写文本）。 */
+  /**
+   * endpointing → thinking 分流（§4 双路径）：
+   * - 注入了 omni 端口 **且** `voicePath==='omni'` → audio-in 直路（`#startThinkingOmni`，
+   *   让模型直接「听」原始音频感知语气/情绪，§7#5 prosody）。
+   * - 否则 → 现有 STT→LLM 路径（`#startThinking`，**逐字不变**）。
+   * 双保险：omni 端口缺失（即便 voicePath=omni）也回落 STT，绝不空转。
+   */
   #beginThinking(): void {
-    void this.#startThinking();
+    if (this.#omni !== undefined && this.#voicePath === 'omni') {
+      void this.#startThinkingOmni(this.#omni);
+    } else {
+      void this.#startThinking();
+    }
   }
 
   // ───────────────────────────── 想：STT + send ─────────────────────────────
@@ -504,6 +564,92 @@ export class VoiceLoop {
         // 回合自然结束/出错收尾后清理本回合控制器(若仍是它);打断已在 #interrupt 里清。
         if (this.#currentAbort === ac) this.#currentAbort = null;
       });
+  }
+
+  // ───────────────────────────── 想：omni audio-in 直路（path B）─────────────────────────────
+
+  /**
+   * 起一个 omni 直路回合（§4 双路径 / §7#5 prosody）：endpointing 攒的音频帧**不喂 STT**，
+   * 而喂 `omni.respondToAudio(audio, {}, signal)`，消费事件：
+   * - `transcript`（首条）→ 当作本轮用户话语：写记忆（role:'user'，供记忆/召回）+ `#go('stt:final')`
+   *   推进 endpointing→thinking（复用现有迁移，转写来源不同、语义相同）。
+   * - `text` → 回复增量，累积 `#replyAccum` + 既有 `SentenceSplitter` 分句 → 既有 `#speak` → TTS。
+   * - `end`（或流自然结束）→ flush 尾句、等出尽、`#finishTurn` 收尾。
+   *
+   * 与 `#startThinking` **结构对称**：共享 gen 捕获、本回合 `AbortController`（透传 signal 到
+   * `respondToAudio` → 打断/停止时底层 WS 流真停，§3.2）、`enqueueSpeak`/`#speak`、`#finishTurn`、
+   * generation 自检与半句写回（`#interrupt` 原样复用，**不重写打断核心**）。
+   * omni 失败（连接/鉴权/WS 意外关闭/抛错且本回合未被打断）→ 干净回 listening 不崩（§3.2 降级）。
+   */
+  async #startThinkingOmni(omni: OmniAudioPort): Promise<void> {
+    const gen = ++this.#gen; // 捕获本回合令牌
+    const buf = this.#audioBuf;
+    this.#audioBuf = [];
+
+    this.#replyAccum = '';
+    const splitter = new SentenceSplitter();
+    // 本回合取消控制器（§3.2 真打断）：abort 之 → 传给 respondToAudio 的 signal aborted → 底层 WS 真停。
+    const ac = new AbortController();
+    this.#currentAbort = ac;
+    // 串行说话链（与 STT 路径同）：保下行 tts:chunk 句序，透传本回合 signal 给 TTS 合成。
+    let speakChain: Promise<void> = Promise.resolve();
+    const enqueueSpeak = (sentence: string): void => {
+      speakChain = speakChain.then(() => this.#speak(sentence, gen, ac.signal));
+    };
+
+    const self = this;
+    async function* toChunks(): AsyncIterable<PcmChunk> {
+      for (const f of buf) yield self.#toPcmChunk(f);
+    }
+
+    let sawTranscript = false; // 仅首条 transcript 触发迁移/写记忆（避免重复迁移）
+    this.#currentTurn = (async () => {
+      try {
+        for await (const ev of omni.respondToAudio(toChunks(), {}, ac.signal)) {
+          if (gen !== this.#gen) return; // 被打断/换回合：协作式放弃
+          if (ev.type === 'transcript') {
+            const text = ev.text.trim();
+            if (text.length > 0 && !sawTranscript) {
+              sawTranscript = true;
+              // endpointing → thinking（emit stt:final 带真转写文本，复用现有迁移）。
+              if (this.#state === 'endpointing') this.#go('stt:final', { text });
+              // 写记忆：本轮用户话语（等价 STT 文本，供记忆/召回）。
+              try {
+                this.#memory.appendMessage({
+                  sessionId: this.#sessionId,
+                  turnId: 'omni',
+                  role: 'user',
+                  content: text,
+                  createdAtMs: this.#now(),
+                });
+              } catch (err) {
+                console.warn('[VoiceLoop] omni transcript 写记忆抛错(已捕获):', err);
+              }
+            }
+          } else if (ev.type === 'text') {
+            this.#replyAccum += ev.text;
+            for (const sentence of splitter.push(ev.text)) enqueueSpeak(sentence);
+          } else {
+            // 'end'：flush 尾句后跳出（下方统一等出尽 + 收尾）。
+            break;
+          }
+        }
+        if (gen !== this.#gen) return; // 流结束时已被打断
+        const tail = splitter.flush();
+        if (tail !== null) enqueueSpeak(tail);
+        await speakChain; // 等所有句出尽(首句已触发 thinking→speaking)再收尾
+        this.#finishTurn(gen);
+      } catch (err) {
+        // 被打断回合(gen 已变)其 respondToAudio 多以 AbortError reject —— 属正常取消,静默忽略;
+        // 仅当仍是本回合(真失败:连接/鉴权/WS 意外关闭)才 warn + 干净回 listening 降级(§3.2)。
+        if (gen === this.#gen) {
+          console.warn('[VoiceLoop] omni 直路失败(降级回 listening):', err);
+          this.#resetToListening();
+        }
+      } finally {
+        if (this.#currentAbort === ac) this.#currentAbort = null;
+      }
+    })();
   }
 
   /**

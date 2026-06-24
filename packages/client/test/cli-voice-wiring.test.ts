@@ -57,3 +57,33 @@ describe('client/startVoiceMode 按 env 选真/桩 VAD·EOU', () => {
     handle.stop();
   });
 });
+
+describe('client/startVoiceMode 按 CHAT_A_VOICE_PATH 选 STT/omni 语音路径(§4 双路径)', () => {
+  it('缺省(不设 CHAT_A_VOICE_PATH)→ 走 STT,info.path=stt', async () => {
+    const env: NodeJS.ProcessEnv = { CHAT_A_AUDIO_DEVICE: 'fake' };
+    const handle = await startVoiceMode({ ...baseDeps(), env });
+    expect(handle.info.path).toBe('stt');
+    handle.stop();
+  });
+
+  it('CHAT_A_VOICE_PATH=omni 但缺 key → 回落 STT,不崩,info.path=stt', async () => {
+    const env: NodeJS.ProcessEnv = {
+      CHAT_A_AUDIO_DEVICE: 'fake',
+      CHAT_A_VOICE_PATH: 'omni', // 无 CHAT_A_DASHSCOPE_API_KEY → createOmniAudioPort 返回 undefined
+    };
+    const handle = await startVoiceMode({ ...baseDeps(), env });
+    expect(handle.info.path).toBe('stt'); // 回落 STT(端口缺失)
+    handle.stop(); // 不崩即通过
+  });
+
+  it('CHAT_A_VOICE_PATH=omni + key 就绪 → 构造 omni 端口(惰性,不触网),info.path=omni', async () => {
+    const env: NodeJS.ProcessEnv = {
+      CHAT_A_AUDIO_DEVICE: 'fake',
+      CHAT_A_VOICE_PATH: 'omni',
+      CHAT_A_DASHSCOPE_API_KEY: 'sk-test-omni', // 仅构造,不连(QwenOmniLlm 惰性建连)
+    };
+    const handle = await startVoiceMode({ ...baseDeps(), env });
+    expect(handle.info.path).toBe('omni');
+    handle.stop();
+  });
+});
