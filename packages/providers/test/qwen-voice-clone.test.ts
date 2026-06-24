@@ -155,6 +155,15 @@ describe('listVoices / deleteVoice', () => {
     expect(list).toEqual(['v1', 'v2']);
     expect((calls[0]!.body['input'] as Record<string, unknown>)['action']).toBe('list');
   });
+
+  it('listVoices 请求体含分页 page_index/page_size(否则只返首页漏音色)', async () => {
+    const { fetch, calls } = okFetch({ output: { voices: [] } });
+    await listVoices({ apiKey: KEY, fetch });
+    const input = calls[0]!.body['input'] as Record<string, unknown>;
+    expect(input['page_index']).toBe(0);
+    expect(typeof input['page_size']).toBe('number');
+    expect(input['page_size'] as number).toBeGreaterThan(0);
+  });
 });
 
 describe('纯函数契约(真机校准点)', () => {
@@ -179,5 +188,27 @@ describe('纯函数契约(真机校准点)', () => {
     expect(parseVoiceId({ output: {} })).toBeUndefined();
     expect(parseVoiceList({ output: { voice_list: [{ voice: 'x' }] } })).toEqual(['x']);
     expect(parseVoiceList({ output: ['a', 'b'] })).toEqual(['a', 'b']);
+  });
+
+  it('parseVoiceList 兼容 {voice} 与 {voice_id} 元素(voice 取不到回退 voice_id)', () => {
+    expect(parseVoiceList({ output: { voices: [{ voice: 'a' }, { voice_id: 'b' }] } })).toEqual([
+      'a',
+      'b',
+    ]);
+    // voice 优先于 voice_id。
+    expect(parseVoiceList({ output: { voices: [{ voice: 'a', voice_id: 'ignored' }] } })).toEqual([
+      'a',
+    ]);
+  });
+
+  it('buildManageBody:list 带分页,query/delete 不带分页', () => {
+    const list = buildManageBody('list');
+    const listInput = list['input'] as Record<string, unknown>;
+    expect(listInput['page_index']).toBe(0);
+    expect(typeof listInput['page_size']).toBe('number');
+    const del = buildManageBody('delete', 'vd');
+    const delInput = del['input'] as Record<string, unknown>;
+    expect('page_index' in delInput).toBe(false);
+    expect(delInput['voice']).toBe('vd');
   });
 });
