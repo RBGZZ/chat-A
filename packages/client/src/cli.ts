@@ -9,7 +9,7 @@ import { createLlm, loadLlmConfig, createEmbedder, loadEmbedderConfig } from '@c
 import { initTelemetry, createDecisionTraceSinkFromEnv, SqliteAutonomyDecisionSink } from '@chat-a/observability';
 import { createMemoryStoreFromEnv, LlmMemoryExtractor, LlmReflector, NoopReflector } from '@chat-a/memory';
 import type { Reflector } from '@chat-a/memory';
-import { loadPersonaFromEnv, seedPersonaMemories, createKvPersonaStore, LlmAppraiser, LlmStanceDetector, LlmOceanEvolver, LlmSelfNotionEvolver } from '@chat-a/persona';
+import { loadPersonaFromEnv, seedPersonaMemories, createKvPersonaStore, LlmAppraiser, LlmStanceDetector, LlmOceanEvolver, LlmSelfNotionEvolver, createSelfConsistencyGuard, parseSelfConsistencyMode } from '@chat-a/persona';
 import { isAutonomyEnabled } from '@chat-a/autonomy';
 import { startVoiceMode, type VoiceModeHandle, type VoiceLoopAutonomyView } from './cli-voice';
 import { assemblePerception, type PerceptionHandle } from './assembly/perception';
@@ -75,6 +75,26 @@ async function main(): Promise<void> {
   // 立场强度演化(§7#3,默认关):CHAT_A_SELF_NOTIONS_EVOLVE=llm 让 LLM 据对话强化立场(失败降级)。
   const notionEvolveMode = (env['CHAT_A_SELF_NOTIONS_EVOLVE'] ?? 'off').toLowerCase();
   const selfNotionEvolver = notionEvolveMode === 'llm' ? new LlmSelfNotionEvolver({ provider: llm }) : undefined;
+  // 自我一致性锚定(§6.1,companion-coherence-wiring,默认关):CHAT_A_SELF_CONSISTENCY=on|llm 创建启用态 Guard。
+  // 回合在回复后判定,drift → 下轮温和重锚;判定经 onDecision 落决策 trace(有 sink 才记);失败降级不锚定不崩。
+  // off / 缺省 → 不创建不注入 → 回合不调用 Guard、行为字面不变(缺省安全)。
+  const selfConsistencyMode = parseSelfConsistencyMode(env['CHAT_A_SELF_CONSISTENCY']);
+  // 判定 trace(§8.1):trace 开启时把漂移判定记一行(可重放最小形态;SQLite 落库为后续可选扩展)。
+  const onSelfConsistencyDecision = trace.enabled
+    ? (d: import('@chat-a/persona').SelfConsistencyDecision): void => {
+        if (d.drift) {
+          stdout.write(
+            `[自我一致性] drift(${d.mode})${d.anchorText ? ` 锚点=${d.anchorText}` : ''}${d.reason ? ` 理由=${d.reason}` : ''}\n`,
+          );
+        }
+      }
+    : undefined;
+  const selfConsistencyGuard = createSelfConsistencyGuard(selfConsistencyMode, {
+    ...(selfConsistencyMode === 'llm' ? { provider: llm } : {}),
+    ...(onSelfConsistencyDecision ? { onDecision: onSelfConsistencyDecision } : {}),
+    onError: (err) =>
+      stdout.write(`[自我一致性] LLM 判定失败(已降级不锚定):${err instanceof Error ? err.message : String(err)}\n`),
+  });
   // 回合策略(§3.3/§12.2 Agent loop,默认单趟):CHAT_A_STRATEGY=tools 启用本地动作工具循环
   // (Provider 不支持工具/空注册表时自动降级回单趟)。
   // recall_fact 接真 memory 检索(§12.2 事实查询接缝):把 mem.store 适配成同步 FactLookup
@@ -114,6 +134,7 @@ async function main(): Promise<void> {
       ...(selfNotionEvolver ? { selfNotionEvolver } : {}),
       ...(strategy ? { strategy } : {}),
       ...(embedder ? { embedder } : {}),
+      ...(selfConsistencyGuard ? { selfConsistencyGuard } : {}),
     });
   let convo = makeConvo(sessionId);
 
@@ -138,7 +159,7 @@ async function main(): Promise<void> {
   stdout.write(
     `状态: 人格来源=${personaSource}${personaEnvOverride ? '+env' : ''} | 认知 appraiser=${appraiser ? 'llm' : 'default'} 抽取=${memoryExtractor ? 'llm' : 'off'} | ` +
       `分歧=${stanceDetector ? 'llm' : 'default'} | 策略=${useTools ? `tools(${actionRegistry.size})` : 'single'} | 语义召回=${embedder ? embedder.id : 'off'} | ` +
-      `沉淀=${reflectMode === 'llm' ? 'on' : 'off'} trace=${trace.enabled ? 'on' : 'off'}\n`,
+      `自我一致性=${selfConsistencyMode} | 沉淀=${reflectMode === 'llm' ? 'on' : 'off'} trace=${trace.enabled ? 'on' : 'off'}\n`,
   );
 
   // ── 伴侣主动性接线准备(companion-live-wiring,默认关随 CHAT_A_AUTONOMY) ──
@@ -212,6 +233,29 @@ async function main(): Promise<void> {
     llm,
     store: mem.store,
   });
+  // 巩固节奏触发驱动状态(companion-coherence-wiring,§5.1):进程内累计"距上次巩固轮数"+ 记"上次巩固时刻"。
+  // 仅 consolidation 在场(CHAT_A_CONSOLIDATION=on)才计数/触发;off 时全不动(零行为变更)。
+  // 两类触发各用独立幂等键:每 N 轮用递增 batchIndex,daily 用日期串(同窗口/同日不重复;run 内存在性检查再兜底)。
+  let turnsSinceLast = 0;
+  let lastConsolidatedAtMs: number | undefined = undefined;
+  let consolidationBatch = 0;
+  /** 每个用户回合后(非首字热路径)按轮数/日期驱动巩固;触发即重置窗口。失败仅告警,绝不阻塞热路径。 */
+  const driveConsolidationCadence = async (): Promise<void> => {
+    if (consolidation === undefined) return;
+    turnsSinceLast += 1;
+    const state = { turnsSinceLast, ...(lastConsolidatedAtMs !== undefined ? { lastConsolidatedAtMs } : {}) };
+    const today = new Date().toISOString().slice(0, 10);
+    // 单元同时承载两类触发的语义:轮数键含 batchIndex(每 N 轮一个新键)、日期串(同日只一次)。
+    // maybeConsolidateByCadence 内 every-n-turns / daily 任一到阈值即触发;此处 unit 用轮数键 + 日期串复合,
+    // 保证"换天"与"满 N 轮"都得到唯一幂等键。
+    const unit = `cadence:${sessionId}:${today}:${consolidationBatch}`;
+    const fired = await consolidation.maybeConsolidateByCadence(unit, state).catch(() => false);
+    if (fired) {
+      turnsSinceLast = 0;
+      lastConsolidatedAtMs = Date.now();
+      consolidationBatch += 1;
+    }
+  };
   // 主动状态:文字路有 autonomy handle 显示 tick;语音路 autonomy 在 startVoiceMode 内装配(显示 on(语音))。
   const autonomyStatus = autonomy
     ? `on(tick ${autonomy.tickMs}ms)`
@@ -315,6 +359,9 @@ async function main(): Promise<void> {
         void consolidation?.consolidateSession(endingSession).catch(() => {});
         sessionId = randomUUID().slice(0, 8);
         convo = makeConvo(sessionId);
+        // 换会话即重置节奏计数(新 session 重新累计;daily 的上次时刻保留以跨会话维持每日间隔)。
+        turnsSinceLast = 0;
+        consolidationBatch = 0;
         stdout.write('(已开新一段对话,之前的上下文不再带入。长期记忆仍保留。)\n\n');
         if (!closed) rl.prompt();
         continue;
@@ -335,6 +382,9 @@ async function main(): Promise<void> {
           stdout.write(`\n(小雪一时没接上话——可能是网络或模型出了点问题,稍后再试。)\n[${detail}]`);
         }
         stdout.write('\n\n');
+        // 巩固节奏触发(§5.1,默认关):回复之后(非首字热路径)按轮数/日期驱动 daily/每 N 轮巩固;
+        // 后台 fire-and-forget,失败仅告警,绝不阻塞 REPL。consolidation off 时为 no-op。
+        void driveConsolidationCadence();
         if (!closed) rl.prompt();
         continue;
       }

@@ -10,6 +10,8 @@ import {
   ToneContributor,
   StyleDisciplineContributor,
   DissentContributor,
+  ReAnchorContributor,
+  type AnchorInput,
 } from '@chat-a/cognition';
 import {
   InMemoryMemoryStore,
@@ -29,6 +31,7 @@ import {
   type PersonaStore,
   type SelfNotionEvolver,
   type StanceDetector,
+  type SelfConsistencyGuard,
 } from '@chat-a/persona';
 import { getTracer, GENAI, CHAT_A, NoopDecisionTraceSink, type DecisionTraceSink } from '@chat-a/observability';
 import type { LightVoiceBus } from './bus';
@@ -58,6 +61,12 @@ export interface ConversationDeps {
   readonly selfNotionEvolver?: SelfNotionEvolver;
   /** 回合执行策略接缝(§9 P3 前置);默认 SingleShotStrategy(单趟流式回合)。 */
   readonly strategy?: TurnStrategy;
+  /**
+   * 自我一致性 Guard 接缝(§6.1,companion-coherence-wiring);**默认不注入 = 不锚定 = 行为字面不变**。
+   * 注入后:回合体在回复生成后调 `check`,drift 则把锚点透传到**下一轮** PromptContext.anchor(温和重锚)。
+   * 失败/无锚点降级为不锚定、回合继续(§3.2)。由 cli 按 `CHAT_A_SELF_CONSISTENCY=on|llm` 创建启用态实例。
+   */
+  readonly selfConsistencyGuard?: SelfConsistencyGuard;
   readonly sessionId?: string;
   /**
    * 主用户稳定标识(§5.3b / §6.1b 关系亲密度):closeness 读写归属此 person。
@@ -100,6 +109,10 @@ export interface TurnDeps {
   readonly queryEmbedder?: QueryEmbedder;
   /** Embedder(c2b 写侧):回合收尾后台嵌入新记忆;缺省=不嵌入。 */
   readonly embedder?: Embedder;
+  /** 自我一致性 Guard(§6.1);缺省=不注入=回合不调用、不锚定(行为字面不变)。 */
+  readonly selfConsistencyGuard?: SelfConsistencyGuard;
+  /** 人格名字(§6.1 自我一致性最强核心锚点);构造期从 seed 取,供 Guard 锚定。 */
+  readonly agentName: string;
 }
 
 /**
@@ -122,6 +135,16 @@ export interface TurnContext {
    * (`llm.stream(req, signal)` / `completeWithTools(req, signal)`)。缺省=回合不可取消(等价现状)。
    */
   readonly signal?: AbortSignal;
+  /**
+   * 本轮待注入的"重锚"(§6.1,companion-coherence-wiring):由外壳从上一轮 Guard 结论填入;
+   * drift 时透传进 PromptContext.anchor → ReAnchorContributor 注入温和重锚。缺省/未漂移 = 不注入。
+   */
+  readonly pendingAnchor?: AnchorInput;
+  /**
+   * 写回本轮 Guard 结论给外壳(供**下一轮**重锚;§6.1)。外壳注入;策略经 finalizeTurn 转交。
+   * 传 `undefined` = 不漂移(清空待重锚)。缺省 = 不接 Guard(等价现状)。
+   */
+  readonly setPendingAnchor?: (anchor: AnchorInput | undefined) => void;
   readonly deps: TurnDeps;
 }
 
@@ -143,7 +166,7 @@ export interface TurnStrategy {
  */
 export class SingleShotStrategy implements TurnStrategy {
   async run(ctx: TurnContext): Promise<string> {
-    const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs, turn, signal } = ctx;
+    const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs, turn, signal, pendingAnchor, setPendingAnchor } = ctx;
     // 回合前:读关系亲密度(§6.1b,惰性衰减、同步快)+ 当前心情渲染本轮 tone
     // (不改状态;情绪推进/closeness 抬升留到回合后,保首字零额外延迟)。
     const closeness = deps.memory.getCloseness(deps.primaryPersonId);
@@ -158,7 +181,7 @@ export class SingleShotStrategy implements TurnStrategy {
     const qe = embedP ? await embedP : null; // 与 stance 并行;超时/失败→vector:null
     // 委托 assembler:system(骨架→记忆→tone→异议)+ messages([...history, userMsg])。
     // 有 queryVector → recallHybrid(关键词+向量);否则关键词快路径(composeSystem 内分流)。
-    const { assembled, recalled } = composeSystem(deps, userText, mood.toneFragment, stance, qe?.vector ?? undefined);
+    const { assembled, recalled } = composeSystem(deps, userText, mood.toneFragment, stance, qe?.vector ?? undefined, pendingAnchor);
     const { system, messages } = assembled;
     const reply = await deps.tracer.startActiveSpan('llm', async (llmSpan) => {
       // GenAI 语义约定:id/model 仅供 trace,业务不据此分支(承 Provider 接缝)。
@@ -199,6 +222,7 @@ export class SingleShotStrategy implements TurnStrategy {
       messages,
       turn,
       ...(qe ? { semantic: qe } : {}),
+      ...(setPendingAnchor ? { setPendingAnchor } : {}),
     });
     return reply;
   }
@@ -216,6 +240,12 @@ export class Conversation {
   readonly #deps: TurnDeps;
   readonly #sessionId: string;
   #turnSeq = 0;
+  /**
+   * 跨回合待注入的"重锚"(§6.1,companion-coherence-wiring):上一轮 Guard 判漂移时存于此,
+   * 在下一轮起始读取并透传给策略(填 PromptContext.anchor),**读后即清**(重锚不粘连多轮)。
+   * 不接 Guard 时恒为 undefined → 不影响默认路径。
+   */
+  #pendingAnchor: AnchorInput | undefined = undefined;
 
   constructor(deps: ConversationDeps) {
     this.#bus = deps.bus;
@@ -235,12 +265,15 @@ export class Conversation {
     const expressiveness = seed.dials.expressiveness;
     const traceSink = deps.traceSink ?? new NoopDecisionTraceSink();
     // 构造期建好 assembler(注册四个内置 contributor),实例稳定供 KV 复用(§5.4)。
+    // ReAnchorContributor 压轴注册(§6.1):无 ctx.anchor / 未漂移时它恒返回 null → 默认路径零注入、
+    // 行为字面不变;仅当本轮 PromptContext.anchor.drift===true(上轮 Guard 判漂移)才注入温和重锚。
     const assembler = new PromptAssembler([
       new PersonaSkeletonContributor(),
       new MemoryRecallContributor(),
       new ToneContributor(),
       new StyleDisciplineContributor(),
       new DissentContributor(),
+      new ReAnchorContributor(),
     ]);
     const persona = new PersonaEngine({
       seed,
@@ -273,8 +306,10 @@ export class Conversation {
       extractEnabled,
       traceSink,
       primaryPersonId: deps.primaryPersonId ?? 'primary',
+      agentName: seed.name,
       ...(queryEmbedder ? { queryEmbedder } : {}),
       ...(deps.embedder ? { embedder: deps.embedder } : {}),
+      ...(deps.selfConsistencyGuard ? { selfConsistencyGuard: deps.selfConsistencyGuard } : {}),
     };
     this.#strategy = deps.strategy ?? new SingleShotStrategy();
   }
@@ -296,6 +331,11 @@ export class Conversation {
         turnSpan.setAttribute(CHAT_A.TURN_ID, turnId);
         const turnStartMs = Date.now();
         this.#bus.emit(makeBusEvent('turn:start', { startedAtMs: turnStartMs }, correlationId));
+        // 自我一致性重锚(§6.1):读上一轮 Guard 待重锚并**读后即清**(单轮一次性,不粘连多轮);
+        // drift 时透传进策略 → PromptContext.anchor → ReAnchorContributor 注入温和重锚。
+        // 不接 Guard 时 pendingAnchor 恒 undefined → 不透传、行为字面不变。
+        const pendingAnchor = this.#pendingAnchor;
+        this.#pendingAnchor = undefined;
         try {
           // 委托回合体给策略;生命周期/总线/turn span/correlationId 由外壳负责(对外等价)。
           const reply = await this.#strategy.run({
@@ -308,6 +348,11 @@ export class Conversation {
             turn: this.#turnSeq,
             // 仅在提供时填(exactOptionalPropertyTypes 友好;不传则 ctx.signal 为 undefined)。
             ...(signal ? { signal } : {}),
+            // 仅在有待重锚 / 接了 Guard 时填(默认路径零注入,行为字面不变)。
+            ...(pendingAnchor ? { pendingAnchor } : {}),
+            ...(this.#deps.selfConsistencyGuard
+              ? { setPendingAnchor: (a: AnchorInput | undefined): void => { this.#pendingAnchor = a; } }
+              : {}),
             deps: this.#deps,
           });
           this.#bus.emit(makeBusEvent('turn:end', { reason: 'completed', atMs: Date.now() }, correlationId));

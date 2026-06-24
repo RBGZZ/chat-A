@@ -1,6 +1,7 @@
 import { isSpanContextValid, type Span } from '@opentelemetry/api';
-import type { AssembledPrompt, StanceInput } from '@chat-a/cognition';
+import type { AssembledPrompt, AnchorInput, StanceInput } from '@chat-a/cognition';
 import type { MemoryRecord } from '@chat-a/memory';
+import type { SelfMemoryRef } from '@chat-a/persona';
 import type { DecisionTraceRecalled } from '@chat-a/observability';
 import type { TurnDeps } from './conversation';
 import type { QueryEmbedResult } from './query-embed';
@@ -33,6 +34,8 @@ export function composeSystem(
   stance: StanceInput,
   /** c2b:编排层异步算好的 query 向量;提供则走 recallHybrid(关键词+向量),否则关键词快路径(§5.5)。 */
   queryVector?: number[],
+  /** §6.1:上一轮 Guard 判漂移时的待重锚;提供且 drift 时 ReAnchorContributor 注入温和重锚。缺省=不注入。 */
+  anchor?: AnchorInput,
 ): { assembled: AssembledPrompt; recalled: readonly MemoryRecord[] } {
   let recalled: readonly MemoryRecord[] = [];
   try {
@@ -50,8 +53,40 @@ export function composeSystem(
     history: deps.memory.snapshot(),
     stance,
     expressiveness: deps.expressiveness,
+    // 仅在有待重锚时填(默认路径不填 → ReAnchorContributor 返回 null,行为字面不变)。
+    ...(anchor ? { anchor } : {}),
   });
   return { assembled, recalled };
+}
+
+/**
+ * 自我一致性检查(§6.1,companion-coherence-wiring):接了 Guard 时在回复生成后调用。
+ * 从本轮召回结果筛 `subject==='agent'` 的核心自我记忆映射为 SelfMemoryRef[](接缝边界 §3.1,
+ * persona 不依赖 memory 包),连同 agentName 喂 Guard;drift → 返回 AnchorInput 供**下一轮**重锚。
+ * Guard 失败 / 无 Guard → 返回 undefined(不锚定),绝不抛、不阻塞回合(§3.2)。
+ */
+export async function checkSelfConsistency(
+  deps: TurnDeps,
+  reply: string,
+  recalled: readonly MemoryRecord[],
+): Promise<AnchorInput | undefined> {
+  const guard = deps.selfConsistencyGuard;
+  if (guard === undefined) return undefined;
+  try {
+    // 复用本轮召回(零额外召回开销,非阻塞 §5.5):取 subject=agent 的核心自我记忆。
+    const selfMemories: SelfMemoryRef[] = recalled
+      .filter((r) => r.subject === 'agent')
+      .map((r) => ({
+        text: r.text,
+        ...(r.kind !== undefined ? { kind: r.kind } : {}),
+        core: r.memoryKind === 'core' || r.pinned === true,
+      }));
+    const res = await guard.check({ reply, selfMemories, agentName: deps.agentName });
+    if (!res.drift) return undefined; // 不漂移:不重锚(下轮清空)。
+    return { drift: true, ...(res.anchorText !== undefined ? { anchorText: res.anchorText } : {}) };
+  } catch {
+    return undefined; // 降级:不锚定,回合继续(§3.2)。
+  }
 }
 
 /** 本轮分歧检测(§7#3);抛错兜底空命中(assertiveness 仍带上,§3.2 降级)。 */
@@ -103,6 +138,11 @@ export async function finalizeTurn(
     readonly turn: number;
     /** c2b:本轮 query 嵌入结果(供 trace 记语义元数据);缺省=未启用语义。 */
     readonly semantic?: QueryEmbedResult;
+    /**
+     * §6.1:写回本轮 Guard 结论给外壳(供**下一轮**重锚)。仅接了 Guard 时由外壳注入;
+     * drift → 传 AnchorInput,不漂移 → 传 undefined(清空)。缺省 = 不接 Guard(等价现状)。
+     */
+    readonly setPendingAnchor?: (anchor: AnchorInput | undefined) => void;
   },
 ): Promise<void> {
   const at = Date.now();
@@ -141,6 +181,13 @@ export async function finalizeTurn(
     deps.memory.bumpCloseness(deps.primaryPersonId, Math.max(args.mood.pad.pleasure, 0), at);
   } catch {
     /* closeness 本轮不更新,回合继续 */
+  }
+  // 自我一致性检查(§6.1,companion-coherence-wiring):接了 Guard 时在回复之后判定(首字之后,
+  // 不挡流式);drift → 把锚点写回外壳供**下一轮**温和重锚。未接 Guard / 失败 → 不锚定(§3.2)。
+  // setPendingAnchor 仅在接了 Guard 时由外壳注入(缺省不调,等价现状)。
+  if (args.setPendingAnchor !== undefined) {
+    const anchor = await checkSelfConsistency(deps, args.reply, args.recalled);
+    args.setPendingAnchor(anchor); // drift→AnchorInput;不漂移/降级→undefined(清空待重锚)。
   }
   // 写侧 embedding(c2b,§5.2/§5.5):回复之后**后台 fire-and-forget**,绝不挡热路径;
   // 取仍缺向量的记忆批量嵌入并写回(失败本轮跳过,§3.2)。仅在启用 embedder 时进行。
