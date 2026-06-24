@@ -30,4 +30,5 @@ export * from './idle-emotion-arc-skill';
 export * from './decision-trace';
 export * from './decision-llm';
 export * from './proactive-turn';
+export * from './candidate-source';
 export * from './signal-adapter';
