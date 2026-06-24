@@ -1,4 +1,7 @@
 packages:
   - 'packages/*'
 allowBuilds:
+  electron: true
   esbuild: true
+  naudiodon: true
+  segfault-handler: true

@@ -1,0 +1,28 @@
+{
+  "name": "@chat-a/desktop",
+  "version": "0.0.0",
+  "private": true,
+  "description": "chat-A「小雪」Electron 桌面前端(文字优先,语音结构就位 + naudiodon 优雅降级)",
+  "main": "dist/main.mjs",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.renderer.json",
+    "build:bundle": "node scripts/build.mjs",
+    "dev": "node scripts/build.mjs && electron .",
+    "rebuild": "pnpm dlx electron-rebuild -f -w naudiodon",
+    "package": "pnpm dlx electron-builder"
+  },
+  "dependencies": {
+    "@chat-a/client": "workspace:*",
+    "@chat-a/runtime": "workspace:*",
+    "@chat-a/providers": "workspace:*",
+    "@chat-a/persona": "workspace:*",
+    "@chat-a/protocol": "workspace:*"
+  },
+  "optionalDependencies": {
+    "naudiodon": "^2.3.6"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "esbuild": "^0.23.0"
+  }
+}

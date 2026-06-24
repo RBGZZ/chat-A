@@ -1,0 +1,130 @@
+/* 小雪桌面前端样式:简洁中文 UI(承 §6 渲染层,纯 CSS,无框架)。 */
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --user: #4f8cff;
+  --user-text: #ffffff;
+  --xiao: #eef1f5;
+  --xiao-text: #1d2330;
+  --muted: #8a93a3;
+  --border: #e3e7ee;
+  --accent: #4f8cff;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--xiao-text);
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* 顶栏:人格名 + 状态 + 心情 */
+#topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+#topbar .title { font-weight: 600; font-size: 15px; }
+#topbar .muted, .muted { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
+.status { display: flex; align-items: center; gap: 8px; }
+
+.state {
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--xiao);
+  color: var(--muted);
+}
+.state.thinking { background: #fff4e0; color: #b9770b; }
+.state.speaking { background: #e3f7e8; color: #1f9d4d; }
+.state.listening { background: #e7eeff; color: #2f6bff; }
+
+/* 消息区 */
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.bubble {
+  max-width: 78%;
+  padding: 9px 13px;
+  border-radius: 14px;
+  line-height: 1.5;
+  font-size: 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.bubble.user {
+  align-self: flex-end;
+  background: var(--user);
+  color: var(--user-text);
+  border-bottom-right-radius: 4px;
+}
+.bubble.xiao {
+  align-self: flex-start;
+  background: var(--xiao);
+  color: var(--xiao-text);
+  border-bottom-left-radius: 4px;
+}
+.bubble.error {
+  align-self: center;
+  background: #fdeaea;
+  color: #c0392b;
+  font-size: 12.5px;
+}
+.bubble.pending::after { content: "▍"; opacity: 0.5; animation: blink 1s step-start infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+/* 输入区 */
+#composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+}
+#input {
+  flex: 1;
+  resize: none;
+  max-height: 120px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+}
+#input:focus { border-color: var(--accent); }
+
+#send, #voice {
+  border: none;
+  border-radius: 10px;
+  padding: 9px 14px;
+  font-size: 14px;
+  cursor: pointer;
+}
+#send { background: var(--accent); color: #fff; }
+#send:disabled { opacity: 0.5; cursor: default; }
+#voice {
+  background: var(--xiao);
+  font-size: 16px;
+  padding: 9px 12px;
+}
+#voice.on { background: #e3f7e8; }
+#voice:disabled { opacity: 0.45; cursor: not-allowed; }
