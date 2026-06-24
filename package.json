@@ -16,6 +16,7 @@
     "start": "tsx packages/client/src/cli.ts",
     "test:voice": "tsx scripts/voice-text-to-wav.ts",
     "smoke:qwen": "tsx scripts/qwen-smoke.ts",
+    "smoke:asr": "tsx scripts/asr-smoke.ts",
     "desktop:dev": "pnpm --filter @chat-a/desktop dev",
     "desktop:rebuild": "pnpm --filter @chat-a/desktop rebuild",
     "desktop:build": "pnpm --filter @chat-a/desktop run build:bundle && pnpm --filter @chat-a/desktop package"
