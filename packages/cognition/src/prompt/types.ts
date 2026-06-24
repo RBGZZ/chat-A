@@ -76,6 +76,11 @@ export interface PromptContext {
   readonly anchor?: AnchorInput;
   /** expressiveness 旋钮值 [0,1](§7#4);由编排层据人格旋钮填入,微调风格强度。缺省时 StyleDisciplineContributor 回落中性档。 */
   readonly expressiveness?: number;
+  /**
+   * 输出语种(§4.1 输入/输出语种解绑);由编排层据 voice 配置 `output_lang` 填入。
+   * 非空时 OutputLanguageContributor 注入"用<目标语种>回复"指令;**缺省/空 → 不注入(逐字现状)**。
+   */
+  readonly outputLang?: string;
   /** volatile 上下文键值(时间戳/turnId 等),追加到末条用户消息(§5.4);P1 可空。 */
   readonly volatile?: ReadonlyArray<readonly [key: string, value: string]>;
 }

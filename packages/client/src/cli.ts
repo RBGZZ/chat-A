@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import process, { stdin, stdout, env, argv } from 'node:process';
 import { Conversation, ToolCallingStrategy, type LightVoiceBus } from '@chat-a/runtime';
 import { buildDefaultRegistry, createMemoryFactLookup } from '@chat-a/interaction';
-import { createEmbedder, loadEmbedderConfig } from '@chat-a/providers';
+import { createEmbedder, loadEmbedderConfig, loadVoiceProfile } from '@chat-a/providers';
+import type { TtsOptions } from '@chat-a/providers';
 import { createDecisionTraceSinkFromEnv, SqliteAutonomyDecisionSink } from '@chat-a/observability';
 import { LlmMemoryExtractor, LlmReflector, NoopReflector } from '@chat-a/memory';
 import type { Reflector } from '@chat-a/memory';
@@ -103,6 +104,27 @@ async function main(): Promise<void> {
   const embedderMode = (env['CHAT_A_EMBEDDER'] ?? '').trim();
   const embedder = embedderMode.length > 0 ? createEmbedder(loadEmbedderConfig(env)) : undefined;
 
+  // voice I/O 输入/输出语种解耦(§4.1,默认全空=逐字现状):input_lang→STT、output_lang→LLM+TTS、
+  // voice_id/clone_ref→TTS 音色/复刻。从 env 解析(CHAT_A_VOICE_*),各键缺席时不透传(缺省安全)。
+  const voiceProfile = loadVoiceProfile(env);
+  // 由 profile 拼 TTS 合成 opts(仅在有对应键时带键,exactOptionalPropertyTypes 友好);全空 → undefined。
+  const voiceTtsOptions: TtsOptions | undefined =
+    voiceProfile.outputLang !== undefined || voiceProfile.voiceId !== undefined || voiceProfile.cloneRef !== undefined
+      ? {
+          ...(voiceProfile.outputLang !== undefined ? { language: voiceProfile.outputLang } : {}),
+          ...(voiceProfile.voiceId !== undefined ? { voiceId: voiceProfile.voiceId } : {}),
+          ...(voiceProfile.cloneRef !== undefined
+            ? {
+                refAudio: {
+                  source: voiceProfile.cloneRef.source,
+                  ...(voiceProfile.cloneRef.refText !== undefined ? { refText: voiceProfile.cloneRef.refText } : {}),
+                  ...(voiceProfile.cloneRef.refLang !== undefined ? { refLang: voiceProfile.cloneRef.refLang } : {}),
+                },
+              }
+            : {}),
+        }
+      : undefined;
+
   // Conversation 工厂:`/reset` 需用新 sessionId 重建一个全新上下文(同一套依赖装配)。
   const makeConvo = (sid: string): Conversation =>
     new Conversation({
@@ -113,6 +135,8 @@ async function main(): Promise<void> {
       personaStore,
       traceSink: trace.sink,
       sessionId: sid,
+      // §4.1:输出语种非空时注入"用<目标语种>回复"(语种解耦不限语音,文字路同样生效);缺省不注入(逐字现状)。
+      ...(voiceProfile.outputLang ? { outputLang: voiceProfile.outputLang } : {}),
       ...(appraiser ? { appraiser } : {}),
       ...(memoryExtractor ? { memoryExtractor } : {}),
       ...(stanceDetector ? { stanceDetector } : {}),
@@ -188,6 +212,9 @@ async function main(): Promise<void> {
         bus,
         sessionId,
         env,
+        // §4.1:语音 I/O 语种解耦——input_lang→STT、output_lang/voice_id/clone_ref→TTS;缺省全空时不透传(逐字现状)。
+        ...(voiceProfile.inputLang ? { sttLanguage: voiceProfile.inputLang } : {}),
+        ...(voiceTtsOptions ? { ttsOptions: voiceTtsOptions } : {}),
         // 语音 autonomy(默认关):on 时语音侧拿到 VoiceLoop 回调装配 + 注入真闸/抢占/候选源。
         ...(assembleVoiceAutonomy ? { assembleVoiceAutonomy } : {}),
       });

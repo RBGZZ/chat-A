@@ -28,3 +28,4 @@ export * from './kokoro-tts';
 export * from './qwen-tts-realtime';
 export * from './tts-config';
 export * from './tts-registry';
+export * from './voice-profile';

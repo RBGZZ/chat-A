@@ -24,7 +24,7 @@ import type { AudioFrame, AudioTransport, Unsubscribe } from '@chat-a/protocol';
 import { makeBusEvent, makeDataFrame, type PcmFrame } from '@chat-a/protocol';
 import type { VadDetector, TurnDetector, EchoGuardConfig } from '@chat-a/voice-detect';
 import { EchoGuardGate } from '@chat-a/voice-detect';
-import type { SttProvider, TtsProvider, PcmChunk, SttEmotion } from '@chat-a/providers';
+import type { SttProvider, TtsProvider, PcmChunk, SttEmotion, TtsOptions } from '@chat-a/providers';
 import type { SttEmotionLike } from '@chat-a/persona';
 import type { MemoryStore } from '@chat-a/memory';
 import type { LightVoiceBus } from './bus';
@@ -149,6 +149,19 @@ export interface VoiceLoopDeps {
    * 否则一律走现有 STT 路径（双保险：端口缺失即便选 omni 也回落 STT，行为逐字不变）。
    */
   readonly voicePath?: VoicePath;
+  /**
+   * 输入语种(§4.1 听=STT,**可选**、纯加法)。提供时 `#transcribe` 以 `SttOptions.language` 传给
+   * `transcribe`(指定语种,不再自动检测);**省略(缺省)→ 不下发 language → STT 自动检测 → 逐字现状**。
+   * 由装配层据 voice 配置(`CHAT_A_VOICE_INPUT_LANG` 非 auto 时)注入;VoiceLoop **不直接 import**
+   * providers config(§3.1 接缝边界),只吃解析好的值。
+   */
+  readonly sttLanguage?: string;
+  /**
+   * 输出合成 opts(§4.1 说=TTS,**可选**、纯加法):`output_lang`→`language`、`voice_id`→`voiceId`、
+   * `clone_ref`→`refAudio`。提供时 `#speak` 把它传给 `synthesize`(指定输出语种/音色/复刻);
+   * **省略(缺省)→ synthesize 的 opts 仍为 undefined → 逐字现状**。同样由装配层据 voice 配置拼好后注入。
+   */
+  readonly ttsOptions?: TtsOptions;
 }
 
 /**
@@ -218,6 +231,14 @@ export class VoiceLoop {
   readonly #composeOmniInstructions: (() => string | Promise<string>) | undefined;
   /** 语音路径开关（缺省 `stt`）；决定 `#beginThinking` 走 STT 还是 omni 直路。 */
   readonly #voicePath: VoicePath;
+  /**
+   * 输入语种(§4.1,可选);未注入 → undefined → `#transcribe` 不下发 language(自动检测,逐字现状)。
+   */
+  readonly #sttLanguage: string | undefined;
+  /**
+   * 输出合成 opts(§4.1,可选);未注入 → undefined → `#speak` 传 synthesize 的 opts 仍为 undefined(逐字现状)。
+   */
+  readonly #ttsOptions: TtsOptions | undefined;
   /** 本次 speaking 回合用户开口的首帧时刻（ms），用于估算 sustainedMs 喂关注闸。 */
   #userSpeechStartAtMs: number | null = null;
 
@@ -263,6 +284,8 @@ export class VoiceLoop {
     this.#omni = deps.omni;
     this.#composeOmniInstructions = deps.composeOmniInstructions;
     this.#voicePath = deps.voicePath ?? 'stt';
+    this.#sttLanguage = deps.sttLanguage;
+    this.#ttsOptions = deps.ttsOptions;
   }
 
   /** 当前状态（供测试断言）。 */
@@ -748,7 +771,10 @@ export class VoiceLoop {
     let lastAny = '';
     let lastFinalEmotion: SttEmotion | undefined;
     let lastAnyEmotion: SttEmotion | undefined;
-    for await (const r of this.#stt.transcribe(toChunks())) {
+    // §4.1:注入了输入语种则以 SttOptions.language 传给 STT(指定语种);未注入 → opts=undefined →
+    // 调用形状与现状 `transcribe(toChunks())` 字面等价(STT 自动检测,逐字现状)。
+    const sttOpts = this.#sttLanguage !== undefined ? { language: this.#sttLanguage } : undefined;
+    for await (const r of this.#stt.transcribe(toChunks(), sttOpts)) {
       lastAny = r.text;
       lastAnyEmotion = r.emotion;
       if (r.isFinal) {
@@ -775,7 +801,9 @@ export class VoiceLoop {
   async #speak(sentence: string, gen: number, signal?: AbortSignal): Promise<void> {
     if (gen !== this.#gen) return; // 进入即自检（本回合已作废）
     try {
-      for await (const chunk of this.#tts.synthesize(sentence, undefined, signal)) {
+      // §4.1:注入了 ttsOptions(output_lang/voice_id/clone_ref)则传给 synthesize(指定输出语种/音色/复刻);
+      // 未注入 → #ttsOptions=undefined → 与现状 `synthesize(sentence, undefined, signal)` 字面等价(逐字现状)。
+      for await (const chunk of this.#tts.synthesize(sentence, this.#ttsOptions, signal)) {
         if (gen !== this.#gen) return; // 每 chunk 再自检：打断后旧 gen 帧不再下行
         // 首音频：thinking → speaking（仅在 thinking 态时迁移,幂等）
         if (this.#state === 'thinking') {
