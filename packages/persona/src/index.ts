@@ -1,6 +1,7 @@
 export * from './types';
 export * from './defaults';
 export * from './numeric';
+export * from './prosody';
 export * from './tone';
 export * from './appraiser';
 export * from './llm-appraiser';

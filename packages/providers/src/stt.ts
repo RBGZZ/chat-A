@@ -70,6 +70,33 @@ export interface SttResult {
   readonly isFinal: boolean;
   /** 检测到的语种(可空;部分引擎在 final 上回报,如 faster-whisper info.language)。 */
   readonly language?: string;
+  /**
+   * 从语音读出的 prosody 情绪信号(§7#5「听出怎么说的」)。**纯加法、默认缺席**:
+   * 既有 provider(fake/openai-compat/whisper-local)一律不设此键(exactOptionalPropertyTypes
+   * 下字段缺席),既有消费者读到 undefined、行为字面不变。仅 qwen-asr 等带 prosody 标注的引擎填。
+   */
+  readonly emotion?: SttEmotion;
+}
+
+/**
+ * STT 可读出的离散 prosody 情绪标签(对齐 qwen3-asr-flash 官方 7 类)。
+ * 与具体 provider 解耦:任何能从语音读情绪的实现皆可填(后续 realtime ASR 复用同一面)。
+ */
+export type SttEmotionLabel =
+  | 'surprised'
+  | 'neutral'
+  | 'happy'
+  | 'sad'
+  | 'disgusted'
+  | 'angry'
+  | 'fearful';
+
+/** 一条 prosody 情绪信号:离散标签 + 可选置信度。 */
+export interface SttEmotion {
+  /** ASR 给出的离散情绪标签。 */
+  readonly label: SttEmotionLabel;
+  /** 置信度 [0,1](若引擎给出;qwen3-asr 当前未稳定回报,留位)。 */
+  readonly confidence?: number;
 }
 
 /**

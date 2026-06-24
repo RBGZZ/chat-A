@@ -10,7 +10,11 @@
  */
 import type { Device, ComputeType } from './hardware';
 
-export type SttConfig = FakeSttConfig | OpenAiCompatSttConfig | WhisperLocalSttConfig;
+export type SttConfig =
+  | FakeSttConfig
+  | OpenAiCompatSttConfig
+  | WhisperLocalSttConfig
+  | QwenAsrSttConfig;
 
 /**
  * DashScope(阿里百炼)OpenAI 兼容端点根(纯文本 / ASR transcriptions 共用);与 registry 的
@@ -88,8 +92,34 @@ export interface WhisperLocalSttConfig {
 }
 
 /**
+ * DashScope qwen3-asr-flash —— 批式云 STT + **从语音读 prosody 情绪**(§7#5)。
+ * 经 OpenAI 兼容 `/chat/completions`(音频走 input_audio base64 Data URL),解析 `annotations[].emotion`。
+ * **与既有 `kind=qwen` 便捷档不同**:那档把 qwen 映射到 `openai-compat`(/audio/transcriptions,无情绪);
+ * 本档映射到 `QwenAsrStt`(/chat/completions,带情绪)。详见 openspec/changes/prosody-stt-emotion/design.md。
+ */
+export interface QwenAsrSttConfig {
+  readonly kind: 'qwen-asr';
+  /** trace 标识(缺省 'qwen-asr')。 */
+  readonly id?: string;
+  /** 模型串(默认 QWEN_ASR_DEFAULT_MODEL='qwen3-asr-flash')。 */
+  readonly model: string;
+  /** DASHSCOPE_API_KEY(缺省时 provider fail-fast)。 */
+  readonly apiKey: string;
+  /** OpenAI 兼容端点根(默认 QWEN_DASHSCOPE_COMPAT_BASE_URL),末尾斜杠会被去掉。 */
+  readonly baseURL: string;
+  /** 目标语种(ISO-639-1);省略 = 多语种自动检测。 */
+  readonly language?: string;
+  /** 逆文本规整 enable_itn(数字/标点规范化)。 */
+  readonly enableItn?: boolean;
+  /** 声明支持语种(能力位);省略默认 ['*']。 */
+  readonly languages?: readonly string[];
+}
+
+/**
  * 从环境变量加载——用户自己选 STT 引擎:
- *   CHAT_A_STT_KIND          = fake | openai-compat | whisper-local(默认:有 base URL+key+model 则 openai-compat,否则 fake)
+ *   CHAT_A_STT_KIND          = fake | openai-compat | whisper-local | qwen-asr | qwen
+ *                              (默认:有 base URL+key+model 则 openai-compat,否则 fake)
+ *   qwen-asr 专有:CHAT_A_STT_ENABLE_ITN;apiKey 回落 CHAT_A_DASHSCOPE_API_KEY(带 prosody 情绪,§7#5)
  *   CHAT_A_STT_MODEL         = 模型串
  *   CHAT_A_STT_API_KEY       = API key(openai-compat 用)
  *   CHAT_A_STT_BASE_URL      = OpenAI 兼容端点根
@@ -106,8 +136,28 @@ export function loadSttConfig(env: NodeJS.ProcessEnv = process.env): SttConfig {
   const baseURL = env['CHAT_A_STT_BASE_URL'];
   const language = env['CHAT_A_STT_LANGUAGE'];
 
-  // DashScope 便捷档(填 key 即用):CHAT_A_STT_KIND=qwen → DashScope 云 ASR 经 OpenAI 兼容端点。
+  // DashScope qwen3-asr 档(填 key 即用,**带 prosody 情绪**,§7#5):CHAT_A_STT_KIND=qwen-asr →
+  // QwenAsrStt 经 OpenAI 兼容 /chat/completions 转写并解析 annotations[].emotion。
   // key 回落 CHAT_A_DASHSCOPE_API_KEY;model/baseURL 有内置默认,可被 CHAT_A_STT_MODEL/BASE_URL 覆盖。
+  if (kind === 'qwen-asr') {
+    const dashKey = apiKey ?? env['CHAT_A_DASHSCOPE_API_KEY'];
+    return {
+      kind: 'qwen-asr',
+      ...(env['CHAT_A_STT_ID'] ? { id: env['CHAT_A_STT_ID'] } : {}),
+      model: model ?? QWEN_ASR_DEFAULT_MODEL,
+      apiKey: dashKey ?? '',
+      baseURL: baseURL ?? QWEN_DASHSCOPE_COMPAT_BASE_URL,
+      ...(language ? { language } : {}),
+      ...(env['CHAT_A_STT_ENABLE_ITN'] === 'true'
+        ? { enableItn: true }
+        : env['CHAT_A_STT_ENABLE_ITN'] === 'false'
+          ? { enableItn: false }
+          : {}),
+    };
+  }
+
+  // DashScope 便捷档(填 key 即用,**无情绪**):CHAT_A_STT_KIND=qwen → DashScope 云 ASR 经 OpenAI 兼容
+  // /audio/transcriptions(openai-compat)。key 回落 CHAT_A_DASHSCOPE_API_KEY;model/baseURL 有内置默认。
   if (kind === 'qwen') {
     const dashKey = apiKey ?? env['CHAT_A_DASHSCOPE_API_KEY'];
     const temperatureRawQ = env['CHAT_A_STT_TEMPERATURE'];
