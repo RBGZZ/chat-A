@@ -50,4 +50,4 @@
 - [x] 7.1 `pnpm -r typecheck` 全绿。
 - [x] 7.2 `npx vitest run` 全绿(新增 + 既有全量回归,强调未配置回归绿)。
 - [x] 7.3 `openspec validate voice-io-decoupling --strict` 通过。
-- [ ] 7.4 `git commit`(中文)到当前 worktree 分支,不 push、不动 master。
+- [x] 7.4 `git commit`(中文)到当前 worktree 分支,不 push、不动 master。
