@@ -24,7 +24,8 @@ import type { AudioFrame, AudioTransport, Unsubscribe } from '@chat-a/protocol';
 import { makeBusEvent, makeDataFrame, type PcmFrame } from '@chat-a/protocol';
 import type { VadDetector, TurnDetector, EchoGuardConfig } from '@chat-a/voice-detect';
 import { EchoGuardGate } from '@chat-a/voice-detect';
-import type { SttProvider, TtsProvider, PcmChunk } from '@chat-a/providers';
+import type { SttProvider, TtsProvider, PcmChunk, SttEmotion } from '@chat-a/providers';
+import type { SttEmotionLike } from '@chat-a/persona';
 import type { MemoryStore } from '@chat-a/memory';
 import type { LightVoiceBus } from './bus';
 import { SentenceSplitter } from './sentence-splitter';
@@ -91,11 +92,18 @@ export interface VoiceLoopDeps {
   readonly stt: SttProvider;
   readonly tts: TtsProvider;
   /**
-   * 想：吃用户文本 + onToken（逐 token 回调）+ 可选 signal（协作取消），resolve 完整回复。
-   * `signal` 在打断时被 abort，使底层 LLM 流真停（§3.2 真打断）；可选、向后兼容（不传 signal 的
-   * 旧实现仍可注入，只是不可取消）。装配处传 `conversation.send.bind(conversation)`。
+   * 想：吃用户文本 + onToken（逐 token 回调）+ 可选 signal（协作取消）+ 可选 prosodyEmotion，resolve 完整回复。
+   * `signal` 在打断时被 abort，使底层 LLM 流真停（§3.2 真打断）。
+   * `prosodyEmotion`（§7#5「从语音读情绪」，**可选、纯加法**）：STT 读出的语气情绪,经 `Conversation.send`
+   * 透传至 `persona.advance` 并入 PAD;**不传=无语音情绪=情绪推进与现状逐字一致**(旧实现/文字路不传即无感)。
+   * 装配处传 `conversation.send.bind(conversation)`。
    */
-  readonly send: (text: string, onToken: (t: string) => void, signal?: AbortSignal) => Promise<string>;
+  readonly send: (
+    text: string,
+    onToken: (t: string) => void,
+    signal?: AbortSignal,
+    prosodyEmotion?: SttEmotionLike,
+  ) => Promise<string>;
   /** 半句写回只用到 appendMessage（最小面，§4 半句写回）。 */
   readonly memory: Pick<MemoryStore, 'appendMessage'>;
   readonly bus: LightVoiceBus;
@@ -181,7 +189,12 @@ export class VoiceLoop {
   readonly #turnDetector: TurnDetector;
   readonly #stt: SttProvider;
   readonly #tts: TtsProvider;
-  readonly #send: (text: string, onToken: (t: string) => void, signal?: AbortSignal) => Promise<string>;
+  readonly #send: (
+    text: string,
+    onToken: (t: string) => void,
+    signal?: AbortSignal,
+    prosodyEmotion?: SttEmotionLike,
+  ) => Promise<string>;
   readonly #memory: Pick<MemoryStore, 'appendMessage'>;
   readonly #bus: LightVoiceBus;
   readonly #sessionId: string;
@@ -525,8 +538,11 @@ export class VoiceLoop {
     this.#audioBuf = [];
 
     let text: string;
+    let emotion: SttEmotion | undefined;
     try {
-      text = await this.#transcribe(buf);
+      const r = await this.#transcribe(buf);
+      text = r.text;
+      emotion = r.emotion; // §7#5:STT 读出的语气情绪(qwen-asr 填,其余 undefined),稍后透传给 #send。
     } catch (err) {
       console.warn('[VoiceLoop] STT 抛错(降级回 listening):', err);
       this.#resetToListening();
@@ -568,7 +584,9 @@ export class VoiceLoop {
       for (const sentence of splitter.push(tok)) enqueueSpeak(sentence);
     };
 
-    this.#currentTurn = this.#send(text, onToken, ac.signal)
+    // §7#5:把 STT 读出的语气情绪经第 4 参透传给 send(→ persona.advance 并入 PAD);
+    // emotion 缺省(其余 provider / 文字路)即第 4 参 undefined,调用形状与现状等价、行为不变。
+    this.#currentTurn = this.#send(text, onToken, ac.signal, emotion)
       .then(async (full) => {
         if (gen !== this.#gen) return; // 已被打断：忽略输出（协作式放弃）
         // 累积以 send 返回的完整回复为准(onToken 可能漏拼)
@@ -716,19 +734,33 @@ export class VoiceLoop {
     this.#echoGuard?.reset(); // 清自打断防护连续计数(回合自然结束)
   }
 
-  /** 把累积音频帧转 PcmChunk 流喂 STT，取最后一条 final 文本（无 final 取最后一条）。 */
-  async #transcribe(buf: readonly PcmFrame[]): Promise<string> {
+  /**
+   * 把累积音频帧转 PcmChunk 流喂 STT,取最后一条 final 文本(无 final 取最后一条)。
+   * §7#5:额外回传该条结果的 prosody 情绪 `emotion?`(qwen-asr 等会填,其余 provider 恒 undefined)——
+   * 取「被采纳为最终文本」那一条 `SttResult` 的 emotion(优先 final;无 final 取 lastAny 那条),纯加法。
+   */
+  async #transcribe(buf: readonly PcmFrame[]): Promise<{ text: string; emotion?: SttEmotion }> {
     const self = this;
     async function* toChunks(): AsyncIterable<PcmChunk> {
       for (const f of buf) yield self.#toPcmChunk(f);
     }
     let lastFinal = '';
     let lastAny = '';
+    let lastFinalEmotion: SttEmotion | undefined;
+    let lastAnyEmotion: SttEmotion | undefined;
     for await (const r of this.#stt.transcribe(toChunks())) {
       lastAny = r.text;
-      if (r.isFinal) lastFinal = r.text;
+      lastAnyEmotion = r.emotion;
+      if (r.isFinal) {
+        lastFinal = r.text;
+        lastFinalEmotion = r.emotion;
+      }
     }
-    return lastFinal.length > 0 ? lastFinal : lastAny;
+    const useFinal = lastFinal.length > 0;
+    const text = useFinal ? lastFinal : lastAny;
+    const emotion = useFinal ? lastFinalEmotion : lastAnyEmotion;
+    // exactOptionalPropertyTypes:仅在有 emotion 时带键(缺席=无语音情绪,下游不传给 send,行为不变)。
+    return emotion !== undefined ? { text, emotion } : { text };
   }
 
   // ───────────────────────────── 说：TTS 下行 ─────────────────────────────

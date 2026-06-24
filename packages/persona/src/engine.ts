@@ -5,19 +5,43 @@ import type {
   OceanDeltaSnapshot,
   OceanEvolver,
   Pad,
+  PadPull,
   PersonaConfig,
   PersonaSeed,
   PersonaSnapshot,
   PersonaStore,
   Posture,
 } from './types';
-import { DEFAULT_PERSONA_CONFIG } from './defaults';
+import { clampUnit, DEFAULT_PERSONA_CONFIG } from './defaults';
 import { oceanToPadBaseline, padToEmotion, stepPad } from './numeric';
+import { prosodyToPadPull, type SttEmotionLike } from './prosody';
 import { renderToneFragment } from './tone';
 import { resolveNegativePosture } from './posture';
 import { DefaultAppraiser } from './appraiser';
 import { InMemoryPersonaStore } from './store';
 import { applyOceanDelta, buildDeltaSnapshot, clampOceanDelta, isZeroDelta, shouldEvolve } from './ocean-evolution';
+
+/**
+ * 语音 prosody 拉力并入文本拉力时的权重(§7#5「从语音读情绪」)。外置具名常量(行为即配置、无 magic
+ * number):语音为**辅**,不盖过文本(「说了什么」仍是主),故 < 1。`merged = textPull + W·prosodyPull`。
+ */
+export const PROSODY_PULL_WEIGHT = 0.5;
+
+/**
+ * 把语音 prosody 拉力按权重 {@link PROSODY_PULL_WEIGHT} 并入文本拉力(§7#5;纯函数)。
+ * - `emotion` 缺省 → **原样返回 textPull**(同一对象,字面零改动,保证默认路径与现状逐字一致)。
+ * - 否则 `prosodyPull = prosodyToPadPull(emotion)`(neutral/未知/低 confidence 已在其内降级),
+ *   各维 `clampUnit(textPull + W·prosodyPull)`。neutral/未知 → prosodyPull 全零 → 结果等同 textPull。
+ */
+function mergeProsodyPull(textPull: PadPull, emotion?: SttEmotionLike): PadPull {
+  if (emotion === undefined) return textPull;
+  const p = prosodyToPadPull(emotion);
+  return {
+    pleasure: clampUnit(textPull.pleasure + PROSODY_PULL_WEIGHT * p.pleasure),
+    arousal: clampUnit(textPull.arousal + PROSODY_PULL_WEIGHT * p.arousal),
+    dominance: clampUnit(textPull.dominance + PROSODY_PULL_WEIGHT * p.dominance),
+  };
+}
 
 export interface ToneView {
   readonly emotion: Emotion;
@@ -96,8 +120,15 @@ export class PersonaEngine {
   /**
    * 推进情绪:appraise(异步)→ spring 步进 → 二级 OCEAN 演化(每 N 轮,opt-in)→ 持久化(回合后用)。
    * OCEAN 演化先于 PAD 基线计算,使演化后的人格当轮即影响心情重心;失败/未注入则 OCEAN 恒定。
+   *
+   * `opts.prosodyEmotion`(§7#5「从语音读情绪」,**全可选**):由编排层从 STT 读出的语气情绪透传。
+   * 提供时,经 {@link prosodyToPadPull} 得语音侧拉力,与文本 appraiser 的 `textPull` 按 {@link PROSODY_PULL_WEIGHT}
+   * **合并**为单一 pull 再**单次** `stepPad` 步进(`merged = textPull + W·prosodyPull`,各维钳制 [-1,1]),
+   * 使「怎么说的」与「说了什么」并轨喂入 PAD。**不提供 / undefined → 拉力恒等于 `textPull`、与现状逐字一致**
+   * (同一次 stepPad,纯加法、向后兼容);neutral/未知标签经 prosodyToPadPull 得零拉力 → 同样等价不提供。
+   * 入参用结构类型 `SttEmotionLike`(不依赖 providers,§3.1 接缝边界)。
    */
-  async advance(userText: string): Promise<void> {
+  async advance(userText: string, opts?: { readonly prosodyEmotion?: SttEmotionLike }): Promise<void> {
     const dials = this.#seed.dials;
     const turn = this.#snapshot.turn + 1;
     // 仅在注入了 evolver 时累积演化窗口——默认路径(无 evolver)不 push,杜绝长跑进程无界增长。
@@ -117,7 +148,10 @@ export class PersonaEngine {
 
     // 快变量:即时 PAD 弹簧步进(基线用(可能已演化的)OCEAN)。
     const baseline = oceanToPadBaseline(ocean, dials);
-    const pull = await this.#appraiser.appraise({ userText, pad: this.#snapshot.pad, turn });
+    const textPull = await this.#appraiser.appraise({ userText, pad: this.#snapshot.pad, turn });
+    // §7#5:若有语音 prosody 情绪,把它的 PAD 拉力按权重并入文本拉力(合并为单一 pull,单次步进);
+    // 无 / undefined / neutral / 未知 → mergeProsodyPull 返回 textPull 原物,与现状逐字一致(纯加法)。
+    const pull = mergeProsodyPull(textPull, opts?.prosodyEmotion);
     const pad = stepPad({ pad: this.#snapshot.pad, pull, baseline, dials, turn, config: this.#config });
 
     this.#snapshot = {

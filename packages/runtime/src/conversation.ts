@@ -32,6 +32,7 @@ import {
   type SelfNotionEvolver,
   type StanceDetector,
   type SelfConsistencyGuard,
+  type SttEmotionLike,
 } from '@chat-a/persona';
 import { getTracer, GENAI, CHAT_A, NoopDecisionTraceSink, type DecisionTraceSink } from '@chat-a/observability';
 import type { LightVoiceBus } from './bus';
@@ -145,6 +146,12 @@ export interface TurnContext {
    * 传 `undefined` = 不漂移(清空待重锚)。缺省 = 不接 Guard(等价现状)。
    */
   readonly setPendingAnchor?: (anchor: AnchorInput | undefined) => void;
+  /**
+   * 本轮语音 prosody 情绪(§7#5「从语音读情绪」):由外壳从 `send` 第四形参透传,策略经 `finalizeTurn`
+   * 转交 `persona.advance(userText, { prosodyEmotion })` 并入 PAD。缺省=无语音情绪=情绪推进与现状逐字一致
+   * (文字 CLI 路 / 既有 STT provider 恒不传)。结构类型 `SttEmotionLike`(不依赖 providers,§3.1)。
+   */
+  readonly prosodyEmotion?: SttEmotionLike;
   readonly deps: TurnDeps;
 }
 
@@ -166,7 +173,7 @@ export interface TurnStrategy {
  */
 export class SingleShotStrategy implements TurnStrategy {
   async run(ctx: TurnContext): Promise<string> {
-    const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs, turn, signal, pendingAnchor, setPendingAnchor } = ctx;
+    const { deps, userText, onToken, turnId, correlationId, turnSpan, turnStartMs, turn, signal, pendingAnchor, setPendingAnchor, prosodyEmotion } = ctx;
     // 回合前:读关系亲密度(§6.1b,惰性衰减、同步快)+ 当前心情渲染本轮 tone
     // (不改状态;情绪推进/closeness 抬升留到回合后,保首字零额外延迟)。
     const closeness = deps.memory.getCloseness(deps.primaryPersonId);
@@ -223,6 +230,7 @@ export class SingleShotStrategy implements TurnStrategy {
       turn,
       ...(qe ? { semantic: qe } : {}),
       ...(setPendingAnchor ? { setPendingAnchor } : {}),
+      ...(prosodyEmotion ? { prosodyEmotion } : {}),
     });
     return reply;
   }
@@ -356,6 +364,11 @@ export class Conversation {
     onToken: (token: string) => void,
     /** 协作取消信号(可选,向后兼容):透传至 TurnContext → 策略 → LLM 调用;不传=回合不可取消。 */
     signal?: AbortSignal,
+    /**
+     * 本轮语音 prosody 情绪(§7#5,可选、向后兼容):透传至 TurnContext → 策略 → finalizeTurn →
+     * `persona.advance` 并入 PAD;不传=无语音情绪=情绪推进与现状逐字一致(文字路恒不传)。
+     */
+    prosodyEmotion?: SttEmotionLike,
   ): Promise<string> {
     const turnId = `t${++this.#turnSeq}`;
     const correlationId = `${this.#sessionId}/${turnId}/0`;
@@ -390,6 +403,8 @@ export class Conversation {
             ...(this.#deps.selfConsistencyGuard
               ? { setPendingAnchor: (a: AnchorInput | undefined): void => { this.#pendingAnchor = a; } }
               : {}),
+            // 仅在提供时填(exactOptionalPropertyTypes 友好;不传则 ctx.prosodyEmotion 为 undefined,情绪推进不变)。
+            ...(prosodyEmotion ? { prosodyEmotion } : {}),
             deps: this.#deps,
           });
           this.#bus.emit(makeBusEvent('turn:end', { reason: 'completed', atMs: Date.now() }, correlationId));
