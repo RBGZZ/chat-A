@@ -350,3 +350,93 @@ TBD - created by archiving change sqlite-memory. Update Purpose after archive.
 - **WHEN** 对同一记忆连续两次调用 `closeThread(id)`,或对不存在的 id 调用
 - **THEN** 不抛错、无额外副作用,未闭合话题查询结果稳定
 
+### Requirement: 联想扩散召回(Personalized PageRank)
+
+召回 SHALL 支持**联想扩散**:除直接命中查询关键词的一阶记忆外,沿记忆关联网(共享实体/共现 token 构成的无向加权邻接图)把**与命中记忆相关联的多跳记忆**也带入候选,使回忆按网状勾连一层层被激活(承 §5.9 认知保真度轴:联想缺口①)。
+
+联想分 MUST 由 **Personalized PageRank(HippoRAG 式重启随机游走)**给出,而非固定跳数的几何衰减。系统 MUST 从 query 命中的一阶记忆(种子)出发,在关联子图上做幂迭代 `r = (1−α)·M·r + α·s`,其中:转移矩阵 `M` MUST 由无向边的共现权重**按出度行归一**构成(游走以 `weight(i,j)/Σ_k weight(i,k)` 概率从 i 走到邻居 j);种子向量 `s` MUST 为命中一阶记忆的均匀分布(和为 1);`α` 为重启/teleport 系数。每个**非种子记忆**的稳态分 `r[node]` 即其联想分(种子本身 MUST NOT 计入联想候选——一阶命中已在候选池)。该稳态分 MUST 作为混合召回 `association` 信号路的取值,融入既有**单一权威混合打分**(min-max 归一融合,与关键词/记忆强度/情感/向量同一框架),系统 MUST NOT 为联想另起第二套打分公式。
+
+联想扩散 MUST 满足**非阻塞硬约束**(承 §5.5 末「🔴 非阻塞召回」):PPR 只在从种子可达的关联**子图**上运行,子图按 `associationMaxHops` 跳圈定半径、节点数 MUST 封顶于可配置上限(超出按 BFS 到达序截断,近种子优先);幂迭代次数 MUST 有可配置上限,并在相邻两次迭代秩向量 L1 变化小于可配置收敛阈时提前收敛早停。重启系数 α、迭代上限、收敛阈、子图节点上限 MUST 全部外置为可配置参数(无 magic number,承 §3.2)。
+
+联想扩散对**内存实现与 SQLite 实现 MUST 行为一致**(两实现调用同一权威 PPR 纯函数,杜绝漂移,§3.2),且 MUST 确定性(节点按稳定 id 序遍历,无随机/时间依赖,重复运行结果一致)。退化情形 MUST 优雅降级为不带入联想候选(空种子、无关联边、迭代上限≤0、读取失败、或扩散半径配置为关闭),不抛错、不拖垮召回返回。该升级 MUST NOT 改变记忆库 schema(复用既有关联网),`recall` 公共方法签名 MUST 保持向后兼容。
+
+#### Scenario: 近邻联想分高于远邻
+
+- **WHEN** 一条记忆 A 命中查询关键词,B 与 A 共享实体(1 跳邻居)、C 经 B 间接与 A 关联(2 跳邻居),以该关键词召回(子图半径足够)
+- **THEN** B 与 C 都被联想扩散带入候选,且 B 的 PPR 稳态联想分高于 C(质量随跳数自然衰减),B 排在 C 之前
+
+#### Scenario: 强连接联想分高于弱连接
+
+- **WHEN** 同距(均为 1 跳)的两个邻居,其一与命中记忆共享多个实体(重边,共现权重更高)、另一只共享一个实体(轻边)
+- **THEN** 强连接邻居分得更多随机游走质量,其 PPR 稳态联想分更高,排在弱连接邻居之前
+
+#### Scenario: 一阶命中不重复计入联想
+
+- **WHEN** 两条记忆都命中查询关键词(都是一阶种子)且互为关联邻居,以该关键词召回
+- **THEN** 每条记忆在结果中只出现一次,种子不因互为邻居被作为联想候选重复带入
+
+#### Scenario: 子图节点上限约束远端关联
+
+- **WHEN** 配置较小的子图节点上限,且存在一条经多跳延伸的关联链
+- **THEN** 联想扩散只带入子图节点上限内、近种子优先的关联记忆,超出上限的远端关联不被带入(端侧非阻塞)
+
+#### Scenario: PPR 参数可配置
+
+- **WHEN** 通过配置指定重启系数 α、迭代上限、收敛阈或子图节点上限
+- **THEN** 随机游走与子图圈定按所配参数进行,而非内置默认值
+
+#### Scenario: 扩散关闭时退化为纯一阶召回
+
+- **WHEN** 将联想扩散半径配置为关闭(`associationMaxHops` 为 0),以某关键词召回
+- **THEN** 召回只返回直接命中关键词的一阶记忆,不带入任何联想候选,行为向后兼容
+
+### Requirement: 关系亲密度 closeness 状态与演化(单一权威公式)
+
+人物花名册 SHALL 为每个 `person_id` 维护**关系亲密度** `closeness ∈ [0,1]`，存于 `people.relationship_state`(JSON)的子字段。closeness 是中速慢变量(承 §6.1b / §5.3b)，演化两条且 MUST 用**单一权威公式**(承 §5.5 同纪律，不得引入后台与读取两套漂移)：
+
+- **长期缺席衰减**：读取 closeness MUST 按距上次互动时长**惰性实时计算** `c·0.5^(days/H)`，其中 `days = max(0, (now − updatedAt)/一天毫秒)`(时钟回拨/未来时间不放大)，`H` 为半衰期且 MUST 外置(无 magic number，默认 30 天)。衰减 MUST **读不写回**(不污染存储、不复利漂移，承 §5.5)。衰减/抬升结果 MUST 夹到 `[closenessFloor, 1]`(下限外置，保护核心关系不归零、上限封顶)。
+- **积极互动缓升**：抬升 MUST 按 `c' = c + k·clamp(valencePos,0,1)·(1−c)` 渐近饱和(单调趋近 1 不越界)，`k` 为抬升系数且 MUST 外置(默认 0.1)。`valencePos ≤ 0` 时 MUST 只刷新衰减基线时间戳(等价 `c'=c`，不升)。
+
+衰减与抬升的纯函数 MUST 被 SQLite 与 InMemory 两实现**共用**(单一权威，杜绝两后端各写一遍漂移，承 §3.2)。
+
+`MemoryStore` SHALL 暴露：`getCloseness(personId)`(以"现在"读，惰性衰减)、`getClosenessAt(personId, atMs)`(可注入时刻，供确定性测试与编排层固定时刻演化)、`bumpCloseness(personId, valencePos, atMs)`(取衰减后当前值→渐近抬升→写回 `relationship_state`，返回新值)。对**未知 person_id** MUST 幂等不抛(写命中 0 行、读返回配置初值，承 §3.2)。写入失败 MUST 优雅降级(不抛、不拖垮调用方)。
+
+#### Scenario: 默认初值(陌生起步)
+
+- **WHEN** 对一个 `relationship_state` 无 closeness 记录的 person 读取 closeness
+- **THEN** 返回配置的 `initialCloseness`(陌生起步)，且读取不写回任何记录
+
+#### Scenario: 积极互动后缓升且渐近饱和
+
+- **WHEN** 对同一 person 连续两次以满正向 valence 调用 `bumpCloseness`
+- **THEN** 第一次较初值上升、第二次再上升，但第二次增量更小(渐近趋近 1，单调不越界)
+
+#### Scenario: 长期缺席后惰性衰减
+
+- **WHEN** 一个 person 的 closeness 在某时刻被抬升，之后经过一个半衰期再读取(`getClosenessAt`)
+- **THEN** 读到的值约为抬升后值的一半(`0.5^(days/H)`)，且该衰减仅在读取时算、未写回存储
+
+#### Scenario: 非正向 valence 不升只刷新基线
+
+- **WHEN** 以 `valencePos ≤ 0` 调用 `bumpCloseness`
+- **THEN** closeness 数值不上升(等价当前衰减后值)，仅刷新衰减基线时间戳
+
+#### Scenario: 未知 person 幂等不抛
+
+- **WHEN** 对花名册中不存在的 person_id 调用 `bumpCloseness` 或读取 closeness
+- **THEN** 不抛异常(写命中 0 行、读返回配置初值)
+
+#### Scenario: 半衰期/抬升系数/初值/下限可配置
+
+- **WHEN** 通过配置指定半衰期 H、抬升系数 k、初值或下限
+- **THEN** 衰减/抬升/默认/夹取按所配参数计算，而非内置默认值
+
+### Requirement: closeness 存储零数据丢失
+
+引入 closeness 子字段 MUST NOT 丢失任何存量数据(承 §3.2 数据迁移纪律)。closeness 存于 v3 已建的可空列 `people.relationship_state`(JSON)中，旧库无 closeness 记录的 person MUST 在**读取路径惰性兜底**配置初值(无需 backfill、零数据丢失)；`relationship_state` 解析失败 MUST 同样降级为配置初值而非损坏数据。
+
+#### Scenario: 旧库 person 无 closeness 记录仍可读
+
+- **WHEN** 打开一个 `relationship_state` 为空(或无 closeness 子字段)的旧库并读取某 person 的 closeness
+- **THEN** 返回配置初值，原有花名册数据(name/status 等)无任何丢失，后续 `bumpCloseness` 可正常写入
+
