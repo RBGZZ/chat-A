@@ -1,5 +1,4 @@
 import { createRequire } from 'node:module';
-import type { LlmProvider, LlmRequest } from './llm';
 import type { PcmChunk } from './audio';
 
 /**
@@ -7,19 +6,22 @@ import type { PcmChunk } from './audio';
  *
  * 设计依据:`openspec/changes/qwen-omni-realtime-llm/design.md`(协议已用官方文档核实)。
  *
- * 两个表面:
- * - **文本兼容面**(implements {@link LlmProvider} 的 `stream`/`complete`):把文本 prompt 经 WS
- *   (`modalities:["text"]`)送出、聚合 `response.text.delta` 回吐字符串流。使其可**直接装进 registry
- *   当作普通 LLM 用**,VoiceLoop 现有 STT→文本LLM 路径**零改**即可替换(承 v3 §一:Omni 是网关 Provider)。
- * - **真多模态面** {@link respondToAudio}:吃 PCM 块流 → `input_audio_buffer.append`(base64),
- *   yield 判别联合事件(transcript=用户话语 / text=回复增量 / end),为后续 runtime 接入 audio-in
- *   直路留接缝(本 change 不接 VoiceLoop)。
+ * **仅音频面(audio-in → 文本流)**:吃 PCM 块流 → `input_audio_buffer.append`(base64),
+ * yield 判别联合事件(transcript=用户话语 / text=回复增量 / end)。这是 omni-realtime 的核心价值
+ * (让模型直接「听」原始音频、感知情绪),为后续 runtime 接入 audio-in 直路(路径B)留接缝——
+ * **本 change 不接 VoiceLoop**,只提供并测试此面。
+ *
+ * 注:早稿曾设「文本兼容面」(implements LlmProvider 的 stream/complete,用 conversation.item.create
+ * + input_text 把纯文本当用户消息送入,以便当普通 LLM 直接装进 registry)。**已据官方 client-events
+ * 文档核实(2026-06-24):DashScope realtime 的 conversation.item.create 当前仅接受 function_call_output
+ * 类型,且音频输入是必需的——该文本路径协议上不成立,故移除。** 纯文本 LLM 走已实测可用的 OpenAI 兼容
+ * `qwen` provider(见 registry.ts),与本 provider 各司其职。
  *
  * 核心约束(§3.2):
  * - **AbortSignal 真取消**:abort → 关 WS、终止生成器(承 VoiceLoop 打断 abort send 的 signal,底层真停)。
- * - **能力门 fail-fast**:鉴权/连接/error 事件 → 抛清晰中文错误(供上层优雅降级回传统路径)。
+ * - **错误 fail-fast**:鉴权/连接/error 事件 → 抛清晰中文错误(供上层优雅降级回传统路径)。
  * - **WS 可注入**(工厂模式):构造接收可选 `wsFactory`,默认用 `ws` 包;测试注入 mock WS,不触网。
- * - **惰性连接**:构造期不连,首次 stream/complete/respondToAudio 才建连(装配不触网)。
+ * - **惰性连接**:构造期不连,首次 respondToAudio 才建连(装配不触网)。
  */
 
 /** 真多模态面的产出事件(判别联合,承 §4 流式贯穿)。 */
@@ -50,16 +52,27 @@ export interface OmniWsLike {
 /** WS 工厂:由 URL + 鉴权 header 建连(可注入)。 */
 export type OmniWsFactory = (url: string, opts: { readonly headers: Record<string, string> }) => OmniWsLike;
 
+/**
+ * 回合切分模式:
+ * - `manual`(默认):turn_detection=null,送完音频显式 `commit`+`response.create` 触发。适配
+ *   VoiceLoop endpointing 已切好的**有限音频段**——确定性触发,不与服务端 VAD 双重判定、无额外静默延迟。
+ * - `server_vad`:turn_detection={type:'server_vad'},由服务端 VAD 自动判端点触发(连续流场景);
+ *   此模式**不发**手动 commit/response.create(否则与自动触发冲突)。
+ */
+export type OmniTurnDetection = 'manual' | 'server_vad';
+
 export interface QwenOmniLlmOptions {
   /** provider 标识(如 'qwen-omni')——仅供 trace/日志(§8.1)。 */
   readonly id: string;
-  /** model id(如 'qwen3.5-omni-flash-realtime');不写死,由配置传入。 */
+  /** model id(如 'qwen3-omni-flash-realtime' / 'qwen-omni-turbo-realtime');不写死,由配置传入。 */
   readonly model: string;
   readonly apiKey: string;
   /** DashScope realtime WS 端点根(`wss://.../api-ws/v1/realtime`);可经配置覆盖。 */
   readonly baseURL: string;
-  /** 系统提示(映射 session.instructions);缺省由 LlmRequest.system 提供。 */
+  /** 系统提示(映射 session.instructions)。 */
   readonly instructions?: string;
+  /** 回合切分模式默认值(缺省 'manual');每次 respondToAudio 可覆盖。 */
+  readonly turnDetection?: OmniTurnDetection;
   /** WS 工厂(可注入;缺省用 `ws` 包,惰性 import 避免装配期触网)。 */
   readonly wsFactory?: OmniWsFactory;
 }
@@ -68,6 +81,8 @@ export interface QwenOmniLlmOptions {
 export interface OmniAudioOptions {
   /** 系统提示覆盖(映射 session.instructions)。 */
   readonly instructions?: string;
+  /** 回合切分模式覆盖(缺省取构造时默认值)。 */
+  readonly turnDetection?: OmniTurnDetection;
 }
 
 /** 默认 WS 工厂:惰性包裹 `ws` 包(node 环境)。 */
@@ -78,14 +93,13 @@ const defaultWsFactory: OmniWsFactory = (url, opts) => {
   return new WS(url, { headers: opts.headers });
 };
 
-export class QwenOmniLlm implements LlmProvider {
+export class QwenOmniLlm {
   readonly id: string;
   readonly model: string;
-  /** omni realtime 文本面不走 Anthropic/OpenAI function-calling 工具通道。 */
-  readonly supportsTools = false;
   readonly #apiKey: string;
   readonly #baseURL: string;
   readonly #instructions: string | undefined;
+  readonly #turnDetection: OmniTurnDetection;
   readonly #wsFactory: OmniWsFactory;
 
   constructor(opts: QwenOmniLlmOptions) {
@@ -95,6 +109,7 @@ export class QwenOmniLlm implements LlmProvider {
     // 去尾随斜杠(与 OpenAiCompatLlm 对称);拼 ?model= 时再加查询串。
     this.#baseURL = opts.baseURL.replace(/\/+$/, '');
     this.#instructions = opts.instructions;
+    this.#turnDetection = opts.turnDetection ?? 'manual';
     this.#wsFactory = opts.wsFactory ?? defaultWsFactory;
   }
 
@@ -103,29 +118,11 @@ export class QwenOmniLlm implements LlmProvider {
     return this.#baseURL;
   }
 
-  // ───────────────────────────── 文本兼容面(LlmProvider)─────────────────────────────
-
-  /** 文本流式:把 prompt 经 WS(modalities:["text"])送出,聚合 response.text.delta 回吐。 */
-  async *stream(req: LlmRequest, signal?: AbortSignal): AsyncIterable<string> {
-    const instructions = this.#instructions ?? req.system;
-    const userText = lastUserText(req);
-    for await (const ev of this.#run({ instructions, userText, audio: null }, signal)) {
-      if (ev.type === 'text') yield ev.text;
-    }
-  }
-
-  /** 非流式:聚合 stream 为整串(承 §3.3 厂商无感)。 */
-  async complete(req: LlmRequest, signal?: AbortSignal): Promise<string> {
-    let out = '';
-    for await (const t of this.stream(req, signal)) out += t;
-    return out;
-  }
-
-  // ───────────────────────────── 真多模态面(audio-in → 文本流)─────────────────────────────
+  // ───────────────────────────── 音频面(audio-in → 文本流)─────────────────────────────
 
   /**
    * audio-in 直路:吃 PCM 块流 → input_audio_buffer.append(base64),
-   * yield transcript(用户话语)+ text(回复增量)+ end。供后续 runtime 接 VoiceLoop。
+   * yield transcript(用户话语)+ text(回复增量)+ end。供后续 runtime 接 VoiceLoop(路径B)。
    */
   respondToAudio(
     audio: AsyncIterable<PcmChunk>,
@@ -133,17 +130,22 @@ export class QwenOmniLlm implements LlmProvider {
     signal?: AbortSignal,
   ): AsyncIterable<OmniEvent> {
     const instructions = opts?.instructions ?? this.#instructions;
-    return this.#run({ instructions, userText: null, audio }, signal);
+    const turnDetection = opts?.turnDetection ?? this.#turnDetection;
+    return this.#run({ instructions, audio, turnDetection }, signal);
   }
 
   // ───────────────────────────── 会话编排 ─────────────────────────────
 
   /**
-   * 一次会话:建连 → session.created → session.update → 送文本/音频 → 收事件 → response.done 关 WS。
+   * 一次会话:建连 → session.created → session.update → 送音频 → 收事件 → response.done 关 WS。
    * 用一个事件队列把 WS 回调桥接为 async 生成器;AbortSignal abort → 关 WS、终止生成器(§3.2 真打断)。
    */
   async *#run(
-    payload: { instructions: string | undefined; userText: string | null; audio: AsyncIterable<PcmChunk> | null },
+    payload: {
+      instructions: string | undefined;
+      audio: AsyncIterable<PcmChunk>;
+      turnDetection: OmniTurnDetection;
+    },
     signal?: AbortSignal,
   ): AsyncIterable<OmniEvent> {
     if (signal?.aborted) throw new DOMException('aborted', 'AbortError'); // fail-fast,不建连
@@ -153,7 +155,6 @@ export class QwenOmniLlm implements LlmProvider {
 
     // 事件桥:WS 回调 push 进队列,生成器从队列拉(背压简单,一问一答短连足够)。
     const queue = new EventQueue<OmniEvent>();
-    let opened = false;
     let closed = false;
 
     const cleanup = (): void => {
@@ -173,10 +174,6 @@ export class QwenOmniLlm implements LlmProvider {
     };
     if (signal !== undefined) signal.addEventListener('abort', onAbort, { once: true });
 
-    ws.on('open', () => {
-      opened = true;
-      // 等 session.created 再发数据(部分实现 open 即可发,但以 session.created 为准更稳)。
-    });
     ws.on('error', (err) => {
       queue.fail(new Error(`qwen-omni WS 连接错误: ${describeErr(err)}`));
       cleanup();
@@ -200,7 +197,6 @@ export class QwenOmniLlm implements LlmProvider {
       }
     } finally {
       cleanup();
-      void opened; // opened 仅用于调试/未来心跳;此处显式 void 以满足 noUnusedLocals 风格
     }
   }
 
@@ -208,12 +204,16 @@ export class QwenOmniLlm implements LlmProvider {
   #handleServerEvent(
     msg: ServerEvent,
     ws: OmniWsLike,
-    payload: { instructions: string | undefined; userText: string | null; audio: AsyncIterable<PcmChunk> | null },
+    payload: {
+      instructions: string | undefined;
+      audio: AsyncIterable<PcmChunk>;
+      turnDetection: OmniTurnDetection;
+    },
     queue: EventQueue<OmniEvent>,
   ): void {
     switch (msg.type) {
       case 'session.created': {
-        // 配置会话:只要文本输出 + PCM 输入;turn_detection 用服务端 VAD(音频面)。
+        // 配置会话:只要文本输出 + PCM 输入;turn_detection 按模式(manual=null / server_vad=自动)。
         ws.send(
           JSON.stringify({
             type: 'session.update',
@@ -221,26 +221,12 @@ export class QwenOmniLlm implements LlmProvider {
               modalities: ['text'],
               input_audio_format: 'pcm',
               ...(payload.instructions !== undefined ? { instructions: payload.instructions } : {}),
-              ...(payload.audio !== null
-                ? { turn_detection: { type: 'server_vad' } }
-                : { turn_detection: null }),
+              turn_detection: payload.turnDetection === 'server_vad' ? { type: 'server_vad' } : null,
             },
           }),
         );
-        // 文本面:直接发用户文本内容项 + response.create。
-        if (payload.userText !== null) {
-          ws.send(
-            JSON.stringify({
-              type: 'conversation.item.create',
-              item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: payload.userText }] },
-            }),
-          );
-          ws.send(JSON.stringify({ type: 'response.create' }));
-        }
-        // 音频面:流式 append 音频块(server_vad 自动触发 response,或末尾 commit 兜底)。
-        if (payload.audio !== null) {
-          void this.#pumpAudio(payload.audio, ws, queue);
-        }
+        // 流式 append 音频块;manual 模式送完显式 commit+response.create,server_vad 由服务端自动触发。
+        void this.#pumpAudio(payload.audio, ws, queue, payload.turnDetection);
         return;
       }
       case 'response.text.delta':
@@ -269,16 +255,26 @@ export class QwenOmniLlm implements LlmProvider {
     }
   }
 
-  /** 流式把 PCM 块经 input_audio_buffer.append 送出;送完 commit(手动兜底,server_vad 时无害)。 */
-  async #pumpAudio(audio: AsyncIterable<PcmChunk>, ws: OmniWsLike, queue: EventQueue<OmniEvent>): Promise<void> {
+  /**
+   * 流式把 PCM 块经 input_audio_buffer.append 送出。
+   * manual 模式:送完发 commit + response.create 触发合成(适配有限音频段)。
+   * server_vad 模式:不发手动触发(服务端 VAD 自动判端点,避免重复/冲突响应)。
+   */
+  async #pumpAudio(
+    audio: AsyncIterable<PcmChunk>,
+    ws: OmniWsLike,
+    queue: EventQueue<OmniEvent>,
+    turnDetection: OmniTurnDetection,
+  ): Promise<void> {
     try {
       for await (const chunk of audio) {
         if (queue.ended) return;
         ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: pcmChunkToBase64(chunk) }));
       }
-      // 送完:commit + response.create(server_vad 模式下若已自动触发则为幂等冗余,DashScope 容忍)。
-      ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
-      ws.send(JSON.stringify({ type: 'response.create' }));
+      if (turnDetection === 'manual') {
+        ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+        ws.send(JSON.stringify({ type: 'response.create' }));
+      }
     } catch (err) {
       queue.fail(new Error(`qwen-omni 送音频失败: ${describeErr(err)}`));
     }
@@ -370,7 +366,7 @@ function parseMessage(data: unknown): ServerEvent | undefined {
   }
 }
 
-/** PcmChunk(Int16Array)→ base64(小端 16-bit / mono,DashScope realtime 约定)。 */
+/** PcmChunk(Int16Array)→ base64(小端 16-bit / mono,DashScope realtime 约定:16kHz 输入)。 */
 function pcmChunkToBase64(chunk: PcmChunk): string {
   const samples = chunk.samples;
   const bytes = new Uint8Array(samples.length * 2);
@@ -379,16 +375,6 @@ function pcmChunkToBase64(chunk: PcmChunk): string {
     view.setInt16(i * 2, samples[i] ?? 0, true); // little-endian s16le
   }
   return Buffer.from(bytes).toString('base64');
-}
-
-/** 取 LlmRequest 末条用户消息文本(omni 文本面只送当前轮 prompt;历史由 instructions/上层维护)。 */
-function lastUserText(req: LlmRequest): string {
-  for (let i = req.messages.length - 1; i >= 0; i--) {
-    const m = req.messages[i];
-    if (m !== undefined && m.role === 'user') return m.content;
-  }
-  // 无 user 消息:退化为拼接全部 content(尽量不空送)。
-  return req.messages.map((m) => m.content).join('\n');
 }
 
 function describeErr(err: unknown): string {

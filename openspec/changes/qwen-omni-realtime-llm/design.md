@@ -1,4 +1,27 @@
-# 设计:Qwen Omni Realtime LLM Provider(audio-in → 文本流)
+# 设计:Qwen Omni Realtime Provider(audio-in → 文本流,纯音频面)
+
+## 0. 修订记录(2026-06-24 官方文档复核)
+
+派研究子代理逐条复核 DashScope 官方 client-events / realtime 文档后,修正两处:
+
+1. **❌ 文本兼容面(路径 A)移除**:早稿设 `QwenOmniLlm implements LlmProvider` 的 `stream`/`complete`,用
+   `conversation.item.create` + `{type:'message', content:[{type:'input_text'}]}` 把纯文本当用户消息送入,
+   以便当普通 LLM 直接装进 registry(VoiceLoop 零改替换)。但官方 client-events 文档明确:realtime 的
+   `conversation.item.create` **当前仅接受 `function_call_output` 类型**,且**音频输入是必需的**——该文本路径
+   协议上不成立。故 `QwenOmniLlm` **不再 implements LlmProvider、删 stream/complete、从 registerLlm 注销**,
+   只保留音频面 `respondToAudio`。**纯文本 LLM 走已实测可用的 OpenAI 兼容 `qwen` provider**(registry.ts)。
+2. **❌ model id 更正**:官方「模型大全」目录可用 realtime id 为 `qwen3-omni-flash-realtime`(无 `.5`)、
+   `qwen-omni-turbo-realtime`,且**有**日期快照后缀(如 `-2025-12-01`)与 `-latest` 别名;早稿 `qwen3.5-omni-*`
+   仅在教程页出现,纳入前需实测账号可用性。示例默认改用 `qwen3-omni-flash-realtime`。
+3. **commit 触发改为按 turn_detection 分支**:`respondToAudio` 默认 `turnDetection:'manual'`(turn_detection=null,
+   送完音频显式 commit+response.create——适配 VoiceLoop 已切好的有限音频段);`server_vad` 模式下**不发**手动
+   commit/response.create(否则与服务端自动触发冲突)。删去早稿「无条件兜底 commit」。
+4. **删未证实假设**:「60 秒无消息断连」官方 realtime 文档未明确,移除该注记(仅 120 分钟会话上限属实)。
+
+以下 §1~§4 为原始设计;与本节冲突处以本节为准。已确认无误项:端点根 + `?model=`、鉴权 header、
+`session.update` 的 `modalities:['text']`/`input_audio_format:'pcm'`/`instructions`/`turn_detection`、
+服务端事件名(`response.text.delta`/`response.audio_transcript.delta`/`input_audio_transcription.completed`
+字段 `transcript`/`response.done`)、输入 16-bit/16kHz/mono PCM base64。
 
 ## 1. DashScope Realtime WS 协议关键点(已核实)
 

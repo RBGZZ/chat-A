@@ -1,35 +1,29 @@
 import { describe, it, expect } from 'vitest';
-import {
-  QwenOmniLlm,
-  createLlm,
-  listLlmProviders,
-  QWEN_DASHSCOPE_REALTIME_URL,
-} from '../src/index';
+import { QwenOmniLlm, QWEN_DASHSCOPE_REALTIME_URL } from '../src/index';
 import type { OmniEvent, OmniWsLike, OmniWsFactory } from '../src/qwen-omni-llm';
 import type { PcmChunk } from '../src/audio';
 
 /**
  * FakeWs:同步驱动的 mock WebSocket(不触网)。
  * - 记录构造 url/headers 与所有 send 出的 JSON 帧;
- * - `emitOpen()` / `emitMessage(obj)` / `emitError(e)` / `emitClose(code)` 由测试驱动;
- * - `script` 钩子:每次收到某类型客户端帧后,自动回放服务端事件,模拟 DashScope 时序。
+ * - `emitOpen()` / `emitMessage(obj)` / `emitError(e)` / `emitClose(code)` 由测试驱动。
  */
 class FakeWs implements OmniWsLike {
-  static last: FakeWs | undefined;
   readonly url: string;
   readonly headers: Record<string, string>;
   readonly sent: Array<Record<string, unknown>> = [];
   closed = false;
 
-  #handlers: { open?: () => void; message?: (d: unknown) => void; error?: (e: unknown) => void; close?: (c?: number) => void } =
-    {};
-  /** 收到某 type 的客户端帧后自动触发的服务端回放(测试装配)。 */
-  onClientSend?: (frame: Record<string, unknown>, ws: FakeWs) => void;
+  #handlers: {
+    open?: () => void;
+    message?: (d: unknown) => void;
+    error?: (e: unknown) => void;
+    close?: (c?: number) => void;
+  } = {};
 
   constructor(url: string, headers: Record<string, string>) {
     this.url = url;
     this.headers = headers;
-    FakeWs.last = this;
   }
 
   on(event: 'open', cb: () => void): void;
@@ -41,9 +35,7 @@ class FakeWs implements OmniWsLike {
   }
 
   send(data: string): void {
-    const frame = JSON.parse(data) as Record<string, unknown>;
-    this.sent.push(frame);
-    this.onClientSend?.(frame, this);
+    this.sent.push(JSON.parse(data) as Record<string, unknown>);
   }
 
   close(): void {
@@ -69,23 +61,23 @@ class FakeWs implements OmniWsLike {
   }
 }
 
-function makeFactory(): { factory: OmniWsFactory; ws: () => FakeWs } {
+function makeFactory(): { factory: OmniWsFactory; ws: () => FakeWs | undefined } {
   let created: FakeWs | undefined;
   const factory: OmniWsFactory = (url, opts) => {
     created = new FakeWs(url, opts.headers);
     return created;
   };
-  return { factory, ws: () => created as FakeWs };
+  return { factory, ws: () => created };
 }
 
 function makeOmni(over: Partial<ConstructorParameters<typeof QwenOmniLlm>[0]> = {}): {
   llm: QwenOmniLlm;
-  ws: () => FakeWs;
+  ws: () => FakeWs | undefined;
 } {
   const { factory, ws } = makeFactory();
   const llm = new QwenOmniLlm({
     id: 'qwen-omni',
-    model: 'qwen3.5-omni-flash-realtime',
+    model: 'qwen3-omni-flash-realtime',
     apiKey: 'sk-test',
     baseURL: QWEN_DASHSCOPE_REALTIME_URL,
     wsFactory: factory,
@@ -104,71 +96,35 @@ function pcm(samples: number[], sampleRate = 16000): PcmChunk {
   return { samples: Int16Array.from(samples), sampleRate, channels: 1 };
 }
 
-describe('QwenOmniLlm / 文本兼容面 stream', () => {
-  it('建连→session.created→发 session.update(text)+文本项+response.create,聚合 text.delta', async () => {
-    const { llm, ws } = makeOmni();
-    // 服务端时序:open 后我们手动 emit session.created;Provider 据此发数据;然后回 delta + done。
-    const stream = llm.stream({ system: '你是小雪', messages: [{ role: 'user', content: '你好呀' }] });
-    const iter = (async () => {
-      const out: string[] = [];
-      for await (const t of stream) out.push(t);
-      return out;
-    })();
+async function* audioOf(...chunks: PcmChunk[]): AsyncIterable<PcmChunk> {
+  for (const c of chunks) yield c;
+}
 
-    // 驱动 WS 时序(microtask 让生成器先挂上监听)。
-    await Promise.resolve();
-    const w = ws();
-    w.emitOpen();
-    w.emitMessage({ type: 'session.created' });
-    // 此时 Provider 应已发出 session.update / conversation.item.create / response.create
-    w.emitMessage({ type: 'response.text.delta', delta: '你' });
-    w.emitMessage({ type: 'response.text.delta', delta: '好' });
-    w.emitMessage({ type: 'response.done' });
-
-    const tokens = await iter;
-    expect(tokens.join('')).toBe('你好');
-
-    // 断言请求帧
-    const upd = w.sentOf('session.update');
-    expect((upd?.['session'] as { modalities?: unknown }).modalities).toEqual(['text']);
-    const item = w.sentOf('conversation.item.create');
-    const content = (item?.['item'] as { content?: Array<{ type: string; text: string }> }).content;
-    expect(content?.[0]).toEqual({ type: 'input_text', text: '你好呀' });
-    expect(w.sentOf('response.create')).toBeDefined();
-    // 鉴权 header 带上,但只在 headers,不泄进帧体
-    expect(w.headers['Authorization']).toBe('Bearer sk-test');
-    // URL 带 ?model=
-    expect(w.url).toContain(`?model=${encodeURIComponent('qwen3.5-omni-flash-realtime')}`);
-    expect(w.closed).toBe(true); // done 后关 WS
+describe('QwenOmniLlm / 构造', () => {
+  it('id/model 透传;baseURL 去尾随斜杠', () => {
+    const { llm } = makeOmni({ baseURL: 'wss://self-hosted/realtime/' });
+    expect(llm.id).toBe('qwen-omni');
+    expect(llm.model).toBe('qwen3-omni-flash-realtime');
+    expect(llm.baseURL).toBe('wss://self-hosted/realtime');
   });
 
-  it('complete 聚合为整串', async () => {
-    const { llm, ws } = makeOmni();
-    const p = llm.complete({ system: '', messages: [{ role: 'user', content: 'hi' }] });
-    await Promise.resolve();
-    const w = ws();
-    w.emitOpen();
-    w.emitMessage({ type: 'session.created' });
-    w.emitMessage({ type: 'response.text.delta', delta: 'A' });
-    w.emitMessage({ type: 'response.text.delta', delta: 'B' });
-    w.emitMessage({ type: 'response.completed' });
-    expect(await p).toBe('AB');
+  it('不再实现 LlmProvider(无 stream/complete)——音频面专用', () => {
+    const { llm } = makeOmni();
+    expect((llm as unknown as { stream?: unknown }).stream).toBeUndefined();
+    expect((llm as unknown as { complete?: unknown }).complete).toBeUndefined();
+    expect(typeof llm.respondToAudio).toBe('function');
   });
 });
 
-describe('QwenOmniLlm / 真多模态面 respondToAudio', () => {
-  it('喂 PCM → input_audio_buffer.append(base64);收 transcript + text + end', async () => {
+describe('QwenOmniLlm / respondToAudio(audio-in → 文本流)', () => {
+  it('manual 默认:turn_detection=null;送完发 commit+response.create;收 transcript+text+end', async () => {
     const { llm, ws } = makeOmni();
-    async function* audio(): AsyncIterable<PcmChunk> {
-      yield pcm([1, 2, 3]);
-      yield pcm([4, 5]);
-    }
-    const evPromise = collectEvents(llm.respondToAudio(audio()));
+    const evPromise = collectEvents(llm.respondToAudio(audioOf(pcm([1, 2, 3]), pcm([4, 5]))));
     await Promise.resolve();
-    const w = ws();
+    const w = ws() as FakeWs;
     w.emitOpen();
     w.emitMessage({ type: 'session.created' });
-    // session.created 后 Provider 开始 pump 音频(异步)。等几个 microtask 让 append 发出。
+    // session.created 后开始 pump 音频(异步)。等一个宏任务让 append+commit+response.create 发出。
     await new Promise((r) => setTimeout(r, 0));
     w.emitMessage({
       type: 'conversation.item.input_audio_transcription.completed',
@@ -186,12 +142,58 @@ describe('QwenOmniLlm / 真多模态面 respondToAudio', () => {
       { type: 'end' },
     ]);
 
-    // 音频被 base64 送出(至少一帧 append),且 session.update 用 server_vad。
+    // 音频被 base64 送出(至少两帧 append)。
     const appends = w.sent.filter((f) => f['type'] === 'input_audio_buffer.append');
     expect(appends.length).toBeGreaterThanOrEqual(2);
     expect(typeof appends[0]?.['audio']).toBe('string');
+    // manual 模式:turn_detection=null + 显式 commit + response.create。
+    const upd = w.sentOf('session.update');
+    expect((upd?.['session'] as { turn_detection?: unknown }).turn_detection).toBeNull();
+    expect((upd?.['session'] as { modalities?: unknown }).modalities).toEqual(['text']);
+    expect((upd?.['session'] as { input_audio_format?: unknown }).input_audio_format).toBe('pcm');
+    expect(w.sentOf('input_audio_buffer.commit')).toBeDefined();
+    expect(w.sentOf('response.create')).toBeDefined();
+    // 鉴权只在 header,URL 带 ?model=。
+    expect(w.headers['Authorization']).toBe('Bearer sk-test');
+    expect(w.url).toContain(`?model=${encodeURIComponent('qwen3-omni-flash-realtime')}`);
+    expect(w.closed).toBe(true);
+  });
+
+  it('server_vad 模式:turn_detection=server_vad;不发手动 commit/response.create', async () => {
+    const { llm, ws } = makeOmni();
+    const evPromise = collectEvents(
+      llm.respondToAudio(audioOf(pcm([1, 2])), { turnDetection: 'server_vad' }),
+    );
+    await Promise.resolve();
+    const w = ws() as FakeWs;
+    w.emitOpen();
+    w.emitMessage({ type: 'session.created' });
+    await new Promise((r) => setTimeout(r, 0));
+    w.emitMessage({ type: 'response.text.delta', delta: '好' });
+    w.emitMessage({ type: 'response.done' });
+
+    const events = await evPromise;
+    expect(events).toEqual([{ type: 'text', text: '好' }, { type: 'end' }]);
+
     const upd = w.sentOf('session.update');
     expect((upd?.['session'] as { turn_detection?: { type?: string } }).turn_detection?.type).toBe('server_vad');
+    // server_vad 自动触发:不发手动 commit/response.create(避免冲突)。
+    expect(w.sentOf('input_audio_buffer.commit')).toBeUndefined();
+    expect(w.sentOf('response.create')).toBeUndefined();
+  });
+
+  it('instructions 映射 session.instructions', async () => {
+    const { llm, ws } = makeOmni();
+    const evPromise = collectEvents(llm.respondToAudio(audioOf(pcm([1])), { instructions: '你是小雪' }));
+    await Promise.resolve();
+    const w = ws() as FakeWs;
+    w.emitOpen();
+    w.emitMessage({ type: 'session.created' });
+    await new Promise((r) => setTimeout(r, 0));
+    w.emitMessage({ type: 'response.done' });
+    await evPromise;
+    const upd = w.sentOf('session.update');
+    expect((upd?.['session'] as { instructions?: string }).instructions).toBe('你是小雪');
   });
 });
 
@@ -200,27 +202,20 @@ describe('QwenOmniLlm / AbortSignal 真取消', () => {
     const { llm, ws } = makeOmni();
     const ac = new AbortController();
     ac.abort();
-    await expect(
-      (async () => {
-        for await (const _ of llm.stream({ system: '', messages: [{ role: 'user', content: 'x' }] }, ac.signal)) {
-          /* noop */
-        }
-      })(),
-    ).rejects.toThrow(/abort/i);
+    await expect(collectEvents(llm.respondToAudio(audioOf(pcm([1])), undefined, ac.signal))).rejects.toThrow(
+      /abort/i,
+    );
     expect(ws()).toBeUndefined(); // 未建连
   });
 
   it('流式中 abort → 关 WS、生成器终止(不再 yield)', async () => {
     const { llm, ws } = makeOmni();
     const ac = new AbortController();
-    const collected: string[] = [];
+    const collected: OmniEvent[] = [];
     const run = (async () => {
       try {
-        for await (const t of llm.stream(
-          { system: '', messages: [{ role: 'user', content: 'x' }] },
-          ac.signal,
-        )) {
-          collected.push(t);
+        for await (const e of llm.respondToAudio(audioOf(pcm([1])), undefined, ac.signal)) {
+          collected.push(e);
         }
       } catch (err) {
         return err;
@@ -229,14 +224,14 @@ describe('QwenOmniLlm / AbortSignal 真取消', () => {
     })();
 
     await Promise.resolve();
-    const w = ws();
+    const w = ws() as FakeWs;
     w.emitOpen();
     w.emitMessage({ type: 'session.created' });
     w.emitMessage({ type: 'response.text.delta', delta: '半' });
     await new Promise((r) => setTimeout(r, 0));
     ac.abort(); // 中途打断
     const err = await run;
-    expect(collected).toEqual(['半']); // abort 前的已收
+    expect(collected).toEqual([{ type: 'text', text: '半' }]); // abort 前已收
     expect(w.closed).toBe(true); // WS 被关
     expect((err as Error)?.name === 'AbortError' || /abort/i.test(String(err))).toBe(true);
   });
@@ -245,13 +240,9 @@ describe('QwenOmniLlm / AbortSignal 真取消', () => {
 describe('QwenOmniLlm / 错误降级', () => {
   it('error 事件 → 抛清晰错误(供上层 catch 降级)', async () => {
     const { llm, ws } = makeOmni();
-    const run = (async () => {
-      for await (const _ of llm.stream({ system: '', messages: [{ role: 'user', content: 'x' }] })) {
-        /* noop */
-      }
-    })();
+    const run = collectEvents(llm.respondToAudio(audioOf(pcm([1]))));
     await Promise.resolve();
-    const w = ws();
+    const w = ws() as FakeWs;
     w.emitOpen();
     w.emitMessage({ type: 'session.created' });
     w.emitMessage({ type: 'error', error: { code: 'InvalidApiKey', message: '鉴权失败' } });
@@ -261,64 +252,21 @@ describe('QwenOmniLlm / 错误降级', () => {
 
   it('WS error(连接层) → 抛清晰错误', async () => {
     const { llm, ws } = makeOmni();
-    const run = (async () => {
-      for await (const _ of llm.stream({ system: '', messages: [{ role: 'user', content: 'x' }] })) {
-        /* noop */
-      }
-    })();
+    const run = collectEvents(llm.respondToAudio(audioOf(pcm([1]))));
     await Promise.resolve();
-    const w = ws();
+    const w = ws() as FakeWs;
     w.emitError(new Error('ECONNREFUSED'));
     await expect(run).rejects.toThrow(/qwen-omni WS 连接错误.*ECONNREFUSED/);
   });
 
   it('意外 close(未 done 就关) → 抛错', async () => {
     const { llm, ws } = makeOmni();
-    const run = (async () => {
-      for await (const _ of llm.stream({ system: '', messages: [{ role: 'user', content: 'x' }] })) {
-        /* noop */
-      }
-    })();
+    const run = collectEvents(llm.respondToAudio(audioOf(pcm([1]))));
     await Promise.resolve();
-    const w = ws();
+    const w = ws() as FakeWs;
     w.emitOpen();
     w.emitMessage({ type: 'session.created' });
     w.emitClose(1006);
     await expect(run).rejects.toThrow(/qwen-omni WS 意外关闭/);
-  });
-});
-
-describe('providers/registry(qwen-omni 装配)', () => {
-  it('qwen-omni 已登记,与纯文本 qwen 区分', () => {
-    expect(listLlmProviders()).toContain('qwen-omni');
-    expect(listLlmProviders()).toContain('qwen');
-  });
-
-  it('createLlm(qwen-omni) 返回 QwenOmniLlm,id=qwen-omni,baseURL=realtime 端点', () => {
-    const llm = createLlm({ provider: 'qwen-omni', model: 'qwen3.5-omni-flash-realtime', apiKey: 'sk-x' });
-    expect(llm).toBeInstanceOf(QwenOmniLlm);
-    expect(llm.id).toBe('qwen-omni');
-    expect((llm as QwenOmniLlm).baseURL).toBe(QWEN_DASHSCOPE_REALTIME_URL);
-    expect(llm.supportsTools).toBe(false);
-  });
-
-  it('缺 apiKey 抛清晰错误', () => {
-    expect(() => createLlm({ provider: 'qwen-omni', model: 'm' })).toThrow(/qwen-omni/);
-    expect(() => createLlm({ provider: 'qwen-omni', model: 'm' })).toThrow(
-      /API key|CHAT_A_LLM_API_KEY|DASHSCOPE/,
-    );
-    expect(() => createLlm({ provider: 'qwen-omni', model: 'm', apiKey: '' })).toThrow(
-      /API key|CHAT_A_LLM_API_KEY|DASHSCOPE/,
-    );
-  });
-
-  it('baseURL 可覆盖(去尾随斜杠)', () => {
-    const llm = createLlm({
-      provider: 'qwen-omni',
-      model: 'm',
-      apiKey: 'sk-x',
-      baseURL: 'wss://self-hosted/realtime/',
-    });
-    expect((llm as QwenOmniLlm).baseURL).toBe('wss://self-hosted/realtime');
   });
 });
