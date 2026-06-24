@@ -5,3 +5,4 @@ export * from './sqlite-store';
 export * from './config-loader';
 export * from './extractor';
 export * from './reflector';
+export * from './consolidation';

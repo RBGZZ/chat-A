@@ -1,10 +1,12 @@
 import type {
   ChatMessage,
+  ConsolidationTrace,
   MemoryInput,
   MemoryKind,
   MemoryRecord,
   MemoryStore,
   MemorySubject,
+  MemoryUpdate,
   Pad,
   Person,
   RecallByVectorOptions,
@@ -21,6 +23,7 @@ import {
   cosineSimilarity,
   decayCloseness,
   decayFactor,
+  discardedLastSeenAt,
   emotionResonance,
   entityKeys,
   jaccardSimilarity,
@@ -33,11 +36,13 @@ import {
   reciprocalRankFusion,
   reinforceImportance,
   resolveAttribution,
+  resolveConsolidationConfig,
   resolveMemoryConfig,
   resolveMemoryKind,
   ShingleCache,
   tokenize,
   windowRange,
+  type ConsolidationConfig,
   type MemoryConfig,
   type PprEdge,
   type RawRecallSignals,
@@ -85,6 +90,8 @@ type Cand = {
 
 export interface InMemoryMemoryStoreOptions {
   readonly config?: Partial<MemoryConfig>;
+  /** 夜间巩固行为配置(承 §5.8;discard 加速衰减参数等;省略用默认)。 */
+  readonly consolidationConfig?: Partial<ConsolidationConfig>;
   /** 注入时钟(确定性测试,§3.2)。 */
   readonly now?: () => number;
 }
@@ -122,12 +129,16 @@ export class InMemoryMemoryStore implements MemoryStore {
    * 无条目 = 尚无互动记录(getCloseness 落到 initialCloseness);存数值快照,惰性衰减读时实时算、不写回。
    */
   readonly #closeness = new Map<string, { closeness: number; updatedAtMs: number }>();
+  /** 巩固决策 trace 顺序日志(镜像 SQLite consolidation_trace 表语义,承 §8.1 可回放)。 */
+  readonly #consolidationTraces: ConsolidationTrace[] = [];
   readonly #cfg: MemoryConfig;
+  readonly #consolidationCfg: ConsolidationConfig;
   readonly #now: () => number;
   #seq = 0;
 
   constructor(opts: InMemoryMemoryStoreOptions = {}) {
     this.#cfg = resolveMemoryConfig(opts.config);
+    this.#consolidationCfg = resolveConsolidationConfig(opts.consolidationConfig);
     this.#now = opts.now ?? Date.now;
     // shingle/签名 LRU 缓存(承 §5.10 B2;与 SQLite 实现共用同一纯函数,零漂移)。
     this.#shingleCache = new ShingleCache(this.#cfg);
@@ -717,6 +728,109 @@ export class InMemoryMemoryStore implements MemoryStore {
       this.#closeness.set(personId, { closeness: next, updatedAtMs: atMs });
     }
     return next;
+  }
+
+  getMemoryById(id: number): MemoryRecord | undefined {
+    const r = this.#byIdIndex.get(id);
+    // 读不写回(承 §5.5):仅返回快照,不触发检索即强化。
+    return r === undefined ? undefined : this.#toRecord(r);
+  }
+
+  updateMemory(id: number, patch: MemoryUpdate): boolean {
+    const r = this.#byIdIndex.get(id);
+    if (r === undefined) return false;
+    // core/pinned 永不被改(承 §5.4/§5.8 决策 3):豁免、返回 false。
+    if (r.pinned || r.memoryKind === 'core') return false;
+    const at = patch.atMs ?? this.#now();
+    // 整块重写正文(承 §5.10 B2②):连带重建规范化键/去重索引/联想边(单一权威重建,与 addMemory 同规则)。
+    if (patch.text !== undefined) {
+      const newNormalized = this.#cfg.normalize(patch.text);
+      if (newNormalized.length === 0) return false; // 空文本不接受(同 addMemory 规则)。
+      if (newNormalized !== r.normalized) {
+        // 1) 从旧 normalized 键解挂、改挂新键(#memories 以 normalized 为键)。
+        this.#memories.delete(r.normalized);
+        // 2) 拆旧 LSH 桶 + 旧实体/邻接边(避免按旧文本残留勾连)。
+        this.#unregisterLsh(id, r.normalized);
+        this.#unlinkEntitiesAndEdges(id);
+        // 3) 写新文本并重建索引。
+        r.text = patch.text;
+        r.normalized = newNormalized;
+        this.#memories.set(newNormalized, r);
+        this.#linkEntitiesAndEdges(id, patch.text, r.personId);
+        this.#registerLsh(id, newNormalized);
+      } else {
+        r.text = patch.text; // 规范化相同(仅大小写/空白差异):只更新原文,索引不变。
+      }
+    }
+    if (patch.importance !== undefined) {
+      r.importance = Math.min(Math.max(patch.importance, 0), 1);
+    }
+    if (patch.memoryKind !== undefined) {
+      r.memoryKind = patch.memoryKind;
+      // memoryKind 升 core ⟹ pinned(承 §5.4 core ⟺ pinned 不变式,与 resolveMemoryKind 一致)。
+      if (patch.memoryKind === 'core') r.pinned = true;
+    }
+    // 重写视作"修改时刻"刷新近因(整块重写后的 clean summary 是新鲜的)。
+    r.lastSeenAtMs = at;
+    return true;
+  }
+
+  markDiscarded(id: number, atMs?: number): boolean {
+    const r = this.#byIdIndex.get(id);
+    if (r === undefined) return false;
+    // core/pinned 永不参与(承 §5.4):豁免、返回 false。
+    if (r.pinned || r.memoryKind === 'core') return false;
+    const at = atMs ?? this.#now();
+    // 保守删 = 加速衰减(承 §5.8 决策 3):推 last_seen 到远古 + 压低 importance,令单一权威衰减把强度趋近 0。
+    // 不改 recall 热路径、不引入新过滤列(承硬回归线);自然淡出召回。
+    r.lastSeenAtMs = discardedLastSeenAt(at, {
+      halfLifeDays: this.#cfg.halfLifeDays,
+      discardDecayHalfLives: this.#consolidationCfg.discardDecayHalfLives,
+    });
+    r.importance = Math.min(r.importance, this.#consolidationCfg.discardImportanceFloor);
+    return true;
+  }
+
+  recordConsolidationTrace(trace: ConsolidationTrace): void {
+    this.#consolidationTraces.push(trace);
+  }
+
+  consolidationTraces(unit?: string): readonly ConsolidationTrace[] {
+    // 顺序日志即时序;给出 unit 则过滤(承 §8.1 可回放/审计)。
+    return unit === undefined
+      ? [...this.#consolidationTraces]
+      : this.#consolidationTraces.filter((t) => t.unit === unit);
+  }
+
+  /** 拆某记忆的 LSH 桶 + shingle 缓存条目(更新文本时用;与 #registerLsh 对称)。 */
+  #unregisterLsh(memoryId: number, normalized: string): void {
+    const { signature } = this.#shingleCache.get(normalized);
+    for (const key of lshBandKeys(signature, this.#cfg.lshBands)) {
+      const bucket = this.#lshBuckets.get(key);
+      if (bucket === undefined) continue;
+      bucket.delete(memoryId);
+      if (bucket.size === 0) this.#lshBuckets.delete(key);
+    }
+    this.#shingleById.delete(memoryId);
+  }
+
+  /** 拆某记忆参与的全部实体索引与邻接边(整块重写改文本时用;与 #linkEntitiesAndEdges 对称)。 */
+  #unlinkEntitiesAndEdges(memoryId: number): void {
+    // 1) 从所有实体键的 owner 集合里移除自己。
+    for (const [key, owners] of this.#entityIndex) {
+      if (owners.delete(memoryId) && owners.size === 0) this.#entityIndex.delete(key);
+    }
+    // 2) 拆所有以本记忆为端点的无向边 + 邻接索引。
+    const myNeighbors = this.#adjacency.get(memoryId);
+    if (myNeighbors !== undefined) {
+      for (const other of myNeighbors) {
+        const a = Math.min(memoryId, other);
+        const b = Math.max(memoryId, other);
+        this.#edgeWeight.delete(`${a}:${b}`);
+        this.#adjacency.get(other)?.delete(memoryId);
+      }
+      this.#adjacency.delete(memoryId);
+    }
   }
 
   getState(key: string): string | undefined {

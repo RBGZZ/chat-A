@@ -1,11 +1,13 @@
 import { DatabaseSync } from 'node:sqlite';
 import type {
   ChatMessage,
+  ConsolidationTrace,
   MemoryInput,
   MemoryKind,
   MemoryRecord,
   MemoryStore,
   MemorySubject,
+  MemoryUpdate,
   Pad,
   Person,
   RecallByVectorOptions,
@@ -23,6 +25,7 @@ import {
   decayCloseness,
   decayFactor,
   decodeEmbedding,
+  discardedLastSeenAt,
   emotionResonance,
   encodeEmbedding,
   entityKeys,
@@ -36,11 +39,13 @@ import {
   reciprocalRankFusion,
   reinforceImportance,
   resolveAttribution,
+  resolveConsolidationConfig,
   resolveMemoryConfig,
   resolveMemoryKind,
   ShingleCache,
   tokenize,
   windowRange,
+  type ConsolidationConfig,
   type MemoryConfig,
   type PprEdge,
   type RawRecallSignals,
@@ -48,7 +53,7 @@ import {
 } from './config';
 
 /** 当前代码支持的记忆库 schema 版本。每次破坏性/累加性变更 +1 并新增一条迁移。 */
-export const CURRENT_SCHEMA_VERSION = 8;
+export const CURRENT_SCHEMA_VERSION = 9;
 
 /**
  * 迁移步骤上下文:主用户花名册条目 + 记忆重要性初值经此注入(承 §3.2 行为即配置),
@@ -204,6 +209,22 @@ const MIGRATIONS: Record<number, (db: DatabaseSync, ctx: MigrationContext) => vo
     db.exec(`ALTER TABLE memories ADD COLUMN embedding_dim INTEGER;`); // 维度;KNN 时据此跳过维度不一致行。
     // 无 backfill:存量行 embedding 恒 NULL(语义索引是可重建派生,承 §5.6 单一真相源)。
   },
+  9(db) {
+    // 巩固决策 trace(承 §8.1 可回放 / §5.1 夜间巩固):落每次离线调和的 diff、惊奇 gap、discard 理由,
+    // 使"为什么改/删了这条记忆"可重建。结构化、追加写、与既有 trace 无耦合(纯加法)。
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS consolidation_trace(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        unit TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        memory_id INTEGER,
+        reason TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        detail TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_consolidation_trace_unit ON consolidation_trace(unit);
+    `);
+  },
 };
 
 /**
@@ -256,10 +277,23 @@ function linkEntitiesAndEdges(
   }
 }
 
+/**
+ * 拆某记忆参与的全部实体索引与邻接边(整块重写改文本时用;与 linkEntitiesAndEdges 对称)。
+ * 在 updateMemory 的写事务内调用,与 INSERT 新实体/边同一原子提交(承 §3.2)。
+ */
+function unlinkEntitiesAndEdges(db: DatabaseSync, memoryId: number): void {
+  // 1) 拆所有以本记忆为端点的无向边(a 或 b 命中)。
+  db.prepare(`DELETE FROM memory_edges WHERE a = ? OR b = ?`).run(memoryId, memoryId);
+  // 2) 拆本记忆的实体索引(它持有的全部实体键)。
+  db.prepare(`DELETE FROM memory_entities WHERE memory_id = ?`).run(memoryId);
+}
+
 export interface SqliteMemoryStoreOptions {
   /** DB 文件路径;':memory:' 为内存库(测试用)。 */
   readonly path: string;
   readonly config?: Partial<MemoryConfig>;
+  /** 夜间巩固行为配置(承 §5.8;discard 加速衰减参数等;省略用默认)。 */
+  readonly consolidationConfig?: Partial<ConsolidationConfig>;
   /** 注入时钟(确定性测试)。 */
   readonly now?: () => number;
   /** 错误回调(§8.1 error 层);默认 console.error。降级时记录而非抛出。 */
@@ -301,6 +335,7 @@ type Cand = {
 export class SqliteMemoryStore implements MemoryStore {
   readonly #db: DatabaseSync;
   readonly #cfg: MemoryConfig;
+  readonly #consolidationCfg: ConsolidationConfig;
   readonly #now: () => number;
   readonly #onError: (err: unknown, op: string) => void;
   /**
@@ -315,6 +350,7 @@ export class SqliteMemoryStore implements MemoryStore {
 
   constructor(opts: SqliteMemoryStoreOptions) {
     this.#cfg = resolveMemoryConfig(opts.config);
+    this.#consolidationCfg = resolveConsolidationConfig(opts.consolidationConfig);
     this.#now = opts.now ?? Date.now;
     this.#onError = opts.onError ?? ((err, op) => console.error(`[memory] ${op} 失败`, err));
     this.#shingleCache = new ShingleCache(this.#cfg);
@@ -1178,6 +1214,188 @@ export class SqliteMemoryStore implements MemoryStore {
     } catch (err) {
       this.#onError(err, 'bumpCloseness');
       return this.#cfg.initialCloseness;
+    }
+  }
+
+  getMemoryById(id: number): MemoryRecord | undefined {
+    try {
+      const row = this.#db
+        .prepare(`SELECT ${MEMORY_COLS} FROM memories WHERE id = ?`)
+        .get(id) as Record<string, unknown> | undefined;
+      // 读不写回(承 §5.5):仅返回快照,不触发检索即强化。
+      return row === undefined ? undefined : this.#rowToRecord(row);
+    } catch (err) {
+      this.#onError(err, 'getMemoryById');
+      return undefined;
+    }
+  }
+
+  updateMemory(id: number, patch: MemoryUpdate): boolean {
+    try {
+      const row = this.#db
+        .prepare(`SELECT id, normalized_text, person_id, pinned, memory_kind FROM memories WHERE id = ?`)
+        .get(id) as Record<string, unknown> | undefined;
+      if (row === undefined) return false;
+      // core/pinned 永不被改(承 §5.4/§5.8 决策 3):豁免、返回 false。
+      const pinned = asNumber(row['pinned'] ?? 0) === 1;
+      const kind = normalizeKind(row['memory_kind']);
+      if (pinned || kind === 'core') return false;
+      const at = patch.atMs ?? this.#now();
+
+      // —— 整块重写正文(承 §5.10 B2②):事务内重建规范化文本/去重索引/联想边(单一权威重建)——
+      let newNormalized: string | undefined;
+      if (patch.text !== undefined) {
+        newNormalized = this.#cfg.normalize(patch.text);
+        if (newNormalized.length === 0) return false; // 空文本不接受(同 addMemory 规则)。
+        // 与既有别条记忆撞规范化键(UNIQUE)则放弃改文本(避免破坏 normalized_text 唯一约束;调用方可改走 discard+add)。
+        if (newNormalized !== asString(row['normalized_text'])) {
+          const clash = this.#db
+            .prepare(`SELECT id FROM memories WHERE normalized_text = ? AND id <> ?`)
+            .get(newNormalized, id);
+          if (clash !== undefined) return false;
+        }
+      }
+      const newImportance =
+        patch.importance !== undefined ? Math.min(Math.max(patch.importance, 0), 1) : undefined;
+      // memoryKind 升 core ⟹ pinned(承 §5.4 不变式,与 resolveMemoryKind 一致)。
+      const newPinned = patch.memoryKind === 'core' ? 1 : undefined;
+
+      this.#db.exec('BEGIN');
+      try {
+        if (patch.text !== undefined && newNormalized !== undefined) {
+          const oldNormalized = asString(row['normalized_text']);
+          this.#db
+            .prepare(`UPDATE memories SET text = ?, normalized_text = ?, last_seen_at = ? WHERE id = ?`)
+            .run(patch.text, newNormalized, at, id);
+          if (newNormalized !== oldNormalized) {
+            // 重建联想边:先拆旧实体/边,再按新文本建(单一权威 link 规则)。
+            unlinkEntitiesAndEdges(this.#db, id);
+            const personId =
+              row['person_id'] === null || row['person_id'] === undefined
+                ? undefined
+                : asString(row['person_id']);
+            linkEntitiesAndEdges(this.#db, id, patch.text, personId, this.#cfg.normalize, this.#cfg.primaryPersonId);
+          }
+        } else {
+          // 不改文本但要刷新近因(整块重写后的 clean summary 是新鲜的)。
+          this.#db.prepare(`UPDATE memories SET last_seen_at = ? WHERE id = ?`).run(at, id);
+        }
+        if (newImportance !== undefined) {
+          this.#db.prepare(`UPDATE memories SET importance = ? WHERE id = ?`).run(newImportance, id);
+        }
+        if (patch.memoryKind !== undefined) {
+          this.#db
+            .prepare(`UPDATE memories SET memory_kind = ? WHERE id = ?`)
+            .run(patch.memoryKind, id);
+          if (newPinned !== undefined) {
+            this.#db.prepare(`UPDATE memories SET pinned = ? WHERE id = ?`).run(newPinned, id);
+          }
+        }
+        this.#db.exec('COMMIT');
+      } catch (err) {
+        this.#db.exec('ROLLBACK');
+        throw err;
+      }
+
+      // commit 成功后同步 LSH 派生内存索引(改文本才需重挂桶;与库内一致)。
+      if (
+        patch.text !== undefined &&
+        newNormalized !== undefined &&
+        newNormalized !== asString(row['normalized_text'])
+      ) {
+        this.#unregisterLsh(id, asString(row['normalized_text']));
+        this.#registerLsh(id, newNormalized);
+      }
+      return true;
+    } catch (err) {
+      this.#onError(err, 'updateMemory');
+      return false;
+    }
+  }
+
+  markDiscarded(id: number, atMs?: number): boolean {
+    try {
+      const row = this.#db
+        .prepare(`SELECT pinned, memory_kind, importance FROM memories WHERE id = ?`)
+        .get(id) as Record<string, unknown> | undefined;
+      if (row === undefined) return false;
+      // core/pinned 永不参与(承 §5.4):豁免、返回 false。
+      const pinned = asNumber(row['pinned'] ?? 0) === 1;
+      if (pinned || normalizeKind(row['memory_kind']) === 'core') return false;
+      const at = atMs ?? this.#now();
+      // 保守删 = 加速衰减(承 §5.8 决策 3):推 last_seen 到远古 + 压低 importance,令单一权威衰减把强度趋近 0。
+      // 不改 recall 热路径、不引入新过滤列(承硬回归线);自然淡出召回。
+      const discardedAt = discardedLastSeenAt(at, {
+        halfLifeDays: this.#cfg.halfLifeDays,
+        discardDecayHalfLives: this.#consolidationCfg.discardDecayHalfLives,
+      });
+      const curImportance =
+        row['importance'] === null || row['importance'] === undefined
+          ? this.#cfg.initialImportance
+          : asNumber(row['importance']);
+      const floored = Math.min(curImportance, this.#consolidationCfg.discardImportanceFloor);
+      this.#db
+        .prepare(`UPDATE memories SET last_seen_at = ?, importance = ? WHERE id = ?`)
+        .run(discardedAt, floored, id);
+      return true;
+    } catch (err) {
+      this.#onError(err, 'markDiscarded');
+      return false;
+    }
+  }
+
+  /** 拆某记忆的 LSH 桶 + shingle 缓存条目(更新文本时用;与 #registerLsh 对称)。 */
+  #unregisterLsh(memoryId: number, normalized: string): void {
+    const { signature } = this.#shingleCache.get(normalized);
+    for (const key of lshBandKeys(signature, this.#cfg.lshBands)) {
+      const bucket = this.#lshBuckets.get(key);
+      if (bucket === undefined) continue;
+      bucket.delete(memoryId);
+      if (bucket.size === 0) this.#lshBuckets.delete(key);
+    }
+    this.#shingleById.delete(memoryId);
+  }
+
+  recordConsolidationTrace(trace: ConsolidationTrace): void {
+    try {
+      this.#db
+        .prepare(
+          `INSERT INTO consolidation_trace(unit, kind, memory_id, reason, at, detail)
+           VALUES(?, ?, ?, ?, ?, ?)`,
+        )
+        .run(trace.unit, trace.kind, trace.memoryId ?? null, trace.reason, trace.atMs, trace.detail ?? null);
+    } catch (err) {
+      this.#onError(err, 'recordConsolidationTrace');
+    }
+  }
+
+  consolidationTraces(unit?: string): readonly ConsolidationTrace[] {
+    try {
+      const rows = (
+        unit === undefined
+          ? this.#db.prepare(`SELECT unit, kind, memory_id, reason, at, detail FROM consolidation_trace ORDER BY id ASC`).all()
+          : this.#db
+              .prepare(`SELECT unit, kind, memory_id, reason, at, detail FROM consolidation_trace WHERE unit = ? ORDER BY id ASC`)
+              .all(unit)
+      ) as Record<string, unknown>[];
+      return rows.map((r) => {
+        const memoryId =
+          r['memory_id'] === null || r['memory_id'] === undefined ? undefined : asNumber(r['memory_id']);
+        const detail =
+          r['detail'] === null || r['detail'] === undefined ? undefined : asString(r['detail']);
+        const t: ConsolidationTrace = {
+          unit: asString(r['unit']),
+          kind: asString(r['kind']) as ConsolidationTrace['kind'],
+          reason: asString(r['reason']),
+          atMs: asNumber(r['at']),
+          ...(memoryId !== undefined ? { memoryId } : {}),
+          ...(detail !== undefined ? { detail } : {}),
+        };
+        return t;
+      });
+    } catch (err) {
+      this.#onError(err, 'consolidationTraces');
+      return [];
     }
   }
 

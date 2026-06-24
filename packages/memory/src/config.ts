@@ -269,6 +269,68 @@ export function resolveMemoryConfig(overrides?: Partial<MemoryConfig>): MemoryCo
   return { ...DEFAULT_MEMORY_CONFIG, ...overrides };
 }
 
+// —— §5.1/§5.8/§5.10 B2 夜间巩固:触发节奏 + 双 Pass 调和 + 惊奇门控 配置(行为即配置,§3.2)——
+
+/**
+ * 夜间/周期巩固行为配置(行为即配置,§3.2):触发阈值/上限/键前缀/降级开关全外置,无 magic number。
+ * 计时驱动留接缝(cli/autonomy/未来 cron 调用,本 change 不起守护进程,见 design 决策 1)。
+ */
+export interface ConsolidationConfig {
+  /** 总开关:'on'=巩固;'off'=不巩固(等价 Noop,优雅降级 §3.2)。 */
+  readonly enabled: 'on' | 'off';
+  /** 每日触发的最小间隔(天,承设计「距上次巩固≥1 天」):距上次巩固≥此值才触发 daily。默认 1。 */
+  readonly dailyIntervalDays: number;
+  /** 每 N 轮触发的轮数阈值(承设计「轮数≥N」):turnsSinceLast≥此值才触发 turns。默认 50。 */
+  readonly everyNTurns: number;
+  /**
+   * 离线调和单次喂 LLM 的既有记忆对标条数上限(防 token 失控 + 抗幻觉用临时整数 ID 的范围)。默认 30。
+   */
+  readonly maxReconcileCandidates: number;
+  /** LLM 调和/惊奇评估的生成 token 上限。默认 1024。 */
+  readonly maxTokens: number;
+  /**
+   * discard(保守删)= 加速衰减:把 last_seen_at 推到「`halfLifeDays × 此倍数` 天前」,
+   * 令单一权威衰减把强度压到趋近 0(默认 20 倍半衰期 ⟹ decay≈0.5²⁰≈1e-6,自然淡出 recall)。
+   * **不改 recall 热路径**(承硬回归线)。落正数;默认 20。行为即配置(§3.2)。
+   */
+  readonly discardDecayHalfLives: number;
+  /** discard 时 importance 压低到的目标值(配合加速衰减,双保险淡出);落 [0,1],默认 0.01。 */
+  readonly discardImportanceFloor: number;
+  /** 巩固幂等标记键前缀:实际键为 `${prefix}${unit}`(沿用 reflector kv_state 幂等模式)。 */
+  readonly stateKeyPrefix: string;
+}
+
+export const DEFAULT_CONSOLIDATION_CONFIG: ConsolidationConfig = {
+  enabled: 'on',
+  dailyIntervalDays: 1,
+  everyNTurns: 50,
+  maxReconcileCandidates: 30,
+  maxTokens: 1024,
+  discardDecayHalfLives: 20,
+  discardImportanceFloor: 0.01,
+  stateKeyPrefix: 'consolidation_',
+};
+
+/** 合并用户覆盖与默认值。 */
+export function resolveConsolidationConfig(
+  overrides?: Partial<ConsolidationConfig>,
+): ConsolidationConfig {
+  return { ...DEFAULT_CONSOLIDATION_CONFIG, ...overrides };
+}
+
+/**
+ * discard(保守删 = 加速衰减)后该记忆应写回的 `last_seen_at`(单一权威,承 §5.8 决策 3):
+ * 推到 `atMs - halfLifeDays × discardDecayHalfLives × 天`,令单一权威 `decayFactor` 把强度压到趋近 0。
+ * **不引入新过滤列、不改 recall**(承硬回归线);两 store 共用此规则,杜绝漂移。负数夹到 0(不致未来时间)。
+ */
+export function discardedLastSeenAt(
+  atMs: number,
+  cfg: Pick<MemoryConfig, 'halfLifeDays'> & Pick<ConsolidationConfig, 'discardDecayHalfLives'>,
+): number {
+  const backMs = cfg.halfLifeDays * cfg.discardDecayHalfLives * MS_PER_DAY;
+  return Math.max(0, atMs - backMs);
+}
+
 /**
  * 写入归属规则(单一权威,承 §5.3 / §5.3b):主语缺省 person;person/shared 缺省主用户,
  * agent 不关联人。两个 MemoryStore 实现共用此规则,避免规则在多后端间漂移(§3.1)。
