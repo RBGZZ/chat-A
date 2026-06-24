@@ -27,7 +27,7 @@ import {
   SilenceTimeoutEouModel,
   type VadDetector,
 } from '@chat-a/voice-detect';
-import type { LightVoiceBus } from '@chat-a/runtime';
+import type { LightVoiceBus, SpeakStateView } from '@chat-a/runtime';
 import type { AudioDevice } from './audio/audio-device';
 import { FakeAudioDevice } from './audio/fake-audio-device';
 import { NodeAudioDevice } from './audio/node-audio-device';
@@ -51,6 +51,20 @@ export function loadTransportKind(env: NodeJS.ProcessEnv): TransportKind {
   return (env['CHAT_A_TRANSPORT'] ?? '').toLowerCase() === 'websocket' ? 'websocket' : 'inprocess';
 }
 
+/**
+ * 语音 autonomy 装配所需的 VoiceLoop 最小读面(companion-live-wiring,§3.1):
+ * 只读 `speakState`(is_speaking 真闸)/ `requestAutonomyPreempt`(真打断),**不暴露 VoiceLoop 内部**。
+ */
+export interface VoiceLoopAutonomyView {
+  speakState(): SpeakStateView;
+  requestAutonomyPreempt(reason?: string): boolean;
+}
+
+/** 语音 autonomy 装配钩子返回的可停句柄(纳入语音 stop 收尾)。 */
+export interface VoiceAutonomyHandle {
+  stop(): void;
+}
+
 /** 语音模式所需的、由 cli.ts 已装配好的依赖(复用文字链路的 convo/memory/bus/session)。 */
 export interface VoiceModeDeps {
   /** 想:吃用户文本 + onToken,resolve 完整回复(传 conversation.send.bind(conversation))。 */
@@ -62,6 +76,16 @@ export interface VoiceModeDeps {
   /** 贯穿本会话的 sessionId(与 Conversation 一致,半句写回归属正确)。 */
   readonly sessionId: string;
   readonly env?: NodeJS.ProcessEnv;
+  /**
+   * 语音 autonomy 装配钩子(companion-live-wiring,**默认关随 CHAT_A_AUTONOMY**):
+   * 语音模式拿到 VoiceLoop 后回调它装配 autonomy 并注入 `voiceState`(is_speaking 真闸)+
+   * `preempt`(真打断,受 §7 约束:用户 URGENT 最高、不凌驾用户)+ 真候选源;返回的句柄纳入语音 stop 收尾。
+   * cli 仅在 autonomy on 时传入;off 时不传(语音侧零构造 autonomy,逐字不变)。**只读** VoiceLoop API,不改其内部。
+   */
+  readonly assembleVoiceAutonomy?: (
+    loop: VoiceLoopAutonomyView,
+    bus: LightVoiceBus,
+  ) => VoiceAutonomyHandle | undefined;
 }
 
 /** 语音模式运行句柄:停 = 收尾(停采集/loop/设备)。 */
@@ -223,6 +247,19 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
     },
   });
 
+  // companion-live-wiring:autonomy on 时(cli 传入钩子)用 VoiceLoop 真闸/抢占装配 autonomy。
+  // 钩子内部回调失败不影响语音主链路(§3.2);off / 未传钩子时此处零开销。VoiceLoop 只被**读取**(不改其内部)。
+  let voiceAutonomy: VoiceAutonomyHandle | undefined;
+  if (deps.assembleVoiceAutonomy) {
+    try {
+      voiceAutonomy = deps.assembleVoiceAutonomy(handle.loop, handle.bus);
+    } catch (err) {
+      stdout.write(
+        `[语音] autonomy 装配失败(已跳过,不影响对话):${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
+
   return {
     info: {
       device: `${device.id}${real ? '' : ' (占位/无真采集)'}`,
@@ -232,7 +269,15 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
       eou: detectors.eouKind,
       transport: 'inprocess',
     },
-    stop: () => handle.stop(),
+    stop: () => {
+      // 先停 autonomy(停定时器 + 退订总线),再停语音闭环;均幂等、失败吞(§3.2)。
+      try {
+        voiceAutonomy?.stop();
+      } catch {
+        /* ignore */
+      }
+      handle.stop();
+    },
   };
 }
 

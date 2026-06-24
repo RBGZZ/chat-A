@@ -10,10 +10,12 @@ import { initTelemetry, createDecisionTraceSinkFromEnv, SqliteAutonomyDecisionSi
 import { createMemoryStoreFromEnv, LlmMemoryExtractor, LlmReflector, NoopReflector } from '@chat-a/memory';
 import type { Reflector } from '@chat-a/memory';
 import { loadPersonaFromEnv, seedPersonaMemories, createKvPersonaStore, LlmAppraiser, LlmStanceDetector, LlmOceanEvolver, LlmSelfNotionEvolver } from '@chat-a/persona';
-import { startVoiceMode, type VoiceModeHandle } from './cli-voice';
+import { isAutonomyEnabled } from '@chat-a/autonomy';
+import { startVoiceMode, type VoiceModeHandle, type VoiceLoopAutonomyView } from './cli-voice';
 import { assemblePerception, type PerceptionHandle } from './assembly/perception';
 import { assembleAutonomy, type AutonomyHandle } from './assembly/autonomy';
 import { assembleConsolidation, type ConsolidationHandle } from './assembly/consolidation';
+import { createPresencePort, createCompanionCandidateSource } from './assembly/memory-autonomy-ports';
 import { parseDotEnv, applyDotEnv } from './env-file';
 import { parseCommand, renderHelp, renderPersona, renderBanner } from './commands';
 
@@ -139,6 +141,31 @@ async function main(): Promise<void> {
       `沉淀=${reflectMode === 'llm' ? 'on' : 'off'} trace=${trace.enabled ? 'on' : 'off'}\n`,
   );
 
+  // ── 伴侣主动性接线准备(companion-live-wiring,默认关随 CHAT_A_AUTONOMY) ──
+  // autonomy on 时:构造装配层在场近似端口 + 真候选源(未了话题跟进 + idle 想念弧),文字与语音两路共用。
+  // off 时全不构造(零开销,逐字不变)。presence 由用户回合/语音活跃刷新,驱动 idle 情绪弧。
+  const autonomyOn = isAutonomyEnabled(env);
+  const presence = autonomyOn ? createPresencePort() : undefined;
+  const companionCandidateSource =
+    autonomyOn && presence ? createCompanionCandidateSource({ store: mem.store, presence }) : undefined;
+  // 语音活跃也刷新在场:用户开口(vad:speech_start)→ markActive(驱动 idle 弧 once-per-episode)。
+  // 经共享总线订阅;off / 无 presence 时不订阅(零开销)。退订纳入收尾。
+  const unsubPresence = presence ? bus.on('vad:speech_start', () => presence.markActive()) : undefined;
+  // 语音 autonomy 装配钩子(语音模式拿到 VoiceLoop 后回调):on 时注入 voiceState(is_speaking 真闸)+
+  // preempt(真打断,受 §7 约束:用户 URGENT 最高、不凌驾用户,沿用 VoiceLoop 内既有实现)+ 真候选源。
+  // off 时不传(语音侧零构造 autonomy)。
+  const assembleVoiceAutonomy = autonomyOn
+    ? (loop: VoiceLoopAutonomyView, voiceBus: LightVoiceBus): AutonomyHandle | undefined =>
+        assembleAutonomy(env, {
+          bus: voiceBus,
+          llm,
+          decisionSink: new SqliteAutonomyDecisionSink({ sink: trace.sink }),
+          voiceState: () => loop.speakState(),
+          preempt: (reason) => void loop.requestAutonomyPreempt(reason),
+          ...(companionCandidateSource ? { candidateSource: companionCandidateSource } : {}),
+        })
+    : undefined;
+
   // 语音模式(R2,默认关):`--voice` 或 CHAT_A_VOICE=1 切语音;文字模式默认不变。
   // 装配 AudioDevice(真/Fake)→ InProcessAudioTransport → VoiceLoop;send 注入 convo.send(零改 Conversation)。
   const voiceOn = argv.includes('--voice') || (env['CHAT_A_VOICE'] ?? '').length > 0;
@@ -152,6 +179,8 @@ async function main(): Promise<void> {
         bus,
         sessionId,
         env,
+        // 语音 autonomy(默认关):on 时语音侧拿到 VoiceLoop 回调装配 + 注入真闸/抢占/候选源。
+        ...(assembleVoiceAutonomy ? { assembleVoiceAutonomy } : {}),
       });
       stdout.write(`语音: on  设备=${voice.info.device}  STT=${voice.info.stt}  TTS=${voice.info.tts}  VAD=${voice.info.vad}  EOU=${voice.info.eou}\n`);
     } catch (err) {
@@ -168,18 +197,29 @@ async function main(): Promise<void> {
   }
   // autonomy 上线(CHAT_A_AUTONOMY=on 才挂;决策落 SQLite 决策 trace,同 correlationId 缝合)。
   // 决策 sink:把 autonomy 决策映射进既有 decision_traces 表(复用回合 trace sink 句柄)。
-  const autonomy: AutonomyHandle | undefined = assembleAutonomy(env, {
-    bus,
-    llm,
-    decisionSink: new SqliteAutonomyDecisionSink({ sink: trace.sink }),
-  });
+  // companion-live-wiring:文字路注入真候选源(未了话题 + idle 弧);语音模式已在 startVoiceMode 内
+  // 用 VoiceLoop 真闸/抢占装配过 autonomy,故此处仅在**未进语音模式**时挂文字路 autonomy(避免双挂同一总线)。
+  const autonomy: AutonomyHandle | undefined = voice
+    ? undefined
+    : assembleAutonomy(env, {
+        bus,
+        llm,
+        decisionSink: new SqliteAutonomyDecisionSink({ sink: trace.sink }),
+        ...(companionCandidateSource ? { candidateSource: companionCandidateSource } : {}),
+      });
   // 夜间巩固触发(CHAT_A_CONSOLIDATION=on 才挂;会话结束 / /reset 触发,后台 fire-and-forget)。
   const consolidation: ConsolidationHandle | undefined = assembleConsolidation(env, {
     llm,
     store: mem.store,
   });
+  // 主动状态:文字路有 autonomy handle 显示 tick;语音路 autonomy 在 startVoiceMode 内装配(显示 on(语音))。
+  const autonomyStatus = autonomy
+    ? `on(tick ${autonomy.tickMs}ms)`
+    : voice && autonomyOn
+      ? 'on(语音)'
+      : 'off';
   stdout.write(
-    `接线: 感知=${perception ? `on(tick ${perception.tickMs}ms)` : 'off'} | 主动=${autonomy ? `on(tick ${autonomy.tickMs}ms)` : 'off'} | 巩固=${consolidation ? 'on' : 'off'}\n`,
+    `接线: 感知=${perception ? `on(tick ${perception.tickMs}ms)` : 'off'} | 主动=${autonomyStatus} | 巩固=${consolidation ? 'on' : 'off'}\n`,
   );
 
   stdout.write('\n');
@@ -192,8 +232,15 @@ async function main(): Promise<void> {
     // 语音模式收尾:停采集/loop/设备(幂等;无语音则 no-op)。
     voice?.stop();
     // 接线收尾:停感知中枢(停 tick/源)、停 autonomy 调度(停定时器 + 退订总线);均幂等、失败吞。
+    // (语音模式的 autonomy 由 voice.stop() 负责;此处仅停文字路 autonomy。)
     try {
       autonomy?.stop();
+    } catch {
+      /* ignore */
+    }
+    // companion-live-wiring:退订在场刷新(幂等、失败吞);off / 无 presence 时为 no-op。
+    try {
+      unsubPresence?.();
     } catch {
       /* ignore */
     }
@@ -277,6 +324,8 @@ async function main(): Promise<void> {
         if (!closed) rl.prompt();
         continue;
       case 'chat': {
+        // companion-live-wiring:用户开口即刷新在场(驱动 idle 情绪弧的 once-per-episode);off 时无 presence。
+        presence?.markActive();
         stdout.write('小雪 › ');
         try {
           await convo.send(parsed.text, (token) => stdout.write(token));
