@@ -435,6 +435,8 @@ async function speakReply(handle: AppHandle, reply: string, signal: AbortSignal)
   let moodInstruction: string | undefined;
   if (isEmotionFromMood(handle)) {
     try {
+      // 先同步到本回合已保存的活 PAD(显示引擎只读、不 advance,不 reload 会读到开机 stale 值)。
+      handle.persona.reload();
       const vi = handle.persona.tone().voiceInstruction;
       if (vi.length > 0) moodInstruction = vi;
     } catch {
@@ -494,6 +496,9 @@ function wireBus(handle: AppHandle): () => void {
   // 回合结束后读当前心情推给渲染层(低频,回合级)。
   const offTurnEnd = handle.bus.on('turn:end', () => {
     try {
+      // 先把只读显示引擎同步到本回合 Conversation 内部引擎已保存的活 PAD(否则恒显开机心情);
+      // reload 是一次 store 读、失败不致命(下面 catch 兜),§6 活 mood。
+      handle.persona.reload();
       emit(IPC.mood, toMoodSummary(handle.persona.tone()));
     } catch {
       /* 读心情失败不影响主链路(§3.2) */

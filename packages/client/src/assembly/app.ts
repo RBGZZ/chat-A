@@ -37,8 +37,10 @@ import {
   seedPersonaMemories,
   createKvPersonaStore,
   PersonaEngine,
+  LlmAppraiser,
   applyPersonaPatch,
   personaViewOf,
+  type Appraiser,
   type PersonaSeed,
   type PersonaStore,
   type PersonaPatch,
@@ -171,6 +173,14 @@ export function assembleApp(opts: AssembleAppOptions = {}): AppHandle {
   const llmConfig = loadLlmConfig(env);
   const llm = createLlm(llmConfig);
 
+  // 情绪评估器(§3.1 LLM 认知 opt-in,镜像 cli):CHAT_A_APPRAISER=llm → 用 LLM 评估每轮 PAD 拉力;
+  // 缺省 undefined → Conversation 内部回落 DefaultAppraiser(关键词,逐字现状)。在 assembleApp 作用域建一次,
+  // makeConvo 闭包恒捕获 → reset/applyPersona/applyLang 重建会话时自动续接。
+  const appraiser: Appraiser | undefined =
+    (env['CHAT_A_APPRAISER'] ?? 'default').toLowerCase() === 'llm'
+      ? new LlmAppraiser({ provider: llm })
+      : undefined;
+
   // A 层总线(语音/状态派生/感知共用一条)。
   const bus = new LightVoiceBus();
 
@@ -212,6 +222,7 @@ export function assembleApp(opts: AssembleAppOptions = {}): AppHandle {
       personaSeed: seed,
       personaStore,
       sessionId: sid,
+      ...(appraiser ? { appraiser } : {}),
       ...(displayLang.length > 0 ? { outputLang: displayLang } : {}),
     });
 

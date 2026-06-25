@@ -109,6 +109,16 @@ export class PersonaEngine {
   }
 
   /**
+   * 从持久化 store 重载快照(承本 change live-mood-appraiser-wiring)。
+   * 用于**只读**引擎(如 desktop mood 显示引擎)反映**另一引擎**(同一 store,如 Conversation 内部引擎)
+   * 已 advance 并保存的最新 PAD。store 无快照 → 保持当前内存快照不变;**不触发 advance、不写回**。
+   */
+  reload(): void {
+    const loaded = this.#store.load();
+    if (loaded !== null) this.#snapshot = loaded;
+  }
+
+  /**
    * 读当前心情渲染的情绪 + tone(纯,不改状态;回合前用)。
    * `closeness`(§2.4 关系亲密度,可选)由编排层读取后透传;省略时 tone 行为不变(向后兼容)。
    * exactOptional 安全:用条件展开仅在提供时附带 closeness 实参,绝不显式传 undefined。
