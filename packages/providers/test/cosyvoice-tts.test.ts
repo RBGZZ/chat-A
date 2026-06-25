@@ -9,6 +9,7 @@ import {
   buildContinueTask,
   buildFinishTask,
   parseTextEvent,
+  supportsStreamingFeed,
   type PcmChunk,
   type CosyVoiceWsLike,
   type CosyVoiceWsFactory,
@@ -336,6 +337,145 @@ describe('CosyVoiceTts(注入 mock WS,不触网)', () => {
     expect(() => new CosyVoiceTts({ apiKey: '', wsFactory: factory })).toThrow(
       /CHAT_A_DASHSCOPE_API_KEY/,
     );
+  });
+});
+
+describe('CosyVoiceTts.synthesizeStream(同会话流式喂文本)', () => {
+  it('多次 push 进同一 task:run-task → 等 started → 多次 continue-task → finish-task', async () => {
+    const { factory, created } = mockFactory((ws) => {
+      ws.serverEvent('task-started');
+      ws.serverAudio(int16ToBytes([1]));
+      ws.serverAudio(int16ToBytes([2]));
+      ws.serverEvent('task-finished');
+    });
+    const tts = newTts(factory);
+    const session = tts.synthesizeStream();
+    session.push('第一句。');
+    session.push('第二句。');
+    session.finish();
+    const chunks = await collect(session.chunks);
+    // 同一 task 内:一条 run-task + N 条 continue-task(同 task_id)+ 一条 finish-task。
+    const actions = created[0]!.sentActions();
+    expect(actions).toEqual(['run-task', 'continue-task', 'continue-task', 'finish-task']);
+    // continue-task 各携带对应句文本,且 task_id 全程一致。
+    const texts = created[0]!.sent
+      .filter((m) => (m['header'] as Record<string, unknown>)['action'] === 'continue-task')
+      .map((m) => ((m['payload'] as Record<string, unknown>)['input'] as Record<string, unknown>)['text']);
+    expect(texts).toEqual(['第一句。', '第二句。']);
+    const taskIds = new Set(created[0]!.sent.map((m) => (m['header'] as Record<string, unknown>)['task_id']));
+    expect([...taskIds]).toEqual(['task-fixed-1']);
+    expect([...(chunks[0] as PcmChunk).samples]).toEqual([1]);
+    expect([...(chunks[1] as PcmChunk).samples]).toEqual([2]);
+  });
+
+  it('task-started 前 push 的文本缓冲、started 后按序冲刷', async () => {
+    // 服务端延迟发 task-started:此前的 push 必须缓冲,started 后才作为 continue-task 冲刷。
+    let started: (() => void) | undefined;
+    const { factory, created } = mockFactory((ws) => {
+      // 不立刻 started;留个钩子让测试控制时机。
+      started = () => {
+        ws.serverEvent('task-started');
+        ws.serverAudio(int16ToBytes([9]));
+        ws.serverEvent('task-finished');
+      };
+    });
+    const tts = newTts(factory);
+    const session = tts.synthesizeStream();
+    // started 之前就 push 两句 + finish:此时 WS 上只应有 run-task(continue/finish 被缓冲)。
+    session.push('A。');
+    session.push('B。');
+    session.finish();
+    await Promise.resolve();
+    expect(created[0]!.sentActions()).toEqual(['run-task']);
+    // 触发 started → 缓冲按序冲刷。
+    started!();
+    const chunks = await collect(session.chunks);
+    expect(created[0]!.sentActions()).toEqual(['run-task', 'continue-task', 'continue-task', 'finish-task']);
+    const texts = created[0]!.sent
+      .filter((m) => (m['header'] as Record<string, unknown>)['action'] === 'continue-task')
+      .map((m) => ((m['payload'] as Record<string, unknown>)['input'] as Record<string, unknown>)['text']);
+    expect(texts).toEqual(['A。', 'B。']);
+    expect([...(chunks[0] as PcmChunk).samples]).toEqual([9]);
+  });
+
+  it('首句先出声:第一句喂完即出音,不等后续句', async () => {
+    let pushSecond: (() => void) | undefined;
+    const { factory } = mockFactory((ws) => {
+      ws.serverEvent('task-started');
+      ws.serverAudio(int16ToBytes([11])); // 第一句的音频
+      pushSecond = () => {
+        ws.serverAudio(int16ToBytes([22]));
+        ws.serverEvent('task-finished');
+      };
+    });
+    const tts = newTts(factory);
+    const session = tts.synthesizeStream();
+    session.push('先。');
+    const got: number[] = [];
+    const iterator = session.chunks[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    got.push(...(first.value as PcmChunk).samples);
+    // 第一句音频已拿到,此时才喂第二句 + finish。
+    session.push('后。');
+    session.finish();
+    pushSecond!();
+    for (;;) {
+      const n = await iterator.next();
+      if (n.done) break;
+      got.push(...(n.value as PcmChunk).samples);
+    }
+    expect(got).toEqual([11, 22]);
+  });
+
+  it('abort(打断):直接 close 丢弃在途音频,不发 finish-task', async () => {
+    const { factory, created } = mockFactory((ws) => {
+      ws.serverEvent('task-started');
+      ws.serverAudio(int16ToBytes([5]));
+      // 不发 finished:等 abort。
+    });
+    const tts = newTts(factory);
+    const session = tts.synthesizeStream();
+    session.push('长文本。');
+    const got: PcmChunk[] = [];
+    const iterator = session.chunks[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    got.push(first.value as PcmChunk);
+    session.abort();
+    const after = await iterator.next();
+    expect(after.done).toBe(true);
+    expect(got.length).toBe(1);
+    expect(created[0]!.closed).toBe(true);
+    // abort 与正常 finish 区分:绝不发 finish-task。
+    expect(created[0]!.sentActions()).not.toContain('finish-task');
+  });
+
+  it('task-failed → chunks 抛清晰中文错(不含 key)', async () => {
+    const { factory } = mockFactory((ws) => {
+      ws.serverEvent('task-failed', { error_code: 'InvalidApiKey', error_message: 'auth failed' });
+    });
+    const tts = newTts(factory);
+    const session = tts.synthesizeStream();
+    session.push('x。');
+    session.finish();
+    await expect(collect(session.chunks)).rejects.toThrow(/task-failed/);
+    const s2 = newTts(factory).synthesizeStream();
+    s2.push('x。');
+    s2.finish();
+    await expect(collect(s2.chunks)).rejects.not.toThrow(/sk-test/);
+  });
+
+  it('能力位:supportsStreamingFeed=true;synthesize 一次性路径不变', async () => {
+    const { factory, created } = mockFactory((ws) => {
+      ws.serverEvent('task-started');
+      ws.serverAudio(int16ToBytes([3]));
+      ws.serverEvent('task-finished');
+    });
+    const tts = newTts(factory);
+    expect(supportsStreamingFeed(tts)).toBe(true);
+    // 一次性 synthesize 仍是 run-task→continue→finish 三连(回归)。
+    const chunks = await collect(tts.synthesize('你好'));
+    expect([...(chunks[0] as PcmChunk).samples]).toEqual([3]);
+    expect(created[0]!.sentActions()).toEqual(['run-task', 'continue-task', 'finish-task']);
   });
 });
 

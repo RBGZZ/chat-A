@@ -2,7 +2,13 @@ import { createRequire } from 'node:module';
 import type { PcmChunk } from './audio';
 import { TTS_SAMPLE_RATE_HZ, pcmChunk } from './audio';
 import { assertTtsCloning, assertTtsLanguage } from './tts';
-import type { TtsCapabilities, TtsOptions, TtsProvider } from './tts';
+import type {
+  StreamingTtsProvider,
+  TtsCapabilities,
+  TtsOptions,
+  TtsProvider,
+  TtsStreamSession,
+} from './tts';
 import type { QwenWsLike, QwenWsFactory } from './qwen-tts-realtime';
 
 /**
@@ -77,7 +83,7 @@ export interface CosyVoiceTtsOptions {
   readonly taskIdFactory?: TaskIdFactory;
 }
 
-export class CosyVoiceTts implements TtsProvider {
+export class CosyVoiceTts implements StreamingTtsProvider {
   readonly id: string;
   readonly capabilities: TtsCapabilities;
   readonly #model: string;
@@ -159,21 +165,7 @@ export class CosyVoiceTts implements TtsProvider {
 
     ws.on('open', () => {
       // 开任务:run-task(带 model + parameters);input 必须为空对象。
-      safeSend(
-        ws,
-        JSON.stringify(
-          buildRunTask(taskId, this.#model, {
-            voice,
-            format: this.#format,
-            sampleRate: this.#sampleRate,
-            ...(this.#rate !== undefined ? { rate: this.#rate } : {}),
-            ...(this.#pitch !== undefined ? { pitch: this.#pitch } : {}),
-            ...(this.#volume !== undefined ? { volume: this.#volume } : {}),
-            ...(instruction !== undefined ? { instruction } : {}),
-            ...(this.#enableSsml !== undefined ? { enableSsml: this.#enableSsml } : {}),
-          }),
-        ),
-      );
+      safeSend(ws, JSON.stringify(buildRunTask(taskId, this.#model, this.#runParams(voice, instruction))));
     });
 
     ws.on('message', (data: unknown, isBinary?: unknown) => {
@@ -235,6 +227,158 @@ export class CosyVoiceTts implements TtsProvider {
       if (signal !== undefined) signal.removeEventListener('abort', onAbort);
       safeClose(ws); // 务必关连接,防泄漏 / 防后台烧远端额度。
     }
+  }
+
+  /** 组装 run-task 的 parameters(synthesize 与 synthesizeStream 共用,单一真相源)。 */
+  #runParams(voice: string, instruction: string | undefined): RunTaskParams {
+    return {
+      voice,
+      format: this.#format,
+      sampleRate: this.#sampleRate,
+      ...(this.#rate !== undefined ? { rate: this.#rate } : {}),
+      ...(this.#pitch !== undefined ? { pitch: this.#pitch } : {}),
+      ...(this.#volume !== undefined ? { volume: this.#volume } : {}),
+      ...(instruction !== undefined ? { instruction } : {}),
+      ...(this.#enableSsml !== undefined ? { enableSsml: this.#enableSsml } : {}),
+    };
+  }
+
+  /**
+   * 同会话流式喂文本(承 §3.2 流式优先·低音频延迟):一条 WS run-task,等 task-started 后
+   * 把缓冲/后续的 push 逐句作 continue-task 发出;finish()=finish-task 正常收尾;
+   * abort()=直接 close 丢弃在途音频(不发 finish-task,与 finish 区分)。复用 ByteFrameQueue / s16le 进位。
+   *
+   * ⚠️ 与一次性 {@link synthesize} 的两点关键区别:
+   *  - 多句多 continue-task(同一 task_id),逐句喂、首句即出声;
+   *  - 打断语义不同:synthesize 的 onAbort 先 finish-task 再 close(等服务端合完);
+   *    流式 abort 是「新消息抢占」,**直接 close 丢弃在途音频、不发 finish-task**。
+   *
+   * 能力门(语种/复刻)与 voiceId 缺失 fail-fast 在**首次** push/finish 调用前已不便抛(无 async 迭代体),
+   * 故在此**同步**校验:缺 voiceId / 语种不支持立即抛(调用方据此降级整段)。
+   */
+  synthesizeStream(opts?: TtsOptions): TtsStreamSession {
+    // 能力门 fail-fast(§4.3):语种 + 复刻,在建连之前(同步抛,调用方 try/catch 降级)。
+    assertTtsLanguage(this.capabilities, opts?.language);
+    assertTtsCloning(this.capabilities, opts);
+
+    const voice = opts?.voiceId ?? this.#voice;
+    if (voice === undefined || voice.length === 0) {
+      throw new Error(
+        `${this.id} 需要复刻音色 voiceId(CosyVoice 无系统音色);请先复刻并配置 CHAT_A_VOICE_ID`,
+      );
+    }
+    const instruction = opts?.instruction ?? this.#instruction;
+
+    const taskId = this.#taskId();
+    const ws = this.#wsFactory(this.#endpoint, { Authorization: `Bearer ${this.#apiKey}` });
+    const queue = new ByteFrameQueue();
+    const providerId = this.id;
+    const sampleRate = this.#sampleRate;
+
+    let started = false; // task-started 是否已到。
+    let finishRequested = false; // 调用方是否已 finish()(待 started 后冲刷 finish-task)。
+    let aborted = false; // 是否已 abort(直接丢弃、不发 finish-task)。
+    const pending: string[] = []; // task-started 前缓冲的待送文本(started 后按序冲刷)。
+
+    const flushPending = (): void => {
+      for (const text of pending) safeSend(ws, JSON.stringify(buildContinueTask(taskId, text)));
+      pending.length = 0;
+      if (finishRequested) safeSend(ws, JSON.stringify(buildFinishTask(taskId)));
+    };
+
+    ws.on('open', () => {
+      safeSend(ws, JSON.stringify(buildRunTask(taskId, this.#model, this.#runParams(voice, instruction))));
+    });
+
+    ws.on('message', (data: unknown, isBinary?: unknown) => {
+      if (isBinary === true) {
+        const bytes = toBytes(data);
+        if (bytes !== undefined && bytes.length > 0) queue.push(bytes);
+        return;
+      }
+      const evt = parseTextEvent(data);
+      if (evt === undefined) {
+        // 非 JSON:可能是未带 isBinary 标志的音频帧(mock / 非标准)→ 当音频兜底。
+        const bytes = toBytes(data);
+        if (bytes !== undefined && bytes.length > 0) queue.push(bytes);
+        return;
+      }
+      switch (evt.event) {
+        case 'task-started':
+          started = true;
+          flushPending(); // 冲刷 started 前缓冲的 push(及 finish)。
+          break;
+        case 'task-finished':
+          queue.finish();
+          break;
+        case 'task-failed':
+          queue.fail(new Error(`${providerId} 服务端 task-failed: ${describeTaskError(evt)}`));
+          break;
+        default:
+          break;
+      }
+    });
+
+    ws.on('error', (err: unknown) => {
+      queue.fail(new Error(`${providerId} WebSocket 连接错误: ${describeErr(err)}`));
+    });
+
+    ws.on('close', (code: unknown, reason: unknown) => {
+      const r = reason == null ? '' : typeof reason === 'string' ? reason : String(reason);
+      queue.closeWith(typeof code === 'number' ? code : undefined, r);
+    });
+
+    const session: TtsStreamSession = {
+      push(text: string): void {
+        if (aborted || finishRequested) return; // finish/abort 后不再收文本。
+        if (text.length === 0) return;
+        if (started) safeSend(ws, JSON.stringify(buildContinueTask(taskId, text)));
+        else pending.push(text); // started 前缓冲。
+      },
+      finish(): void {
+        if (aborted || finishRequested) return;
+        finishRequested = true;
+        // started 后立即发 finish-task;否则待 flushPending 在 started 时连同缓冲一起发。
+        if (started) safeSend(ws, JSON.stringify(buildFinishTask(taskId)));
+      },
+      abort(): void {
+        if (aborted) return;
+        aborted = true;
+        // 打断:直接 close 丢弃在途音频,**不**发 finish-task。
+        safeClose(ws);
+        queue.finish(); // 让消费侧的 for-await 干净结束(done,而非抛错)。
+      },
+      chunks: streamPcm(queue, sampleRate, () => aborted, ws),
+    };
+    return session;
+  }
+}
+
+/**
+ * 把 ByteFrameQueue 的字节流转成 PcmChunk 流(s16le 跨帧进位),供 synthesizeStream 的 chunks 用。
+ * isAborted 为 true 时提前停;无论如何 finally 关 WS 防泄漏。
+ */
+async function* streamPcm(
+  queue: ByteFrameQueue,
+  sampleRate: number,
+  isAborted: () => boolean,
+  ws: CosyVoiceWsLike,
+): AsyncIterable<PcmChunk> {
+  let carry: Uint8Array = new Uint8Array(0);
+  try {
+    for (;;) {
+      const next = await queue.pull();
+      if (next.done) break;
+      if (isAborted()) break;
+      const merged = concat(carry, next.value);
+      const evenLen = merged.length - (merged.length % 2);
+      if (evenLen > 0) {
+        yield pcmChunk(bytesToInt16(merged.subarray(0, evenLen)), sampleRate);
+      }
+      carry = merged.subarray(evenLen);
+    }
+  } finally {
+    safeClose(ws); // 务必关连接,防泄漏 / 防后台烧远端额度。
   }
 }
 

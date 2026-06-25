@@ -29,9 +29,11 @@ import {
   loadVoiceProfile,
   QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL,
   COSYVOICE_DEFAULT_TARGET_MODEL,
+  supportsStreamingFeed,
   type TtsOptions,
   type TtsProvider,
 } from '@chat-a/providers';
+import { SentenceSplitter } from '@chat-a/runtime';
 import {
   IPC,
   StateTracker,
@@ -55,12 +57,18 @@ import {
   type MemoryItem,
   // —— 三语种 + 朗读(本批次) ——
   runSpeakReply,
+  runStreamSpeakReply,
+  makeTokenStreamReadout,
+  resolveSpokenPlan,
   translateForSpeech,
   isSpeakAvailable,
   normalizeLangCode,
   normalizeTtsLang,
   type LangForm,
   type TtsAudioChunk,
+  type SpeakStreamSession,
+  type SentenceFeed,
+  type TokenStreamReadout,
 } from './ipc-contract';
 
 let mainWindow: BrowserWindow | null = null;
@@ -300,6 +308,16 @@ function isEmotionFromMood(handle: AppHandle): boolean {
   return raw === 'on' || raw === '1' || raw === 'true' || raw === 'yes';
 }
 
+/**
+ * 「同会话流式朗读」开关(env CHAT_A_TTS_STREAM_READOUT=on/1/true/yes;默认 off)(承 §3.2)。
+ * 启用 + TTS 引擎支持同会话流式喂(cosyvoice)→ 句切逐句喂同一会话、首句即出声、复刻音色不漂移;
+ * 关 / 引擎不支持 → 回落整段一次合成(逐字回归)。流式合成抛错也降级整段(speakReply 内 catch)。
+ */
+function isStreamReadoutOn(handle: AppHandle): boolean {
+  const raw = (handle.env['CHAT_A_TTS_STREAM_READOUT'] ?? '').trim().toLowerCase();
+  return raw === 'on' || raw === '1' || raw === 'true' || raw === 'yes';
+}
+
 /** 当前三语种 + 朗读开关 + 可用性(供 lang:get 返回与初值回填)。 */
 function buildLangForm(handle: AppHandle): LangForm {
   const env = handle.env;
@@ -410,6 +428,43 @@ function makeSynthesize(
 }
 
 /**
+ * 把支持流式喂的 TTS provider 适配成 ipc-contract 的 {@link SpeakStreamSession}(承 §3.2):
+ * 开一条同会话 synthesizeStream(语种/voiceId/心情指令经 opts 透传)→ push/finish/abort 直通,
+ * chunks 把 PcmChunk → TtsAudioChunk。仅 supportsStreamingFeed 的引擎(cosyvoice)可调。
+ */
+function makeStreamSession(
+  tts: TtsProvider,
+  env: NodeJS.ProcessEnv,
+  instruction: string | undefined,
+): (ttsLang: string) => SpeakStreamSession {
+  const profile = loadVoiceProfile(env);
+  return (ttsLang: string): SpeakStreamSession => {
+    if (!supportsStreamingFeed(tts)) {
+      // 调用方应先判 supportsStreamingFeed;兜底:不支持即抛,由上层 catch 降级整段。
+      throw new Error('TTS 引擎不支持同会话流式喂(回落整段)');
+    }
+    const opts: TtsOptions = {
+      ...(ttsLang.length > 0 ? { language: ttsLang } : {}),
+      ...(profile.voiceId !== undefined ? { voiceId: profile.voiceId } : {}),
+      ...(instruction !== undefined && instruction.length > 0 ? { instruction } : {}),
+    };
+    const session = tts.synthesizeStream(opts);
+    return {
+      push: (text) => session.push(text),
+      finish: () => session.finish(),
+      abort: () => session.abort(),
+      chunks: {
+        async *[Symbol.asyncIterator]() {
+          for await (const chunk of session.chunks) {
+            yield { pcm: chunk.samples, sampleRate: chunk.sampleRate };
+          }
+        },
+      },
+    };
+  };
+}
+
+/**
  * 朗读分句:整段回复**一次合成**(不再逐句切)。
  * 逐句=每句一个独立 WS 合成调用,复刻音色逐句音色漂移→听感「多个音色混杂」;qwen-tts-realtime 本就
  * 流式(整段也边合边出音),整段一次合成既消除漂移/重叠,音色又一致。回复短(陪伴对话),一次合成首音延迟可接受。
@@ -420,9 +475,46 @@ function splitReplySentences(text: string): readonly string[] {
 }
 
 /**
- * 朗读一条回复(§4.1,本批次):若朗读开启且 TTS 可用,据语种解耦(显示语种 displayLang + 合成语种 ttsLang)
- * 算 spokenText(必要时走轻量 LLM 翻译)→ 分句 → 逐句合成 → 每块经 IPC.ttsAudio 推渲染层。
- * signal 由 SpeakController 给:被打断(新消息/点停)即停。任何错误吞掉(有声尽力、绝不崩,§3.2)。
+ * 算「随心情说话」的 per-call 情绪指令(§6 PAD → §4.1 TTS 情感):
+ * 开关启用时读当前 PAD 心情的 voiceInstruction;关 / 读失败 → undefined(无指令、逐字回归,§3.2)。
+ * 仅 cosyvoice 引擎实际消费。
+ */
+function computeMoodInstruction(handle: AppHandle): string | undefined {
+  if (!isEmotionFromMood(handle)) return undefined;
+  try {
+    // 先同步到本回合已保存的活 PAD(显示引擎只读、不 advance,不 reload 会读到开机 stale 值)。
+    handle.persona.reload();
+    const vi = handle.persona.tone().voiceInstruction;
+    return vi.length > 0 ? vi : undefined;
+  } catch {
+    return undefined; // 读心情失败 → 无指令(不崩)。
+  }
+}
+
+/** 翻译通道:用文字链路同一 handle.llm 发一条 system + user(显示 reply)→ 译文喂 TTS。 */
+function makeTranslate(
+  handle: AppHandle,
+  signal: AbortSignal,
+): (displayText: string, targetLang: string) => Promise<string> {
+  return (displayText, targetLang) =>
+    translateForSpeech(
+      { complete: (system, user) => completeOnce(handle, system, user, signal) },
+      displayText,
+      targetLang,
+    );
+}
+
+/**
+ * 朗读一条**整段回复**(§4.1,本批次):若朗读开启且 TTS 可用,据语种解耦算 spokenText(必要时翻译)
+ * → 分句 → 逐句合成 → 每块经 IPC.ttsAudio 推渲染层。signal 由 SpeakController 给:被打断即停。
+ *
+ * **流式门控(§3.2)**:CHAT_A_TTS_STREAM_READOUT 开 + 引擎支持同会话流式喂(cosyvoice)→ 走
+ * {@link runStreamSpeakReply}(整段后句切、同会话逐句喂、首句即出声、音色不漂移);
+ * 流式抛错 / 引擎不支持 / 门控关 → 回落整段一次合成(§3.2 优雅降级)。
+ *
+ * ⚠️ R7 首音:此函数在整段 reply 后跑,**第一步**(整段后句切流式喂)首音 ≈ 整段生成时间——R7 未真解;
+ * 真正解 R7 的「边生成边喂」走 {@link speakReplyFromTokens}(同语种挂 onToken)。
+ * 任何错误吞掉(有声尽力、绝不崩,§3.2)。
  */
 async function speakReply(handle: AppHandle, reply: string, signal: AbortSignal): Promise<void> {
   if (reply.trim().length === 0) return;
@@ -430,31 +522,38 @@ async function speakReply(handle: AppHandle, reply: string, signal: AbortSignal)
   const env = handle.env;
   const displayLang = normalizeLangCode(env['CHAT_A_DISPLAY_LANG']);
   const ttsLang = (env['CHAT_A_TTS_LANG'] ?? '').trim();
-  // 随心情说话(§6 PAD → §4.1 TTS 情感):开关启用时读当前心情的 voiceInstruction,作 per-call 指令注入。
-  // 每条回复读一次(朗读整段一次合成);读心情失败优雅降级为无指令(§3.2)。仅 cosyvoice 引擎实际生效。
-  let moodInstruction: string | undefined;
-  if (isEmotionFromMood(handle)) {
+  const moodInstruction = computeMoodInstruction(handle);
+
+  // 流式路:门控开 + 引擎支持同会话流式喂 → 试同会话逐句喂;失败降级整段(下面 fallback)。
+  if (isStreamReadoutOn(handle) && supportsStreamingFeed(handle.tts)) {
     try {
-      // 先同步到本回合已保存的活 PAD(显示引擎只读、不 advance,不 reload 会读到开机 stale 值)。
-      handle.persona.reload();
-      const vi = handle.persona.tone().voiceInstruction;
-      if (vi.length > 0) moodInstruction = vi;
-    } catch {
-      /* 读心情失败 → 回落无指令(不崩、不中断朗读) */
+      await runStreamSpeakReply(
+        {
+          newSplitter: () => makeSentenceFeed(),
+          openSession: makeStreamSession(handle.tts, env, moodInstruction),
+          translate: makeTranslate(handle, signal),
+          emitAudio: (chunk) => emit(IPC.ttsAudio, chunk),
+        },
+        reply,
+        displayLang,
+        ttsLang,
+        signal,
+      );
+      return; // 流式成功:不再走整段路。
+    } catch (err) {
+      if (signal.aborted) return; // 被打断 → 不降级、不再合成。
+      console.warn('[speak] 流式朗读失败,降级整段一次合成:', err instanceof Error ? err.message : err);
+      // 落到下面整段路(§3.2 优雅降级)。
     }
   }
+
+  // 整段一次合成路(门控关 / 引擎不支持 / 流式降级)。
   try {
     await runSpeakReply(
       {
         splitSentences: splitReplySentences,
         synthesize: makeSynthesize(handle.tts, env, moodInstruction),
-        // 翻译通道:用文字链路同一 handle.llm 发一条 system + user(显示 reply)→ 译文喂 TTS。
-        translate: (displayText, targetLang) =>
-          translateForSpeech(
-            { complete: (system, user) => completeOnce(handle, system, user, signal) },
-            displayText,
-            targetLang,
-          ),
+        translate: makeTranslate(handle, signal),
         emitAudio: (chunk) => emit(IPC.ttsAudio, chunk),
       },
       reply,
@@ -465,6 +564,52 @@ async function speakReply(handle: AppHandle, reply: string, signal: AbortSignal)
   } catch (err) {
     console.warn('[speak] 朗读链路失败(不影响文字回复):', err instanceof Error ? err.message : err);
     // 朗读链路任何失败不影响文字气泡(已定型),只吞掉(§3.2)。
+  }
+}
+
+/** 新建一个 runtime SentenceSplitter,适配成 ipc-contract 的 {@link SentenceFeed}(push 返新整句 / flush 残余)。 */
+function makeSentenceFeed(): SentenceFeed {
+  const splitter = new SentenceSplitter();
+  return {
+    push: (text) => splitter.push(text),
+    flush: () => splitter.flush(),
+  };
+}
+
+/**
+ * **第二步(真解 R7,§3.2)**:同语种(无翻译)边生成边喂——把回合 onToken 接进 SentenceSplitter,
+ * 出一句即喂同一条流式会话,首句到齐即出声,远早于整段。
+ *
+ * 仅在:朗读开 + TTS 可用 + 门控开 + 引擎支持流式 + **plan 不需翻译(同语种/自动)** 时启用;
+ * 否则返回 undefined(调用方回落整段后 speakReply:翻译需整段、整段合成等)。
+ * 返回 {@link TokenStreamReadout}:把它的 onToken tee 进 convo.send、回合后 done() 收尾。
+ * 失败(consumed reject)由调用方降级整段。
+ */
+function speakReplyFromTokens(
+  handle: AppHandle,
+  signal: AbortSignal,
+): TokenStreamReadout | undefined {
+  if (!isSpeakOn(handle) || !speakAvailable(handle)) return undefined;
+  if (!isStreamReadoutOn(handle) || !supportsStreamingFeed(handle.tts)) return undefined;
+  const env = handle.env;
+  const displayLang = normalizeLangCode(env['CHAT_A_DISPLAY_LANG']);
+  const ttsLang = (env['CHAT_A_TTS_LANG'] ?? '').trim();
+  const plan = resolveSpokenPlan(displayLang, ttsLang);
+  // 异语种需整段翻译 → 不走边生成边喂(回落整段后 speakReply 流式/整段)。
+  if (plan.needsTranslation) return undefined;
+  const moodInstruction = computeMoodInstruction(handle);
+  try {
+    return makeTokenStreamReadout(
+      {
+        newSplitter: () => makeSentenceFeed(),
+        openSession: makeStreamSession(handle.tts, env, moodInstruction),
+        emitAudio: (chunk) => emit(IPC.ttsAudio, chunk),
+      },
+      plan.ttsLang,
+      signal,
+    );
+  } catch {
+    return undefined; // 开会话失败(如不支持)→ 回落整段路。
   }
 }
 
@@ -524,9 +669,25 @@ function registerIpc(handle: AppHandle): void {
     await runSendTurn(
       {
         send: async (t, onToken) => {
-          const reply = await handle.convo.send(t, onToken);
-          // 回合体内拿到完整 reply:不阻塞 runSendTurn 的 reply emit(先定型气泡再发声),朗读后台跑。
-          void speakReply(handle, reply, signal);
+          // 朗读第二步(真解 R7,§3.2):同语种 + 流式门控开 → 把 onToken tee 进句切流式会话,
+          // 边生成边喂、首句即出声。否则 readout=undefined,回落整段后 speakReply。
+          const readout = speakReplyFromTokens(handle, signal);
+          const reply = readout
+            ? await handle.convo.send(t, (tok) => {
+                onToken(tok); // 仍逐 token 推渲染层(文字气泡)。
+                readout.onToken(tok); // 同时喂朗读句切流式会话。
+              })
+            : await handle.convo.send(t, onToken);
+          if (readout) {
+            readout.done(); // 回合结束:flush 残余 + finish 流式会话。
+            // 流式消费失败(task-failed/WS)→ 降级整段一次合成(§3.2);成功/被打断则不重复发声。
+            readout.consumed.catch(() => {
+              if (!signal.aborted) void speakReply(handle, reply, signal);
+            });
+          } else {
+            // 回合体内拿到完整 reply:不阻塞 reply emit(先定型气泡再发声),朗读后台跑(整段后流式/整段)。
+            void speakReply(handle, reply, signal);
+          }
           return reply;
         },
         emit: (ch, p) => emit(ch, p),
