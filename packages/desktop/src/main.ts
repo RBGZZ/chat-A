@@ -700,6 +700,14 @@ function registerIpc(handle: AppHandle): void {
   ipcMain.handle(IPC.reset, () => {
     speakCtl?.stop();
     handle.reset();
+    // 换段后刷新「心情」栏:reload 活 PAD + emit mood(对齐 turn:end / personaUpdate),
+    // 否则心情栏停在旧值直到下一回合。reload 只读、失败 try/catch 不崩(§3.1)。
+    try {
+      handle.persona.reload();
+      emit(IPC.mood, toMoodSummary(handle.persona.tone()));
+    } catch {
+      /* 读心情失败不影响 reset 主链路(§3.2) */
+    }
   });
 
   // 横幅 + 设置面板信息(含语音输出语种回填值)。
