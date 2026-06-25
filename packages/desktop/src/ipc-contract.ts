@@ -699,6 +699,161 @@ export async function runSpeakReply(
   return spokenText;
 }
 
+// ───────────────────────────── 朗读:同会话流式喂(纯,§3.2) ─────────────────────────────
+
+/**
+ * 一条「同会话流式喂文本」会话的最小注入面(对应 providers 的 TtsStreamSession;此处解耦不直依赖)。
+ * push 逐句喂、finish 正常收尾、abort 直接丢弃在途音频;chunks 产 TtsAudioChunk。
+ */
+export interface SpeakStreamSession {
+  push(text: string): void;
+  finish(): void;
+  abort(): void;
+  readonly chunks: AsyncIterable<TtsAudioChunk>;
+}
+
+/** 流式句切器最小面(对应 runtime SentenceSplitter:push 凑句、flush 吐残余)。 */
+export interface SentenceFeed {
+  /** 喂一段 token 文本,返回本次新凑成的整句(0..n)。 */
+  push(text: string): readonly string[];
+  /** 流结束时吐最后残余(无则 null)。 */
+  flush(): string | null;
+}
+
+/** runStreamSpeakReply 注入面(headless 单测:不依赖真 TTS/electron)。 */
+export interface StreamSpeakReplyPort {
+  /** 句切器工厂(每次朗读新建一个,避免跨回合残留)。 */
+  readonly newSplitter: () => SentenceFeed;
+  /** 开一条同会话流式会话(吃合成语种,空=不下发)。仅 cosyvoice 等支持引擎提供;上层据此回落整段。 */
+  readonly openSession: (ttsLang: string) => SpeakStreamSession;
+  /** 翻译通道(needsTranslation 时调;返回 spokenText)。 */
+  readonly translate: (displayText: string, targetLang: string) => Promise<string>;
+  /** 向渲染层推一块音频。 */
+  readonly emitAudio: (chunk: TtsAudioChunk) => void;
+}
+
+/**
+ * 编排「朗读一条整段回复 —— 同会话流式喂」(纯,§3.2 流式优先;**第一步**:整段后句切流式喂)。
+ *
+ * 与 {@link runSpeakReply}(整段一次合成 / 逐句独立 session)的区别:**一条会话** push 多句 + finish,
+ * 块边合边出 → 首句即出声、且复刻音色不漂移(同 session)。需翻译时先 translate 得整段 spokenText 再句切喂。
+ *
+ * ⚠️ 首音 ≈ 整段生成时间(speakReply 在整段 reply 后跑);真正解 R7 的「边生成边喂」见
+ * {@link makeTokenStreamReadout}(同语种挂 onToken)。
+ *
+ * 收尾:正常 finish;signal abort → session.abort()(丢弃在途、不发 finish-task);任何错误吞掉(有声尽力)。
+ * 返回实际朗读用的 spokenText(追溯/单测)。
+ */
+export async function runStreamSpeakReply(
+  port: StreamSpeakReplyPort,
+  displayText: string,
+  displayLang: string,
+  ttsLang: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const plan = resolveSpokenPlan(displayLang, ttsLang);
+  const spokenText = plan.needsTranslation
+    ? await port.translate(displayText, plan.ttsLang)
+    : displayText;
+  if (signal.aborted || spokenText.trim().length === 0) return spokenText;
+
+  const session = port.openSession(plan.ttsLang);
+  let onAbort: (() => void) | undefined;
+  try {
+    // 推送侧:句切整段 → 逐句 push;残余 flush;finish 收尾。
+    const splitter = port.newSplitter();
+    for (const sentence of splitter.push(spokenText)) {
+      if (signal.aborted) break;
+      if (sentence.trim().length > 0) session.push(sentence);
+    }
+    const tail = splitter.flush();
+    if (tail !== null && !signal.aborted) session.push(tail);
+    session.finish();
+
+    // abort 在消费期间也要真停:挂 signal → session.abort()。
+    onAbort = (): void => session.abort();
+    if (signal.aborted) session.abort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+
+    // 消费侧:边合边出。
+    for await (const chunk of session.chunks) {
+      if (signal.aborted) break;
+      port.emitAudio(chunk);
+    }
+  } catch {
+    // 同会话流式抛错(task-failed / WS):吞掉,由调用方决定是否降级整段(有声尽力,不崩)。
+    session.abort();
+    throw new Error('stream-readout-failed'); // 让上层 catch 据此回落整段一次合成。
+  } finally {
+    if (onAbort !== undefined) signal.removeEventListener('abort', onAbort);
+  }
+  return spokenText;
+}
+
+/** makeTokenStreamReadout 注入面(同语种边生成边喂;翻译场景不走此路,回落整段后流式)。 */
+export interface TokenStreamReadoutPort {
+  readonly newSplitter: () => SentenceFeed;
+  readonly openSession: (ttsLang: string) => SpeakStreamSession;
+  readonly emitAudio: (chunk: TtsAudioChunk) => void;
+}
+
+/** 边生成边喂的句柄:把 onToken 接进回合流,done() 在回合结束冲刷残余 + finish,返回消费完成的 Promise。 */
+export interface TokenStreamReadout {
+  /** 接进 `convo.send` 的 onToken:每个 token 经句切,凑成整句即 push 进会话。 */
+  readonly onToken: (token: string) => void;
+  /** 回合结束(整段 reply 到齐):flush 残余 + finish 会话。 */
+  readonly done: () => void;
+  /** 音频消费完成(正常结束/出错/abort)的 Promise;上层可 await 以便降级判定。 */
+  readonly consumed: Promise<void>;
+}
+
+/**
+ * 「边生成边喂同会话」朗读(纯,§3.2 真解 R7 的**第二步**):
+ * 把回复的 onToken 流经 {@link SentenceFeed} 句切,出一句即 push 进同一条流式会话,首句到齐即出声、
+ * 远早于整段。仅**同语种(无翻译)**走此路;翻译场景翻译需整段,回落 {@link runStreamSpeakReply}。
+ *
+ * 立即开会话并启动 chunks 消费(后台 for-await → emitAudio);abort 经 signal → session.abort()。
+ * 任何错误经 `consumed` 抛出(reject),上层据此决定降级。
+ */
+export function makeTokenStreamReadout(
+  port: TokenStreamReadoutPort,
+  ttsLang: string,
+  signal: AbortSignal,
+): TokenStreamReadout {
+  const splitter = port.newSplitter();
+  const session = port.openSession(ttsLang);
+  const onAbort = (): void => session.abort();
+  if (signal.aborted) session.abort();
+  else signal.addEventListener('abort', onAbort, { once: true });
+
+  const consumed = (async (): Promise<void> => {
+    try {
+      for await (const chunk of session.chunks) {
+        if (signal.aborted) break;
+        port.emitAudio(chunk);
+      }
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+  })();
+
+  return {
+    onToken: (token: string): void => {
+      if (signal.aborted) return;
+      for (const sentence of splitter.push(token)) {
+        if (sentence.trim().length > 0) session.push(sentence);
+      }
+    },
+    done: (): void => {
+      if (signal.aborted) return;
+      const tail = splitter.flush();
+      if (tail !== null && tail.trim().length > 0) session.push(tail);
+      session.finish();
+    },
+    consumed,
+  };
+}
+
 /**
  * 解析「朗读是否可用」(纯):TTS 配置 kind 为 'fake' 视为无真合成 → 不可用(朗读开关禁用、UI 提示)。
  * 其余 kind(qwen-tts/openai-compat/kokoro/gpt-sovits/edge)视为可用(真机有 key/服务时合成)。

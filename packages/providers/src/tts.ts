@@ -27,6 +27,53 @@ export interface TtsProvider {
 }
 
 /**
+ * 一次「同会话流式喂文本」的句柄(承 §3.2 流式优先·低音频延迟)。
+ *
+ * 用途:把回复**逐句**喂进**同一条** TTS 会话(对 CosyVoice = 同一 run-task 多次 continue-task),
+ * 首句到齐即合成出声、不等整段;同会话喂 → 复刻音色不漂移(2026-06-25 真机验证)。
+ *
+ * 生命周期:
+ *  1. `push(text)`×N —— 逐句送文本(可在 task-started 前调用,实现内部缓冲、started 后冲刷);
+ *  2. 正常收尾 `finish()` —— 等服务端把剩余文本合完(发 finish-task);
+ *  3. 打断 `abort()` —— **直接 close 丢弃在途音频,不发 finish-task**(与 finish 区分,新消息抢占用);
+ *  4. `chunks` —— 异步产出 PcmChunk;`for await` 直到正常结束(finish)/出错/被 abort。
+ *
+ * 错误:服务端 task-failed / WS error / 提前 close 经 `chunks` 抛出(消费方 try/catch 降级整段)。
+ */
+export interface TtsStreamSession {
+  /** 送一段文本(逐句喂;task-started 前调用会被缓冲、started 后按序冲刷)。 */
+  push(text: string): void;
+  /** 正常收尾:发 finish-task,等服务端合完剩余文本后 `chunks` 自然结束。 */
+  finish(): void;
+  /** 打断:直接 close 丢弃在途音频,**不**发 finish-task(与 finish 区分)。幂等。 */
+  abort(): void;
+  /** 合成出的音频块流;`for await` 消费,正常结束/出错/被 abort 时终止。 */
+  readonly chunks: AsyncIterable<PcmChunk>;
+}
+
+/**
+ * 可选能力:**同会话流式喂文本**的 TtsProvider(承 §3.2)。
+ *
+ * 只有支持「一条会话内多次喂文本」的引擎实现(如 CosyVoice 同 run-task 多 continue-task);
+ * 上层据 `typeof provider.synthesizeStream === 'function'`(或 {@link supportsStreamingFeed})
+ * 判定回落:不支持的引擎走整段一次合成。既有 {@link TtsProvider.synthesize} 一次性语义不变。
+ */
+export interface StreamingTtsProvider extends TtsProvider {
+  /**
+   * 开一条流式会话:返回 {@link TtsStreamSession}(push×N → finish/abort)。
+   * 同 {@link TtsProvider.synthesize} 的能力门(语种/复刻)适用;voiceId 等经 `opts` 透传。
+   */
+  synthesizeStream(opts?: TtsOptions): TtsStreamSession;
+}
+
+/** 运行时判定某 TtsProvider 是否支持「同会话流式喂文本」(上层据此决定流式 / 回落整段)。 */
+export function supportsStreamingFeed(
+  provider: TtsProvider,
+): provider is StreamingTtsProvider {
+  return typeof (provider as Partial<StreamingTtsProvider>).synthesizeStream === 'function';
+}
+
+/**
  * TTS 能力声明(§4.1/§4.3)。字段贴合真实引擎:
  * Edge-TTS 多语种内置音色;Kokoro 预置 voiceId;GPT-SoVITS/CosyVoice 支持 zero-shot 复刻。
  */

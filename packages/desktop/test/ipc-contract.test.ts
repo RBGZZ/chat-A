@@ -30,9 +30,13 @@ import {
   buildTranslateSystemPrompt,
   translateForSpeech,
   runSpeakReply,
+  runStreamSpeakReply,
+  makeTokenStreamReadout,
   isSpeakAvailable,
   TTS_LANG_FOLLOW,
   type TtsAudioChunk,
+  type SentenceFeed,
+  type SpeakStreamSession,
 } from '../src/ipc-contract';
 
 const cid = 's1/t1/0';
@@ -479,6 +483,275 @@ describe('runSpeakReply(朗读编排:解耦+分句+逐块+取消,纯)', () => {
       new AbortController().signal,
     );
     expect(emitted.length).toBe(1); // 第一句失败,第二句成功
+  });
+});
+
+describe('runStreamSpeakReply(同会话流式喂:整段后句切,纯)', () => {
+  // 简单句切器:遇 。!? 切句,残余 flush。
+  const newSplitter = (): SentenceFeed => {
+    let buf = '';
+    return {
+      push(text: string): string[] {
+        buf += text;
+        const out: string[] = [];
+        for (;;) {
+          const m = buf.search(/[。!?]/);
+          if (m < 0) break;
+          out.push(buf.slice(0, m + 1));
+          buf = buf.slice(m + 1);
+        }
+        return out;
+      },
+      flush(): string | null {
+        const t = buf.trim();
+        buf = '';
+        return t.length > 0 ? t : null;
+      },
+    };
+  };
+
+  /** 记录式假会话:记 push 的句子,chunks 按句各产一块。 */
+  function fakeSession(): SpeakStreamSession & { pushed: string[]; finished: boolean; aborted: boolean } {
+    const pushed: string[] = [];
+    const s = {
+      pushed,
+      finished: false,
+      aborted: false,
+      push(t: string): void {
+        pushed.push(t);
+      },
+      finish(): void {
+        s.finished = true;
+      },
+      abort(): void {
+        s.aborted = true;
+      },
+      get chunks(): AsyncIterable<TtsAudioChunk> {
+        return {
+          async *[Symbol.asyncIterator]() {
+            for (const sentence of pushed) {
+              yield { pcm: new Int16Array([sentence.length]), sampleRate: 24000 };
+            }
+          },
+        };
+      },
+    };
+    return s;
+  }
+
+  it('同语种:整段句切成多句 push 进同一会话 + finish,逐块 emit', async () => {
+    const emitted: TtsAudioChunk[] = [];
+    const session = fakeSession();
+    const spoken = await runStreamSpeakReply(
+      {
+        newSplitter,
+        openSession: () => session,
+        translate: async (t) => t,
+        emitAudio: (c) => emitted.push(c),
+      },
+      '你好。再见!',
+      'zh',
+      'follow',
+      new AbortController().signal,
+    );
+    expect(spoken).toBe('你好。再见!');
+    expect(session.pushed).toEqual(['你好。', '再见!']); // 同一会话两句
+    expect(session.finished).toBe(true);
+    expect(emitted.length).toBe(2);
+  });
+
+  it('不同语种:先 translate 得整段译文,再句切流式喂', async () => {
+    const emitted: TtsAudioChunk[] = [];
+    const session = fakeSession();
+    const translate = vi.fn(async () => 'Hello! Bye!');
+    const spoken = await runStreamSpeakReply(
+      { newSplitter, openSession: () => session, translate, emitAudio: (c) => emitted.push(c) },
+      '你好!',
+      'zh',
+      'en',
+      new AbortController().signal,
+    );
+    expect(translate).toHaveBeenCalledWith('你好!', 'en');
+    expect(spoken).toBe('Hello! Bye!');
+    expect(session.pushed).toEqual(['Hello!', ' Bye!']);
+  });
+
+  it('已 abort → 不开会话合成', async () => {
+    const emitted: TtsAudioChunk[] = [];
+    const ac = new AbortController();
+    ac.abort();
+    let opened = false;
+    await runStreamSpeakReply(
+      {
+        newSplitter,
+        openSession: () => {
+          opened = true;
+          return fakeSession();
+        },
+        translate: async (t) => t,
+        emitAudio: (c) => emitted.push(c),
+      },
+      '你好。',
+      'zh',
+      'follow',
+      ac.signal,
+    );
+    expect(opened).toBe(false);
+    expect(emitted.length).toBe(0);
+  });
+
+  it('流式抛错 → session.abort + 抛 stream-readout-failed(上层据此降级整段)', async () => {
+    const session = fakeSession();
+    const errSession: SpeakStreamSession = {
+      push: session.push,
+      finish: session.finish,
+      abort: () => {
+        session.aborted = true;
+      },
+      get chunks(): AsyncIterable<TtsAudioChunk> {
+        return {
+          async *[Symbol.asyncIterator]() {
+            throw new Error('task-failed');
+            yield { pcm: new Int16Array([0]), sampleRate: 24000 };
+          },
+        };
+      },
+    };
+    await expect(
+      runStreamSpeakReply(
+        { newSplitter, openSession: () => errSession, translate: async (t) => t, emitAudio: () => {} },
+        '你好。',
+        'zh',
+        'follow',
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/stream-readout-failed/);
+    expect(session.aborted).toBe(true);
+  });
+});
+
+describe('makeTokenStreamReadout(边生成边喂同会话:同语种解 R7,纯)', () => {
+  const newSplitter = (): SentenceFeed => {
+    let buf = '';
+    return {
+      push(text: string): string[] {
+        buf += text;
+        const out: string[] = [];
+        for (;;) {
+          const m = buf.search(/[。!?]/);
+          if (m < 0) break;
+          out.push(buf.slice(0, m + 1));
+          buf = buf.slice(m + 1);
+        }
+        return out;
+      },
+      flush(): string | null {
+        const t = buf.trim();
+        buf = '';
+        return t.length > 0 ? t : null;
+      },
+    };
+  };
+
+  function liveSession() {
+    const pushed: string[] = [];
+    let resolveNext: (() => void) | undefined;
+    const waiters: Array<() => void> = [];
+    let finished = false;
+    const session = {
+      pushed,
+      aborted: false,
+      push(t: string): void {
+        pushed.push(t);
+        const w = waiters.shift();
+        if (w) w();
+        if (resolveNext) {
+          resolveNext();
+          resolveNext = undefined;
+        }
+      },
+      finish(): void {
+        finished = true;
+        const w = waiters.shift();
+        if (w) w();
+      },
+      abort(): void {
+        session.aborted = true;
+        finished = true;
+      },
+      get chunks(): AsyncIterable<TtsAudioChunk> {
+        let i = 0;
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              async next(): Promise<IteratorResult<TtsAudioChunk>> {
+                for (;;) {
+                  if (i < pushed.length) {
+                    const sentence = pushed[i++]!;
+                    return { done: false, value: { pcm: new Int16Array([sentence.length]), sampleRate: 24000 } };
+                  }
+                  if (finished) return { done: true, value: undefined };
+                  await new Promise<void>((r) => waiters.push(r));
+                }
+              },
+            };
+          },
+        };
+      },
+    };
+    return session;
+  }
+
+  it('token 流逐字喂:凑成整句即 push,首句先于整段', async () => {
+    const emitted: TtsAudioChunk[] = [];
+    const session = liveSession();
+    const readout = makeTokenStreamReadout(
+      { newSplitter, openSession: () => session, emitAudio: (c) => emitted.push(c) },
+      'zh',
+      new AbortController().signal,
+    );
+    // 逐 token 喂:第一句到「。」即应 push。
+    readout.onToken('你');
+    readout.onToken('好');
+    readout.onToken('。'); // 第一句凑齐
+    expect(session.pushed).toEqual(['你好。']);
+    readout.onToken('再见!'); // 第二句
+    expect(session.pushed).toEqual(['你好。', '再见!']);
+    readout.done(); // 无残余
+    await readout.consumed;
+    expect(emitted.length).toBe(2);
+  });
+
+  it('done flush 残余(末句无标点)', async () => {
+    const emitted: TtsAudioChunk[] = [];
+    const session = liveSession();
+    const readout = makeTokenStreamReadout(
+      { newSplitter, openSession: () => session, emitAudio: (c) => emitted.push(c) },
+      'zh',
+      new AbortController().signal,
+    );
+    readout.onToken('在听');
+    expect(session.pushed).toEqual([]); // 无句末标点,未 push
+    readout.done(); // flush 残余
+    expect(session.pushed).toEqual(['在听']);
+    await readout.consumed;
+    expect(emitted.length).toBe(1);
+  });
+
+  it('abort → session.abort,后续 token 不再 push', async () => {
+    const session = liveSession();
+    const ac = new AbortController();
+    const readout = makeTokenStreamReadout(
+      { newSplitter, openSession: () => session, emitAudio: () => {} },
+      'zh',
+      ac.signal,
+    );
+    readout.onToken('你好。');
+    ac.abort();
+    expect(session.aborted).toBe(true);
+    readout.onToken('再见。'); // abort 后忽略
+    expect(session.pushed).toEqual(['你好。']);
+    await readout.consumed;
   });
 });
 
