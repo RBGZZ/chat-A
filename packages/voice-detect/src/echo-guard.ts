@@ -49,6 +49,10 @@ export interface EchoGuardConfig {
   /**
    * 放行「真打断」所需的**连续达标帧数** N(≥1),三档(speaking/cooldown/open)同此去抖。
    * N=1 等价即时放行;N≥2 需连续 N 帧达标,中途掉线即清零重计(压断续回声毛刺)。
+   *
+   * **分工**:库默认(`DEFAULT_ECHO_GUARD_CONFIG`)固定 N=1(回归硬线,逐字现状);**真去抖值由装配层
+   * 覆盖**——语音模式装配 `loadEchoGuardConfig` 据真机场景把 N 提到 3(≈30ms,10ms/帧),压单帧回声/
+   * 噪声尖峰误打断。N×帧时长即「最短连续语音时长门槛」,等价 min-interruption 护栏(不另叠时长门槛)。
    */
   readonly confirmFrames: number;
   /** 「高置信」帧的最低语音概率(prob ≥ 此值);默认与 VAD 阈值对齐(不比 VAD 更宽松)。 */
@@ -79,7 +83,8 @@ export interface EchoGuardConfig {
 /**
  * EchoGuard 默认配置(**安全默认**):
  * - `enabled:false` → VoiceLoop 未注入即此态,行为逐字现状;
- * - `confirmFrames:1` → 即使启用,默认 N=1 也使既有 barge-in 时序不变(回归硬线);
+ * - `confirmFrames:1` → 库默认 N=1 即使启用也使既有 barge-in 时序不变(回归硬线;真去抖值由装配层
+ *   `loadEchoGuardConfig` 覆盖为 3,见 client/cli-voice.ts——库默认与装配默认分工、互不耦合);
  * - `minSpeechProb:0.5` → 与 `DEFAULT_VAD_CONFIG.speechProbThreshold` 对齐;
  * - `minEnergy:0` → 不附加旧能量门;
  * - `cooldownMs:1500` → roadmap §3.1 推荐 1.5s 冷却窗;

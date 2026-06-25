@@ -80,16 +80,24 @@ export function loadVoicePath(env: NodeJS.ProcessEnv): VoicePath {
  * 语音模式**默认开启** EchoGuard(`enabled:true`),压制自家 TTS 回声引起的误打断;
  * 经 `CHAT_A_ECHO_GUARD=off`(/`false`/`0`/`no`/`disabled`)可显式关闭(回落逐字现状即时打断)。
  *
- * 其余阈值沿用 {@link DEFAULT_ECHO_GUARD_CONFIG}(`confirmFrames:1` 等价即时确认时序、回归硬线安全),
- * 真机标定后可经后续 env 旋钮细调;本切片只把「默认开关」从 false 翻到 true(语音模式范围内)。
+ * **去抖默认 `confirmFrames:3`(barge-in-polish)**:协议帧 10ms/帧(见 protocol `FRAME_MS`),
+ * N=3 ≈ 需连续 30ms 高置信语音才确认是用户真说话→才打断,压制自家 TTS 经空气/回环灌进麦克风的
+ * **单帧回声尖峰**与瞬态噪声误打断(N=1 等价无去抖,是真机误打断防护的空档)。30ms 远低于人类
+ * 反应/语音感知阈,伴侣仍「能被打断」(不变迟钝);此值即「最短连续语音时长门槛」,故无需再叠
+ * 独立的 min-interruption 时长护栏(职责等价、避免重复工程)。
+ *
+ * **与库默认的分工**:此处**装配层**据真机场景把 `confirmFrames` 覆盖为去抖值 3;而
+ * {@link DEFAULT_ECHO_GUARD_CONFIG} 的 `confirmFrames:1` 是**库级回归硬线**(配 `enabled:false`,
+ * 直接构造/外部注入时给「逐字现状」安全起点),保持 1 不变。其余阈值(`minSpeechProb`/`minEnergy`/
+ * `cooldownMs`/双层 RMS 门槛)仍沿用库默认。本切片不新增 `confirmFrames` 专属 env 旋钮(避免过度工程)。
  * 返回 undefined 仅当显式关闭 → VoiceLoop 不注入 → barge-in 逐字现状(与历史等价)。
  */
 export function loadEchoGuardConfig(env: NodeJS.ProcessEnv): EchoGuardConfig | undefined {
   const raw = (env['CHAT_A_ECHO_GUARD'] ?? '').trim().toLowerCase();
   const off = raw === 'off' || raw === 'false' || raw === '0' || raw === 'no' || raw === 'disabled';
   if (off) return undefined; // 显式关 → 不注入 → 逐字现状
-  // 缺省/其它值 → 语音模式默认开启(enabled 翻 true,其余沿用安全默认)。
-  return { ...DEFAULT_ECHO_GUARD_CONFIG, enabled: true };
+  // 缺省/其它值 → 语音模式默认开启(enabled 翻 true)+ 真去抖(confirmFrames 提到 3),其余沿用安全默认。
+  return { ...DEFAULT_ECHO_GUARD_CONFIG, enabled: true, confirmFrames: 3 };
 }
 
 /**
