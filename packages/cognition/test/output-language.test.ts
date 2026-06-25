@@ -16,13 +16,18 @@ function ctx(outputLang?: string): PromptContext {
 describe('cognition/OutputLanguageContributor (§4.1 输出语种)', () => {
   const c = new OutputLanguageContributor();
 
-  it('outputLang 非空 → 注入目标语种指令,priority=outputLanguage,tier=peripheral', () => {
+  it('outputLang 非空 → 注入目标语种指令(码→中文名),priority=outputLanguage,tier=peripheral', () => {
     const f = c.contribute(ctx('zh'));
     expect(f).not.toBeNull();
     expect(f!.priority).toBe(PROMPT_PRIORITY.outputLanguage);
     expect(f!.tier).toBe('peripheral');
-    expect(f!.text).toContain('zh');
+    expect(f!.text).toContain('中文'); // zh → 中文(裸码映射为语言名,模型遵从更强)
     expect(f!.text).toContain('回复');
+  });
+
+  it('码映射:ja→日语;未知码原样', () => {
+    expect(c.contribute(ctx('ja'))!.text).toContain('日语');
+    expect(c.contribute(ctx('xx'))!.text).toContain('xx');
   });
 
   it('outputLang 缺省 → null(零注入,回归绿)', () => {

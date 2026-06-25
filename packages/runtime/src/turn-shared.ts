@@ -1,5 +1,5 @@
 import { isSpanContextValid, type Span } from '@opentelemetry/api';
-import type { AssembledPrompt, AnchorInput, StanceInput } from '@chat-a/cognition';
+import { languageName, type AssembledPrompt, type AnchorInput, type StanceInput } from '@chat-a/cognition';
 import type { MemoryRecord } from '@chat-a/memory';
 import type { SelfMemoryRef, SttEmotionLike } from '@chat-a/persona';
 import type { DecisionTraceRecalled } from '@chat-a/observability';
@@ -38,6 +38,8 @@ export function composeSystem(
   anchor?: AnchorInput,
   /** §4.1:输出语种;非空时 OutputLanguageContributor 注入目标回复语种。缺省=不注入(逐字现状)。 */
   outputLang?: string,
+  /** §4.1:双语原生输出配置;非空时 DualOutputContributor 要求一次产两版(显示+合成语种)。缺省=不注入(逐字现状)。 */
+  dualOutput?: { readonly displayLang: string; readonly spokenLang: string },
 ): { assembled: AssembledPrompt; recalled: readonly MemoryRecord[] } {
   let recalled: readonly MemoryRecord[] = [];
   try {
@@ -47,11 +49,18 @@ export function composeSystem(
   } catch {
     recalled = [];
   }
+  // §4.1 回复语种放**高注意力位**:除系统提示外,再把语种硬要求贴到**本轮用户消息末尾**(模型对最近用户消息
+  // 的遵从远强于系统提示——系统里的语种 steer 常被"镜像用户语言"的先验压过)。仅注入给 LLM 的消息,不落记忆
+  // (finalizeTurn 用原始 userText 写库)。缺省无 outputLang → 不加(逐字现状)。
+  const userTextForPrompt =
+    outputLang && outputLang.trim().length > 0
+      ? `${userText}\n\n[务必整段只用${languageName(outputLang)}回复,不要用其他语言。]`
+      : userText;
   const assembled = deps.assembler.assemble({
     skeleton: deps.skeleton,
     recalled,
     toneFragment,
-    userText,
+    userText: userTextForPrompt,
     history: deps.memory.snapshot(),
     stance,
     expressiveness: deps.expressiveness,
@@ -59,6 +68,8 @@ export function composeSystem(
     ...(anchor ? { anchor } : {}),
     // §4.1:仅在有输出语种时填(缺省不填 → OutputLanguageContributor 返回 null,系统提示逐字不变)。
     ...(outputLang ? { outputLang } : {}),
+    // §4.1:仅在双语模式时填(缺省不填 → DualOutputContributor 返回 null,系统提示逐字不变)。
+    ...(dualOutput ? { dualOutput } : {}),
   });
   return { assembled, recalled };
 }
@@ -171,11 +182,14 @@ export async function finalizeTurn(
     createdAtMs: at,
     correlationId: args.correlationId,
   });
+  // 🔴-2 记忆防污染(§4.1 双语):有 displayExtractor(双语态)则只把哨兵前显示段写历史/记忆,
+  // 哨兵和合成语种口语版不进召回。缺省 = 恒等 = 写全文(逐字现状)。
+  const memoryReply = deps.displayExtractor ? deps.displayExtractor(args.reply) : args.reply;
   deps.memory.appendMessage({
     sessionId: deps.sessionId,
     turnId: args.turnId,
     role: 'assistant',
-    content: args.reply,
+    content: memoryReply,
     createdAtMs: at,
     correlationId: args.correlationId,
   });
@@ -196,7 +210,7 @@ export async function finalizeTurn(
   } catch {
     /* 立场本轮不演化,回合继续 */
   }
-  await writeMemories(deps, args.userText, args.reply, at);
+  await writeMemories(deps, args.userText, memoryReply, at);
   // 关系亲密度抬升(§6.1b):按当轮情绪正向程度(pleasure 正分量)缓升,渐近饱和;
   // 在回复之后、非首字热路径;失败不打断回合(§3.2)。
   try {

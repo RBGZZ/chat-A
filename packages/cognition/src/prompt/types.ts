@@ -81,6 +81,17 @@ export interface PromptContext {
    * 非空时 OutputLanguageContributor 注入"用<目标语种>回复"指令;**缺省/空 → 不注入(逐字现状)**。
    */
   readonly outputLang?: string;
+  /**
+   * 双语原生输出(§4.1 显示/合成解耦):显示语种 ≠ 合成语种且双语模式开启时由编排层填入。
+   * 非空时 DualOutputContributor 注入"先显示语种正文 → 哨兵 → 合成语种原生口语版"指令;
+   * 让主 LLM **一次**产出两版(免第二次翻译调用)。**缺省/未填 → 不注入(逐字现状)**。
+   */
+  readonly dualOutput?: {
+    /** 显示语种(正文用,如 zh)。 */
+    readonly displayLang: string;
+    /** 合成语种(口语版用,喂 TTS,如 ja)。 */
+    readonly spokenLang: string;
+  };
   /** volatile 上下文键值(时间戳/turnId 等),追加到末条用户消息(§5.4);P1 可空。 */
   readonly volatile?: ReadonlyArray<readonly [key: string, value: string]>;
 }

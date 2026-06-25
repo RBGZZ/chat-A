@@ -216,6 +216,18 @@ export function assembleApp(opts: AssembleAppOptions = {}): AppHandle {
   // 用 let + getter 暴露(仿 seed):applyLang 切换时重建 convo,读取始终拿最新。
   let displayLang = (env['CHAT_A_DISPLAY_LANG'] ?? '').trim();
 
+  // 音频优先模式(§4.1,CHAT_A_TTS_DUAL_OUTPUT=on + 显示≠合成语种):**回复本身直接用合成语种(如日语)**——
+  // 不靠模型自觉产"双段+哨兵"(实测 qwen-plus 不遵从该格式),而是让回复就是音频转录文本,desktop 直接逐句流式喂 TTS
+  // (首音最快、无翻译阻塞),中文显示由 desktop 在音频之后翻译给出(文字次要)。故此态 outputLang=合成语种。
+  const dualOn = ((env['CHAT_A_TTS_DUAL_OUTPUT'] ?? '').trim().toLowerCase()).match(/^(on|1|true|yes)$/) !== null;
+  const ttsLangRaw = (env['CHAT_A_TTS_LANG'] ?? '').trim();
+  const audioFirst =
+    dualOn && displayLang.length > 0 && ttsLangRaw.length > 0 && ttsLangRaw !== 'follow' && ttsLangRaw !== displayLang;
+  // 回复语种:音频优先态=合成语种(回复直接是日语→喂 TTS);否则=显示语种(逐字现状)。
+  const replyLang = audioFirst ? ttsLangRaw : displayLang;
+  // 仅在启用音频优先态时打一行模式确认(默认/同语种用户零噪声);确认 outputLang=合成语种。
+  if (audioFirst) console.log(`[audioFirst] display=${JSON.stringify(displayLang)} → 回复/合成=${JSON.stringify(replyLang)}`);
+
   // Conversation 工厂:`reset()` 用新 sessionId 重建全新上下文(同一套核心依赖)。
   // 注意:本共享层只装配**核心** Conversation(persona/memory/总线/trace 缺省);cli 的
   // LLM 认知升级 / 策略 / 语义召回 / 自我一致性等 opt-in 子系统仍由 cli 自己装配注入
@@ -231,7 +243,8 @@ export function assembleApp(opts: AssembleAppOptions = {}): AppHandle {
       personaConfig,
       sessionId: sid,
       ...(appraiser ? { appraiser } : {}),
-      ...(displayLang.length > 0 ? { outputLang: displayLang } : {}),
+      // §4.1:回复语种。音频优先态=合成语种(回复直接喂 TTS、免译阻塞);否则=显示语种(逐字现状)。
+      ...(replyLang.length > 0 ? { outputLang: replyLang } : {}),
     });
 
   let sessionId = randomUUID().slice(0, 8);

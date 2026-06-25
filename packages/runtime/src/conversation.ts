@@ -12,6 +12,7 @@ import {
   DissentContributor,
   ReAnchorContributor,
   OutputLanguageContributor,
+  DualOutputContributor,
   type AnchorInput,
 } from '@chat-a/cognition';
 import {
@@ -95,6 +96,16 @@ export interface ConversationDeps {
    * **缺省/空 → 不注入 → 系统提示逐字不变**。
    */
   readonly outputLang?: string;
+  /**
+   * 双语原生输出(§4.1,可选、纯加法):非空时主 LLM 一次产出「显示语种正文 + 哨兵 + 合成语种原生口语版」。
+   * 由编排层在「显示≠合成语种且双语开关开」时注入(desktop 文字朗读路)。**缺省 → 不注入 → 逐字现状**。
+   */
+  readonly dualOutput?: { readonly displayLang: string; readonly spokenLang: string };
+  /**
+   * 显示段抽取(§4.1 / 🔴-2 记忆防污染,可选):双语模式下只把哨兵前显示段写进历史/记忆。
+   * 缺省 = 恒等 = 写全文(零回归)。由编排层(desktop)用与哨兵一致的拆分函数注入。
+   */
+  readonly displayExtractor?: (reply: string) => string;
 }
 
 /**
@@ -129,6 +140,17 @@ export interface TurnDeps {
   readonly agentName: string;
   /** 输出语种(§4.1,可选);非空时经 OutputLanguageContributor 注入目标回复语种。缺省=不注入(逐字现状)。 */
   readonly outputLang?: string;
+  /**
+   * 双语原生输出(§4.1,可选、纯加法):非空时经 `DualOutputContributor` 要求主 LLM 一次产出
+   * 「显示语种正文 + 哨兵 + 合成语种原生口语版」,desktop 据哨兵流式拆分→气泡/TTS,**省第二次翻译调用**。
+   * 由编排层在「显示≠合成语种且双语开关开」时注入。**缺省 → 不注入 → 系统提示逐字不变**。
+   */
+  readonly dualOutput?: { readonly displayLang: string; readonly spokenLang: string };
+  /**
+   * 显示段抽取(§4.1 / 🔴-2 记忆防污染,可选):双语模式下回复全文含「正文+哨兵+口语版」,
+   * 提供则收尾**只把哨兵前的显示段**写进历史/记忆(避免哨兵和口语版污染召回)。缺省 = 恒等 = 写全文(零回归)。
+   */
+  readonly displayExtractor?: (reply: string) => string;
 }
 
 /**
@@ -203,7 +225,7 @@ export class SingleShotStrategy implements TurnStrategy {
     const qe = embedP ? await embedP : null; // 与 stance 并行;超时/失败→vector:null
     // 委托 assembler:system(骨架→记忆→tone→异议)+ messages([...history, userMsg])。
     // 有 queryVector → recallHybrid(关键词+向量);否则关键词快路径(composeSystem 内分流)。
-    const { assembled, recalled } = composeSystem(deps, userText, mood.toneFragment, stance, qe?.vector ?? undefined, pendingAnchor, deps.outputLang);
+    const { assembled, recalled } = composeSystem(deps, userText, mood.toneFragment, stance, qe?.vector ?? undefined, pendingAnchor, deps.outputLang, deps.dualOutput);
     const { system, messages } = assembled;
     const reply = await deps.tracer.startActiveSpan('llm', async (llmSpan) => {
       // GenAI 语义约定:id/model 仅供 trace,业务不据此分支(承 Provider 接缝)。
@@ -300,6 +322,9 @@ export class Conversation {
       new OutputLanguageContributor(),
       new DissentContributor(),
       new ReAnchorContributor(),
+      // DualOutputContributor(§4.1):无 ctx.dualOutput 时恒返回 null → 默认路径零注入、行为字面不变;
+      // 仅当注入了 dualOutput(双语模式:显示≠合成语种)才要求 LLM 一次产两版(免第二次翻译调用)。
+      new DualOutputContributor(),
     ]);
     const persona = new PersonaEngine({
       seed,
@@ -337,6 +362,9 @@ export class Conversation {
       agentName: seed.name,
       // §4.1:仅在提供 outputLang 时填(exactOptionalPropertyTypes 友好);缺省不填 → contributor 返回 null → 逐字现状。
       ...(deps.outputLang ? { outputLang: deps.outputLang } : {}),
+      // §4.1 双语原生:仅在提供时填;缺省不填 → DualOutputContributor 返回 null + 记忆写全文 → 逐字现状。
+      ...(deps.dualOutput ? { dualOutput: deps.dualOutput } : {}),
+      ...(deps.displayExtractor ? { displayExtractor: deps.displayExtractor } : {}),
       ...(queryEmbedder ? { queryEmbedder } : {}),
       ...(deps.embedder ? { embedder: deps.embedder } : {}),
       ...(deps.selfConsistencyGuard ? { selfConsistencyGuard: deps.selfConsistencyGuard } : {}),
@@ -371,7 +399,7 @@ export class Conversation {
       const stance = await detectStance(deps, '');
       // 走既有 composeSystem(关键词快路径,不传 queryVector → 不触语义嵌入,§5.5)。
       // §4.1:omni 路系统提示同样按输出语种(deps.outputLang 非空时注入;缺省不注入,逐字现状)。
-      const { assembled } = composeSystem(deps, '', mood.toneFragment, stance, undefined, undefined, deps.outputLang);
+      const { assembled } = composeSystem(deps, '', mood.toneFragment, stance, undefined, undefined, deps.outputLang, deps.dualOutput);
       const system = assembled.system.trim();
       // 兜底:组装意外为空 → 退回骨架(绝不返回空)。
       return system.length > 0 ? assembled.system : deps.skeleton;

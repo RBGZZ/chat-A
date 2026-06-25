@@ -318,6 +318,29 @@ function isStreamReadoutOn(handle: AppHandle): boolean {
   return raw === 'on' || raw === '1' || raw === 'true' || raw === 'yes';
 }
 
+/**
+ * 「双语原生输出」开关(env CHAT_A_TTS_DUAL_OUTPUT=on/1/true/yes;默认 off)(§4.1)。
+ * 启用 + 显示≠合成语种(needsTranslation)+ 引擎支持流式 → 主 LLM 一次产「显示正文 + 哨兵 + 合成语种原生口语版」,
+ * 边生成边分流:显示段推气泡、口语段逐句流式喂 TTS,**取代第二次翻译调用**(首音更快、原生不生硬)。
+ * 关 / 同语种 / 引擎不支持 → 逐字回归(走 translateForSpeech 翻译通道或直接合成)。
+ */
+function isDualOutputOn(handle: AppHandle): boolean {
+  const raw = (handle.env['CHAT_A_TTS_DUAL_OUTPUT'] ?? '').trim().toLowerCase();
+  return raw === 'on' || raw === '1' || raw === 'true' || raw === 'yes';
+}
+
+/**
+ * 本回合是否走双语原生路:开关开 + 朗读开 + TTS 可用 + 引擎支持流式 + 显示≠合成语种(needsTranslation)。
+ * 返回合成语种(spokenLang)供开会话;不满足返回 undefined(调用方回落现有流式/整段/翻译路)。
+ */
+function resolveDualSpokenLang(handle: AppHandle): string | undefined {
+  if (!isDualOutputOn(handle) || !isSpeakOn(handle) || !speakAvailable(handle)) return undefined;
+  if (!supportsStreamingFeed(handle.tts)) return undefined;
+  const env = handle.env;
+  const plan = resolveSpokenPlan(normalizeLangCode(env['CHAT_A_DISPLAY_LANG']), (env['CHAT_A_TTS_LANG'] ?? '').trim());
+  return plan.needsTranslation ? plan.ttsLang : undefined;
+}
+
 /** 当前三语种 + 朗读开关 + 可用性(供 lang:get 返回与初值回填)。 */
 function buildLangForm(handle: AppHandle): LangForm {
   const env = handle.env;
@@ -669,6 +692,52 @@ function registerIpc(handle: AppHandle): void {
     await runSendTurn(
       {
         send: async (t, onToken) => {
+          // 双语原生路(§4.1):开关开 + 显示≠合成语种 + 引擎支持流式 → 主 LLM 一次产「显示+哨兵+合成语种口语版」,
+          // 边生成边分流:显示段推气泡、口语段逐句流式喂 TTS(免第二次翻译调用)。模型没按格式(无口语)→ 降级翻译通道。
+          // 音频优先模式(§4.1):回复本身就是合成语种(app.ts 已设 outputLang=合成语种)→ 逐句**直接流式喂 TTS**
+          // (首音最快、无翻译阻塞),气泡先随回复流式显示;回合后把回复翻成显示语种**覆盖**气泡(文字次要、不挡音频)。
+          const audioLang = resolveDualSpokenLang(handle);
+          if (audioLang !== undefined) {
+            const moodInstruction = computeMoodInstruction(handle);
+            const t0 = Date.now();
+            let firstAudioMs = -1;
+            const readout = makeTokenStreamReadout(
+              {
+                newSplitter: () => makeSentenceFeed(),
+                openSession: makeStreamSession(handle.tts, handle.env, moodInstruction),
+                emitAudio: (chunk) => {
+                  if (firstAudioMs < 0) firstAudioMs = Date.now() - t0;
+                  emit(IPC.ttsAudio, chunk);
+                },
+              },
+              audioLang,
+              signal,
+            );
+            // 回复(合成语种)逐 token:即时喂 TTS(音频)+ 即时推气泡(先显示合成语种原文,翻译好再覆盖)。
+            const spoken = await handle.convo.send(t, (tok) => {
+              readout.onToken(tok);
+              onToken(tok);
+            });
+            readout.done();
+            const replyDoneMs = Date.now() - t0;
+            // 首音/回合延迟是本路径要解决的核心指标(§3.2 延迟预算 + R7 音频滞后),保留为运行期可观测信号。
+            void readout.consumed.finally(() => {
+              console.log(`[timing] 首音=${firstAudioMs}ms 回复(合成语种)完成=${replyDoneMs}ms`);
+            });
+            // 音频流式失败 → 整段补合成兜底(有声尽力,§3.2)。
+            readout.consumed.catch(() => {
+              if (!signal.aborted) void speakReply(handle, spoken, signal);
+            });
+            // 文字(次要、不阻塞音频):把回复翻成显示语种 → 作 send 返回值 → runSendTurn 用它定型覆盖气泡。
+            const displayLang = normalizeLangCode(handle.env['CHAT_A_DISPLAY_LANG']);
+            if (displayLang.length === 0 || signal.aborted) return spoken;
+            try {
+              const zh = await makeTranslate(handle, signal)(spoken, displayLang);
+              return zh.trim().length > 0 ? zh : spoken;
+            } catch {
+              return spoken; // 翻译失败 → 气泡保留合成语种原文(有字尽力)。
+            }
+          }
           // 朗读第二步(真解 R7,§3.2):同语种 + 流式门控开 → 把 onToken tee 进句切流式会话,
           // 边生成边喂、首句即出声。否则 readout=undefined,回落整段后 speakReply。
           const readout = speakReplyFromTokens(handle, signal);

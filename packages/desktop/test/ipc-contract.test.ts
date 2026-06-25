@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { LightVoiceBus } from '@chat-a/runtime';
+import { LightVoiceBus, DUAL_OUTPUT_SENTINEL } from '@chat-a/runtime';
 import { makeBusEvent } from '@chat-a/protocol';
 import {
   IPC,
@@ -27,6 +27,11 @@ import {
   normalizeTtsLang,
   resolveEffectiveTtsLang,
   resolveSpokenPlan,
+  stripStageDirections,
+  DualOutputSplitter,
+  makeDualOutputReadout,
+  DUAL_OUTPUT_SENTINEL as IPC_SENTINEL,
+  extractDisplaySegment as ipcExtractDisplaySegment,
   buildTranslateSystemPrompt,
   translateForSpeech,
   runSpeakReply,
@@ -376,6 +381,30 @@ describe('resolveSpokenPlan(显示/合成解耦 golden 钉死四分支,纯)', ()
   it('自动:effective 为空 → 不翻译、不发 language', () => {
     expect(resolveSpokenPlan('', 'follow')).toEqual({ ttsLang: '', needsTranslation: false });
     expect(resolveSpokenPlan('', '')).toEqual({ ttsLang: '', needsTranslation: false });
+  });
+});
+
+describe('stripStageDirections(去括号旁白兜底,纯)', () => {
+  it('剥全角圆括号动作,保留正文', () => {
+    expect(stripStageDirections('你好呀（笑）今天怎么样')).toBe('你好呀今天怎么样');
+  });
+  it('剥句中/句尾括号并收敛标点前空格', () => {
+    expect(stripStageDirections('我没事（叹气）。')).toBe('我没事。');
+  });
+  it('剥半角圆括号、方括号、龟甲括号、星号动作', () => {
+    expect(stripStageDirections('嗯(小声) 【停顿】 〔轻笑〕 *点头* 好')).toBe('嗯 好');
+  });
+  it('保留日文对话引号「」『』(非旁白)', () => {
+    expect(stripStageDirections('她说「こんにちは」（微笑）')).toBe('她说「こんにちは」');
+  });
+  it('多行多括号:逐个剥除并 trim', () => {
+    expect(stripStageDirections('（停顿）\n第一句。\n（轻轻地）第二句。')).toBe('第一句。\n第二句。');
+  });
+  it('无括号:原样返回(trim)', () => {
+    expect(stripStageDirections('  普通一句话  ')).toBe('普通一句话');
+  });
+  it('整句皆旁白 → 空串(调用方据此跳过,不喂 TTS)', () => {
+    expect(stripStageDirections('（她沉默了一会儿）')).toBe('');
   });
 });
 
@@ -751,6 +780,151 @@ describe('makeTokenStreamReadout(边生成边喂同会话:同语种解 R7,纯)',
     expect(session.aborted).toBe(true);
     readout.onToken('再见。'); // abort 后忽略
     expect(session.pushed).toEqual(['你好。']);
+    await readout.consumed;
+  });
+});
+
+describe('双语哨兵/抽取本地副本 = cognition 源(防漂移钉死)', () => {
+  it('ipc-contract 本地 DUAL_OUTPUT_SENTINEL 与 cognition(经 runtime 透出)逐字相等', () => {
+    expect(IPC_SENTINEL).toBe(DUAL_OUTPUT_SENTINEL);
+  });
+  it('ipc-contract 本地 extractDisplaySegment 行为与 cognition 一致(显示=哨兵后)', () => {
+    expect(ipcExtractDisplaySegment(`口语${DUAL_OUTPUT_SENTINEL}显示`)).toBe('显示');
+    expect(ipcExtractDisplaySegment('  无哨兵  ')).toBe('无哨兵');
+  });
+});
+
+describe('DualOutputSplitter(双语流式分流·音频优先=口语在前,纯)', () => {
+  const S = DUAL_OUTPUT_SENTINEL;
+
+  it('整个哨兵在一个 token 内 → 口语在前、显示在后', () => {
+    const d = new DualOutputSplitter();
+    expect(d.push(`口语段${S}显示段`)).toEqual({ spoken: '口语段', display: '显示段' });
+    expect(d.sawSentinel).toBe(true);
+  });
+
+  it('哨兵被 token 边界切两半 → 尾缓冲挂起、仍识别', () => {
+    const d = new DualOutputSplitter();
+    const half = Math.floor(S.length / 2);
+    const r1 = d.push('口语' + S.slice(0, half)); // 哨兵前半段挂起
+    expect(r1.spoken).toBe('口语');
+    expect(r1.display).toBe('');
+    expect(d.sawSentinel).toBe(false);
+    const r2 = d.push(S.slice(half) + '显示'); // 后半段拼回 → 命中
+    expect(r2.spoken).toBe('');
+    expect(r2.display).toBe('显示');
+    expect(d.sawSentinel).toBe(true);
+  });
+
+  it('切到显示段后,后续 token 全归显示', () => {
+    const d = new DualOutputSplitter();
+    d.push(`甲${S}乙`);
+    expect(d.push('丙')).toEqual({ display: '丙', spoken: '' });
+  });
+
+  it('无哨兵 → 全是口语段(乐观喂 TTS),flush 吐尾,sawSentinel=false', () => {
+    const d = new DualOutputSplitter();
+    expect(d.push('整段没有哨兵的回复')).toEqual({ display: '', spoken: '整段没有哨兵的回复' });
+    expect(d.flush()).toEqual({ display: '', spoken: '' });
+    expect(d.sawSentinel).toBe(false);
+  });
+
+  it('结尾恰为哨兵首字符 → 挂起到 flush(不误判)', () => {
+    const d = new DualOutputSplitter();
+    const r = d.push('结尾' + S[0]); // S[0]='⟦' 是哨兵前缀 → 挂起
+    expect(r.spoken).toBe('结尾');
+    expect(d.flush()).toEqual({ display: '', spoken: S[0] }); // 实为口语正文,flush 吐回
+  });
+});
+
+describe('makeDualOutputReadout(双语边生成边分流喂 TTS,纯)', () => {
+  const S = DUAL_OUTPUT_SENTINEL;
+  const newSplitter = (): SentenceFeed => {
+    let buf = '';
+    return {
+      push(text: string): string[] {
+        buf += text;
+        const out: string[] = [];
+        for (;;) {
+          const m = buf.search(/[。!?]/);
+          if (m < 0) break;
+          out.push(buf.slice(0, m + 1));
+          buf = buf.slice(m + 1);
+        }
+        return out;
+      },
+      flush(): string | null {
+        const t = buf.trim();
+        buf = '';
+        return t.length > 0 ? t : null;
+      },
+    };
+  };
+  function fakeSession(): SpeakStreamSession & { pushed: string[]; finished: boolean; aborted: boolean } {
+    const pushed: string[] = [];
+    const s = {
+      pushed,
+      finished: false,
+      aborted: false,
+      push(t: string): void {
+        pushed.push(t);
+      },
+      finish(): void {
+        s.finished = true;
+      },
+      abort(): void {
+        s.aborted = true;
+      },
+      get chunks(): AsyncIterable<TtsAudioChunk> {
+        return {
+          [Symbol.asyncIterator]() {
+            let i = 0;
+            return {
+              next(): Promise<IteratorResult<TtsAudioChunk>> {
+                if (i < pushed.length)
+                  return Promise.resolve({ done: false, value: { pcm: new Int16Array([i++]), sampleRate: 24000 } });
+                return Promise.resolve({ done: true, value: undefined });
+              },
+            };
+          },
+        };
+      },
+    };
+    return s;
+  }
+
+  it('口语段(哨兵前)逐句喂 TTS;显示段(哨兵后)经 pushToken 推气泡;done 返回显示段', async () => {
+    const session = fakeSession();
+    const readout = makeDualOutputReadout(
+      { newSplitter, openSession: () => session, emitAudio: () => {} },
+      'ja',
+      new AbortController().signal,
+    );
+    let bubble = '';
+    for (const tok of ['こんにちは。', 'げんき?', S, '你好。', '还好吗?']) bubble += readout.pushToken(tok);
+    expect(bubble).toBe('你好。还好吗?'); // 仅显示段(哨兵后)进气泡
+    const display = readout.done();
+    expect(display).toBe('你好。还好吗?');
+    expect(readout.sawSpoken()).toBe(true);
+    expect(session.pushed).toEqual(['こんにちは。', 'げんき?']); // 口语逐句喂、不含哨兵
+    expect(session.finished).toBe(true);
+    await readout.consumed;
+  });
+
+  it('模型没按格式(无哨兵)→ 弃乐观音频(abort)、整段当显示、sawSpoken=false(调用方降级翻译)', async () => {
+    const session = fakeSession();
+    const readout = makeDualOutputReadout(
+      { newSplitter, openSession: () => session, emitAudio: () => {} },
+      'ja',
+      new AbortController().signal,
+    );
+    let bubble = '';
+    for (const tok of ['整段都是', '中文没哨兵。']) bubble += readout.pushToken(tok);
+    expect(bubble).toBe(''); // 无哨兵 → 全当口语(乐观喂),气泡此刻为空
+    const display = readout.done();
+    expect(display).toBe('整段都是中文没哨兵。'); // done 把整段回落为显示文本
+    expect(readout.sawSpoken()).toBe(false); // 未见哨兵 → 非合规 → 调用方降级翻译
+    expect(session.aborted).toBe(true); // 弃乐观音频
     await readout.consumed;
   });
 });

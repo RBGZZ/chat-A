@@ -8,7 +8,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.renderer.json",
     "build:bundle": "node scripts/build.mjs",
     "dev": "node scripts/build.mjs && electron .",
-    "rebuild": "pnpm dlx electron-rebuild -f -w naudiodon -w better-sqlite3",
+    "rebuild": "pnpm dlx @electron/rebuild -f -v 31.7.7 -w better-sqlite3,naudiodon",
     "package": "pnpm dlx electron-builder"
   },
   "dependencies": {

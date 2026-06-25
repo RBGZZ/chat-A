@@ -28,14 +28,14 @@ describe('runtime/Conversation §4.1 输出语种注入', () => {
     const { llm, systems } = recordingLlm();
     const convo = new Conversation({ bus: new LightVoiceBus(), llm, sessionId: 's1', outputLang: 'ja' });
     await convo.send('hello', () => {});
-    expect(systems[0]).toContain('[回复语种]');
-    expect(systems[0]).toContain('ja');
+    expect(systems[0]).toContain('回复语种');
+    expect(systems[0]).toContain('日语'); // ja → 日语(码映射为语言名)
   });
 
   it('未注入 outputLang → system 不含输出语种段(回归绿)', async () => {
     const { llm, systems } = recordingLlm();
     const convo = new Conversation({ bus: new LightVoiceBus(), llm, sessionId: 's2' });
     await convo.send('hello', () => {});
-    expect(systems[0]).not.toContain('[回复语种]');
+    expect(systems[0]).not.toContain('回复语种');
   });
 });

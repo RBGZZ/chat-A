@@ -1,5 +1,24 @@
 import type { PromptBudgetConfig, TokenEstimator } from './types';
 
+/** 常见语种码 → 中文名(回复语种指令对模型无歧义;未知码原样)。单一真相源,contributor / 编排层共用。 */
+export const LANG_DISPLAY_NAMES: Record<string, string> = {
+  zh: '中文',
+  en: '英语',
+  ja: '日语',
+  ko: '韩语',
+  fr: '法语',
+  de: '德语',
+  es: '西班牙语',
+  ru: '俄语',
+  it: '意大利语',
+  pt: '葡萄牙语',
+};
+
+/** 语种码 → 展示名(裸码如 ja 模型遵从弱,用语言名更可靠;未知码原样)。 */
+export function languageName(code: string): string {
+  return LANG_DISPLAY_NAMES[code.trim().toLowerCase()] ?? code.trim();
+}
+
 /**
  * 三个内置 contributor 的 priority(带间隙的离散常量,§5.4 / design D4):
  * 升序拼接后顺序 = 骨架 → 记忆 → tone,与现状 parts 顺序一致(等价契约基础)。
@@ -20,6 +39,8 @@ export const PROMPT_PRIORITY = {
   dissent: 950,
   /** 重锚(§6.1 自我一致性锚定):dissent 之后,最靠近末尾——"守住核心自我"的最强压轴 steer(仅漂移时注入,措辞克制不否定个性)。 */
   reAnchor: 980,
+  /** 双语原生输出(§4.1):结构化格式指令,放在**最末**(注意力最近)以最大化模型对哨兵格式的遵从。缺省无 dualOutput 时该 contributor 不注入。 */
+  dualOutput: 990,
 } as const;
 
 /**

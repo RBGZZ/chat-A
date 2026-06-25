@@ -126,8 +126,8 @@ xiaoxue.onToken((token) => {
 
 xiaoxue.onReply((reply) => {
   if (pendingBubble !== null) {
-    // 以最终回复定型(token 累积一般已等于 reply;此处兜底确保一致)。
-    if ((pendingBubble.textContent ?? '').length === 0) pendingBubble.textContent = reply;
+    // 以最终回复定型:主进程已去括号旁白(stripStageDirections),逐 token 期间闪现的旁白在此被干净文本替换。
+    pendingBubble.textContent = reply;
     pendingBubble.classList.remove('pending');
     pendingBubble = null;
   }
