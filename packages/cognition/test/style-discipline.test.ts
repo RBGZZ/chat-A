@@ -26,10 +26,11 @@ describe('cognition/StyleDisciplineContributor (§7#4)', () => {
     expect(f).not.toBeNull();
     expect(f!.priority).toBe(PROMPT_PRIORITY.style);
     expect(f!.tier).toBe('peripheral');
-    // 硬纪律关键句(禁自称AI / 别像写文章 / 别过度解释)。
+    // 硬纪律关键句(禁自称AI / 别像写文章 / 别过度解释 / 别写括号动作)。
     expect(f!.text).toContain('作为AI');
     expect(f!.text).toContain('像写文章');
     expect(f!.text).toContain('过度解释');
+    expect(f!.text).toContain('括号'); // 禁括号动作/神态(舞台提示),避免被朗读念出。
   });
 
   it('priority 落在 tone 之后、dissent 之前(高注意力区)', () => {

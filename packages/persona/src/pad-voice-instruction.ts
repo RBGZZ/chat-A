@@ -22,13 +22,19 @@ import type { Emotion, Pad, PersonaDials } from './types';
  */
 export const VOICE_INSTRUCTION_MAX_LEN = 100;
 
-/** 离散情绪 → 语音情绪指令(只含情绪/语气维度,无语速)。neutral=空串(不强加)。 */
+/**
+ * 离散情绪 → 语音情绪指令。**纪律(2026-06-25 调研结论)**:CosyVoice 自然语言 instruction 会连
+ * 音色一起改;只用 🟢 安全词(情绪/语气/语调)、**严禁 🔴 伤音色词**(声音低沉/沙哑/浑厚/磁性/男低音
+ * 等描述嗓音物理属性的词=让模型重塑音色)。亦不含语速(语速归 TTS rate)。neutral=空串(不强加)。
+ * 详见记忆 cosyvoice-clone-synth-contract「情感控制 vs 音色保真」+ docs/emotion-vs-timbre-2026-06-25.md。
+ */
 const EMOTION_VOICE_INSTRUCTION: Record<Emotion, string> = {
-  joyful: '语气轻盈上扬,带着雀跃的笑意',
-  content: '语气温柔放松,带点满足的暖意',
+  joyful: '语气开心,轻盈上扬,带着雀跃的笑意',
+  content: '语气温和放松,带点满足的暖意',
   neutral: '',
-  down: '声音低沉一些,语气有点低落、提不起劲',
-  irritated: '语气带点不耐烦,略显紧绷',
+  // ⚠️ 不用"声音低沉"(伤音色);改用纯情绪/语气词。
+  down: '情绪有些低落,语气提不起劲、有点失落',
+  irritated: '语气有点不耐烦,带着些许急躁',
 };
 
 /**

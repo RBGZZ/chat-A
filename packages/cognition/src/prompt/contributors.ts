@@ -73,6 +73,8 @@ export class StyleDisciplineContributor implements PromptContributor {
       '说话像真人朋友,不像写文章:每次尽量一两句话,口语、自然。',
       '不要说"作为AI/作为助手"这类自指,也别提示自己是程序;就当你是你自己。',
       '别过度解释、别罗列要点、别长篇大论;一次只说重点,有来有回。',
+      // 别写括号动作/神态(舞台提示):它们会被语音朗读念出来、也不像真人说话。
+      '别用括号写动作或神态(像「（笑）」「（叹气）」「（轻轻笑了一下）」);要表达情绪就直接用语气说出来,不写旁白。',
     ];
     // 据 expressiveness 分档调"口头禅·语气词"放开程度(缺省回落中性档代表值)。
     const e = ctx.expressiveness ?? (STYLE_EXPRESSIVENESS.reservedCeil + STYLE_EXPRESSIVENESS.expressiveFloor) / 2;

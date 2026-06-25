@@ -18,7 +18,7 @@ describe('padToVoiceInstruction(PAD → 语音情绪指令,确定性 golden)', (
     expect(padToEmotion(JOYFUL)).toBe('joyful');
     expect(padToVoiceInstruction(JOYFUL)).toContain('上扬');
     expect(padToEmotion(CONTENT)).toBe('content');
-    expect(padToVoiceInstruction(CONTENT)).toContain('温柔');
+    expect(padToVoiceInstruction(CONTENT)).toContain('温和');
   });
 
   it('中性 → 空串(不强加情绪)', () => {
@@ -28,7 +28,7 @@ describe('padToVoiceInstruction(PAD → 语音情绪指令,确定性 golden)', (
 
   it('低落 → 低沉/低落', () => {
     expect(padToEmotion(DOWN)).toBe('down');
-    expect(padToVoiceInstruction(DOWN)).toContain('低沉');
+    expect(padToVoiceInstruction(DOWN)).toContain('低落');
   });
 
   it('负面高唤醒 → 不耐烦/紧绷', () => {
@@ -53,6 +53,14 @@ describe('padToVoiceInstruction(PAD → 语音情绪指令,确定性 golden)', (
     for (const pad of [JOYFUL, CONTENT, DOWN, IRRITATED]) {
       const instr = padToVoiceInstruction(pad);
       expect(instr).not.toMatch(/语速|快|慢/);
+    }
+  });
+
+  it('不含🔴伤音色词(描述嗓音物理属性会让模型重塑音色,防回归)', () => {
+    // 调研结论:这些词点名"嗓音物理特征"→ CosyVoice 连音色一起改;情绪只许用语气/情绪词。
+    const TIMBRE_WORDS = /声音|低沉|沙哑|浑厚|磁性|清亮|男低音|少女音|嗓/;
+    for (const pad of [JOYFUL, CONTENT, NEUTRAL, DOWN, IRRITATED]) {
+      expect(padToVoiceInstruction(pad)).not.toMatch(TIMBRE_WORDS);
     }
   });
 
