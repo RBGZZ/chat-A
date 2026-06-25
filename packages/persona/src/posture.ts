@@ -17,7 +17,9 @@ export const POSTURE = {
    * 触发的"心情下限基准":Pleasure 高于触发阈值 → 心情没差到要摆姿态。
    * 该阈值随 negativeAffectExpression 在 [ceilLow, ceilHigh] 间线性滑动(见 triggerPleasureCeil):
    * 旋钮越高 → 阈值越接近 0(轻微不悦即可摆姿态);越低 → 阈值越负(需更深的负面才摆)。
-   * ceilHigh 与 padToEmotion 负面边界(-0.35)一致,保证旋钮中性时行为与离散情绪自洽。
+   * ceilHigh 与 padToEmotion 负面边界(默认 -0.35)在数值上一致,保证旋钮中性时行为与离散情绪自洽。
+   * **取舍(persona-tunable-seams,D4)**:本阈值**独立、不随 PersonaConfig.emotion.pleasureThreshold 联动**——
+   * posture 不在情绪阈值可配范围内;若调情绪阈值,posture 触发边界仍固定 -0.35(posture/情绪联动属另一致性议题,本 change 不做)。
    */
   ceilHigh: -0.35,
   ceilLow: -0.7,

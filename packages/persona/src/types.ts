@@ -40,6 +40,18 @@ export interface PersonaDials {
   readonly expressiveness: number;
 }
 
+/**
+ * PAD → 离散情绪的判别阈值(行为即配置,§3.2 杜绝 magic number)。
+ * padToEmotion 用 Pleasure 主判正/负区、Arousal 辅分高低唤起;调低阈值=情绪更"易动"。
+ * 默认 0.35 / 0.25(= 历史硬编码值,保证零回归)。
+ */
+export interface EmotionThresholds {
+  /** Pleasure 绝对值阈值:|pleasure| ≥ 此值 → 进正/负情绪区(否则 neutral)。 */
+  readonly pleasureThreshold: number;
+  /** Arousal 阈值:arousal ≥ 此值 → 高唤起(joyful/irritated),否则低唤起(content/down)。 */
+  readonly arousalThreshold: number;
+}
+
 /** 内核数值参数(行为即配置)。 */
 export interface PersonaConfig {
   /** 冷启动窗口轮数:此窗口内情绪幅度减半 + 加速回弹。 */
@@ -50,6 +62,12 @@ export interface PersonaConfig {
   readonly evolutionEveryTurns: number;
   /** 单次演化每维 OCEAN delta 上限(钳制,§6.1,默认 0.01)。 */
   readonly maxOceanDeltaPerStep: number;
+  /**
+   * PAD→离散情绪判别阈值(可配置接缝;默认 0.35/0.25 = 现值)。
+   * 透传给 padToEmotion / renderToneFragment / padToVoiceInstruction 三处,单一权威、显示与提示一致。
+   * 注:posture.ts 的 ceilHigh(-0.35)**独立**、不随此阈值联动(见 posture.ts:22 注释取舍)。
+   */
+  readonly emotion: EmotionThresholds;
 }
 
 /** OCEAN 五维微调量(二级演化产出,§6.1);各维通常极小并受 maxOceanDeltaPerStep 钳制。 */

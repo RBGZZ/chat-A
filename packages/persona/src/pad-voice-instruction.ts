@@ -1,5 +1,5 @@
 import { padToEmotion } from './numeric';
-import type { Emotion, Pad, PersonaDials } from './types';
+import type { Emotion, EmotionThresholds, Pad, PersonaDials } from './types';
 
 /**
  * PAD 心情 → CosyVoice 风格"语音情绪指令"(承 §6 PAD 情绪 + §4.1 TTS 情感;§3.1 确定性内核可 golden 测)。
@@ -41,9 +41,17 @@ const EMOTION_VOICE_INSTRUCTION: Record<Emotion, string> = {
  * 把 PAD 心情映射成语音情绪指令字符串。
  * `dials` 入参可选、**本次不消费**(只看 PAD);保留形参为未来按 expressiveness/emotionalIntensity
  * 调情绪强度留口(届时改此一处 + 补 golden,爆炸半径可控)。
+ *
+ * `thresholds`(行为即配置,§3.2,可选):PAD→离散情绪判别阈值,透传给 padToEmotion;
+ * **缺省回落 0.35/0.25(逐字现状)**。engine.tone 显式传 PersonaConfig.emotion,
+ * 使语音情绪指令与显示情绪/系统提示情绪文案用同一权威阈值,不漂移。
  */
-export function padToVoiceInstruction(pad: Pad, _dials?: PersonaDials): string {
-  const instr = EMOTION_VOICE_INSTRUCTION[padToEmotion(pad)];
+export function padToVoiceInstruction(
+  pad: Pad,
+  _dials?: PersonaDials,
+  thresholds?: EmotionThresholds,
+): string {
+  const instr = EMOTION_VOICE_INSTRUCTION[padToEmotion(pad, thresholds)];
   return instr.length > VOICE_INSTRUCTION_MAX_LEN
     ? instr.slice(0, VOICE_INSTRUCTION_MAX_LEN)
     : instr;

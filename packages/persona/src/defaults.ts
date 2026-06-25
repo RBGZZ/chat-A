@@ -12,11 +12,22 @@ export const DEFAULT_DIALS: PersonaDials = {
   expressiveness: 0.5,
 };
 
+/**
+ * padToEmotion 阈值默认值(= 历史硬编码 0.35/0.25)。padToEmotion 的可选阈值参缺省也回落到这两个值,
+ * 故无参调用(老调用点)行为逐字不变;DEFAULT_PERSONA_CONFIG.emotion 复用之,单一权威。
+ */
+export const DEFAULT_PLEASURE_THRESHOLD = 0.35;
+export const DEFAULT_AROUSAL_THRESHOLD = 0.25;
+
 export const DEFAULT_PERSONA_CONFIG: PersonaConfig = {
   coldStartTurns: 5,
   coldStartReboundFactor: 2,
   evolutionEveryTurns: 20,
   maxOceanDeltaPerStep: 0.01,
+  emotion: {
+    pleasureThreshold: DEFAULT_PLEASURE_THRESHOLD,
+    arousalThreshold: DEFAULT_AROUSAL_THRESHOLD,
+  },
 };
 
 /**

@@ -1,5 +1,5 @@
-import type { Emotion, Ocean, Pad, PadPull, PersonaConfig, PersonaDials } from './types';
-import { centered, clampUnit } from './defaults';
+import type { Emotion, EmotionThresholds, Ocean, Pad, PadPull, PersonaConfig, PersonaDials } from './types';
+import { centered, clampUnit, DEFAULT_AROUSAL_THRESHOLD, DEFAULT_PLEASURE_THRESHOLD } from './defaults';
 
 /**
  * OCEAN → PAD 基线(Mehrabian 系数,单一权威公式,§6.1)。OCEAN 居中到 [-1,1] 后:
@@ -60,10 +60,17 @@ export function stepPad(args: {
 
 /**
  * PAD → 最近离散情绪(纯函数,小集合)。主看 Pleasure,辅以 Arousal 区分高低唤醒。
+ *
+ * `thresholds`(行为即配置,§3.2):**可选**判别阈值;缺省回落历史常量 0.35/0.25
+ * (DEFAULT_PLEASURE_THRESHOLD / DEFAULT_AROUSAL_THRESHOLD)→ **无参调用行为逐字不变**。
+ * 调用方(engine.tone / renderToneFragment / padToVoiceInstruction)显式传 PersonaConfig.emotion
+ * 阈值,使显示情绪、系统提示情绪文案、语音情绪指令三处共用同一权威阈值,不漂移。
  */
-export function padToEmotion(pad: Pad): Emotion {
+export function padToEmotion(pad: Pad, thresholds?: EmotionThresholds): Emotion {
   const { pleasure, arousal } = pad;
-  if (pleasure >= 0.35) return arousal >= 0.25 ? 'joyful' : 'content';
-  if (pleasure <= -0.35) return arousal >= 0.25 ? 'irritated' : 'down';
+  const pleasureThreshold = thresholds?.pleasureThreshold ?? DEFAULT_PLEASURE_THRESHOLD;
+  const arousalThreshold = thresholds?.arousalThreshold ?? DEFAULT_AROUSAL_THRESHOLD;
+  if (pleasure >= pleasureThreshold) return arousal >= arousalThreshold ? 'joyful' : 'content';
+  if (pleasure <= -pleasureThreshold) return arousal >= arousalThreshold ? 'irritated' : 'down';
   return 'neutral';
 }
