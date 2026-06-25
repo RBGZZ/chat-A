@@ -345,18 +345,40 @@ export class SqliteUnavailableError extends Error {
  * 就 throw,连选内存后端都救不了。Node ≥24 正常;不可用 → 抛 {@link SqliteUnavailableError} 由装配层降级。
  */
 let cachedDatabaseSync: typeof DatabaseSync | undefined;
+/**
+ * 二选一加载 `DatabaseSync`-shape 构造器(electron-persistence):
+ * 1) **优先** `node:sqlite`(Node ≥24 内建,CLI/高 Node 路);
+ * 2) 回落 **better-sqlite3**(Electron 内嵌旧 Node 无 node:sqlite 时——需作为依赖安装并按 Electron ABI
+ *    `electron-rebuild`;其 `Database` 与 node:sqlite `DatabaseSync` API 近乎同构:`new(path)`/`prepare`→
+ *    `run/get/all`/`exec`/`close`,run 返回含 `lastInsertRowid`/`changes`,BLOB 为 Buffer(Uint8Array 子类,兼容)、
+ *    整数为 number(已有 asNumber 兜 bigint))。**经运行时 `require` 字符串加载 + cast,typecheck 不需安装它。**
+ * 两者都不可用 → 抛 {@link SqliteUnavailableError},装配层降级内存后端(§3.2)。
+ * ⚠️ better-sqlite3 路径 + Electron 真持久化需真机(原生编译/electron-rebuild headless 跑不了)。
+ */
 function loadDatabaseSync(): typeof DatabaseSync {
   if (cachedDatabaseSync !== undefined) return cachedDatabaseSync;
-  try {
-    const req = createRequire(import.meta.url);
-    cachedDatabaseSync = (req('node:sqlite') as typeof import('node:sqlite')).DatabaseSync;
-  } catch (err) {
-    throw new SqliteUnavailableError(
-      'node:sqlite 不可用(需 Node ≥24;Electron 内嵌旧 Node 无内建 SQLite);装配层应降级内存后端。',
-      { cause: err },
-    );
+  const req = createRequire(import.meta.url);
+  // 显式后端选择(行为即配置 §3.2;亦使 better-sqlite3 路可在 Node 下验证):
+  // CHAT_A_SQLITE_BACKEND=better-sqlite3 → 强制走 better-sqlite3(跳过 node:sqlite);缺省 = node:sqlite 优先、它兜底。
+  if ((process.env['CHAT_A_SQLITE_BACKEND'] ?? '').trim().toLowerCase() === 'better-sqlite3') {
+    cachedDatabaseSync = req('better-sqlite3') as unknown as typeof DatabaseSync;
+    return cachedDatabaseSync;
   }
-  return cachedDatabaseSync;
+  try {
+    cachedDatabaseSync = (req('node:sqlite') as typeof import('node:sqlite')).DatabaseSync;
+    return cachedDatabaseSync;
+  } catch (nodeErr) {
+    try {
+      // better-sqlite3 的 Database 构造器,结构上满足 DatabaseSync-shape(见上)。
+      cachedDatabaseSync = req('better-sqlite3') as unknown as typeof DatabaseSync;
+      return cachedDatabaseSync;
+    } catch {
+      throw new SqliteUnavailableError(
+        'SQLite 不可用:node:sqlite(需 Node ≥24)与 better-sqlite3(需安装并按 Electron ABI electron-rebuild)均加载失败;装配层应降级内存后端。',
+        { cause: nodeErr },
+      );
+    }
+  }
 }
 
 /**

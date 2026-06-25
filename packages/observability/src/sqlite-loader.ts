@@ -19,16 +19,26 @@ export class SqliteUnavailableError extends Error {
  * bundle 就崩,连 trace 默认关都救不了)。Node ≥24 正常;不可用 → 抛 {@link SqliteUnavailableError}。
  */
 let cachedDatabaseSync: typeof DatabaseSync | undefined;
+/**
+ * 二选一加载(electron-persistence,与 memory/sqlite-store 同款):优先 `node:sqlite`(Node ≥24),
+ * 回落 `better-sqlite3`(Electron/低 Node;需安装 + electron-rebuild;经运行时 require 字符串加载 + cast,
+ * typecheck 不需安装它)。两者均不可用 → 抛 {@link SqliteUnavailableError},可观测旁路跳过(绝不拖垮主链路)。
+ */
 export function loadDatabaseSync(): typeof DatabaseSync {
   if (cachedDatabaseSync !== undefined) return cachedDatabaseSync;
+  const req = createRequire(import.meta.url);
   try {
-    const req = createRequire(import.meta.url);
     cachedDatabaseSync = (req('node:sqlite') as typeof import('node:sqlite')).DatabaseSync;
-  } catch (err) {
-    throw new SqliteUnavailableError(
-      'node:sqlite 不可用(需 Node ≥24;Electron 内嵌旧 Node 无内建 SQLite);可观测追踪本次跳过。',
-      { cause: err },
-    );
+    return cachedDatabaseSync;
+  } catch (nodeErr) {
+    try {
+      cachedDatabaseSync = req('better-sqlite3') as unknown as typeof DatabaseSync;
+      return cachedDatabaseSync;
+    } catch {
+      throw new SqliteUnavailableError(
+        'SQLite 不可用:node:sqlite(需 Node ≥24)与 better-sqlite3(需安装并 electron-rebuild)均加载失败;可观测追踪本次跳过。',
+        { cause: nodeErr },
+      );
+    }
   }
-  return cachedDatabaseSync;
 }

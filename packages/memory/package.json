@@ -15,5 +15,8 @@
   "dependencies": {
     "@chat-a/protocol": "workspace:*",
     "@chat-a/providers": "workspace:*"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.8.0"
   }
 }
