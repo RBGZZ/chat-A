@@ -829,6 +829,8 @@ function registerIpc(handle: AppHandle): void {
         // 让 STT final 读出的语气情绪经 convo.send → persona.advance 并入 PAD(此前丢 emotion 是缺口)。
         send: (t, onToken, signal, prosodyEmotion) => handle.convo.send(t, onToken, signal, prosodyEmotion),
         composeOmniInstructions: () => handle.composeOmniInstructions(),
+        // omni-prosody-to-pad:omni 回合剥出的语气情绪经同一 Conversation 的内部 persona 并入 PAD(§7#5)。
+        advanceProsody: (emotion) => handle.advanceProsody(emotion),
         memory: handle.memory,
         bus: handle.bus,
         sessionId: handle.sessionId,

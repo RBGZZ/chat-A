@@ -47,6 +47,7 @@ import {
   type PersonaStore,
   type PersonaPatch,
   type PersonaView,
+  type SttEmotionLike,
 } from '@chat-a/persona';
 import { parseDotEnv, applyDotEnv } from '../env-file';
 
@@ -146,6 +147,11 @@ export interface AppHandle {
   applyLang(settings: LangSettings): Required<LangSettings>;
   /** omni 直路系统提示组装(与文字链路同源 persona/记忆/语气);语音 omni 路用。 */
   readonly composeOmniInstructions: () => string | Promise<string>;
+  /**
+   * omni 路「情感→PAD」prosody 推进(omni-prosody-to-pad,§7#5);语音 omni 路用。
+   * 把 omni 回合剥出的语气情绪经同一 Conversation 的内部 persona 并入 PAD(复用 prosodyToPadPull)。
+   */
+  readonly advanceProsody: (emotion: SttEmotionLike) => Promise<void>;
   /** 幂等收尾:关库 / 关 trace / 关 telemetry(失败吞,绝不抛);多次调只跑一次。 */
   cleanup(): Promise<void>;
   /** 装配时生效的 env(供前端透传给语音/高级子系统装配)。 */
@@ -344,6 +350,8 @@ export function assembleApp(opts: AssembleAppOptions = {}): AppHandle {
       };
     },
     composeOmniInstructions: () => convo.composeOmniInstructions(),
+    // omni-prosody-to-pad:闭包恒捕获当前 convo(reset/applyLang 重建后自动续接同源 persona/PAD)。
+    advanceProsody: (emotion: SttEmotionLike) => convo.advanceProsody(emotion),
     cleanup,
     env,
   };

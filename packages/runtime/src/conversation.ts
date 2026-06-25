@@ -41,6 +41,7 @@ import { getTracer, GENAI, CHAT_A, NoopDecisionTraceSink, type DecisionTraceSink
 import type { LightVoiceBus } from './bus';
 import { QueryEmbedder, type QueryEmbedOptions } from './query-embed';
 import { composeSystem, detectStance, finalizeTurn, toException } from './turn-shared';
+import { OMNI_USER_EMOTION_DIRECTIVE } from './user-emotion-tag';
 
 export interface ConversationDeps {
   readonly bus: LightVoiceBus;
@@ -388,6 +389,10 @@ export class Conversation {
    *
    * **降级**(§3.2):任一步抛错 → 兜底返回 persona 骨架(身份最小提示),绝不返回空、绝不抛。
    * 装配层(cli)以 `() => convo.composeOmniInstructions()` 注入 VoiceLoop,使 omni 路与 STT 路同源。
+   *
+   * **omni-prosody-to-pad(方案 A)**:在组装好的系统提示**末尾**追加 {@link OMNI_USER_EMOTION_DIRECTIVE}
+   * (要求模型回复尾部附 `[user_emotion:label-intensity]` 机读标签,供 VoiceLoop 剥出喂 PAD)。
+   * 该指令**仅 omni 路**生效(此方法 omni 专用;`send` 走的 `composeSystem` 不含它),故 STT/文字路零影响。
    */
   async composeOmniInstructions(): Promise<string> {
     const deps = this.#deps;
@@ -401,12 +406,33 @@ export class Conversation {
       // §4.1:omni 路系统提示同样按输出语种(deps.outputLang 非空时注入;缺省不注入,逐字现状)。
       const { assembled } = composeSystem(deps, '', mood.toneFragment, stance, undefined, undefined, deps.outputLang, deps.dualOutput);
       const system = assembled.system.trim();
-      // 兜底:组装意外为空 → 退回骨架(绝不返回空)。
-      return system.length > 0 ? assembled.system : deps.skeleton;
+      // 兜底:组装意外为空 → 退回骨架(绝不返回空)。omni-prosody-to-pad:末尾追加情绪标签门控指令(omni-only)。
+      const base = system.length > 0 ? assembled.system : deps.skeleton;
+      return `${base}\n\n${OMNI_USER_EMOTION_DIRECTIVE}`;
     } catch (err) {
-      // 降级(§3.2):任一步失败 → 人设骨架最小提示(至少 persona 身份),不抛、不空。
+      // 降级(§3.2):任一步失败 → 人设骨架最小提示(至少 persona 身份),不抛、不空;仍带情绪标签指令。
       console.warn('[Conversation] composeOmniInstructions 组装失败(兜底返回人设骨架):', err);
-      return deps.skeleton;
+      return `${deps.skeleton}\n\n${OMNI_USER_EMOTION_DIRECTIVE}`;
+    }
+  }
+
+  /**
+   * omni 路「情感→PAD」prosody-only 推进(omni-prosody-to-pad,§7#5)。
+   *
+   * VoiceLoop omni 直路从模型回复尾部剥出 `[user_emotion:...]` 标签 → 映射成 `SttEmotionLike` → 经装配层
+   * 接的此方法喂进 PAD。复用与 `send` **同一个** persona 实例的 prosody 推进通道:
+   * `persona.advance('', { prosodyEmotion })`——空 userText(本轮用户话语由模型自己听,这里只推进语气情绪),
+   * 经 `prosodyToPadPull` 并入 PAD(**不新写映射**)。
+   *
+   * 与 `send` 的差异:不写记忆、不演化立场、不推进亲密度——本切片**只补情感→PAD**(更大范围明确不做)。
+   * **降级**(§3.2):内部 `advance` 已全程容错;此处再包 try/catch,抛错记 warn 不上抛(钩子调用方亦吞错)。
+   * 装配层(cli/app)以 `(e) => convo.advanceProsody(e)` 注入 VoiceLoop 的 `advanceProsody` 钩子。
+   */
+  async advanceProsody(emotion: SttEmotionLike): Promise<void> {
+    try {
+      await this.#deps.persona.advance('', { prosodyEmotion: emotion });
+    } catch (err) {
+      console.warn('[Conversation] advanceProsody 推进 PAD 抛错(已捕获,不影响):', err);
     }
   }
 
