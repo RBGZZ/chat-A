@@ -155,3 +155,39 @@ desktop SHALL 在回合结束后,使 mood 显示(`IPC.mood`)与 emotion-aware-vo
 - **WHEN** 活 PAD 同步(重载)出错
 - **THEN** 回落用现有快照,mood/朗读不崩、不中断
 
+### Requirement: desktop 朗读路句切 + 同会话逐句流式喂
+
+启用 `CHAT_A_TTS_STREAM_READOUT` 时,desktop 朗读 SHALL:把待朗读文本(spokenText,同语种=回复本身;异语种=翻译后)经 SentenceSplitter 句切,逐句喂入 `CosyVoiceTts` 的**同一流式会话**,边合边经 `IPC.ttsAudio` 推渲染层播放;首句即出声、不等整段合成。未启用时沿用整段一次合成(逐字回归)。打断(新消息/停止)SHALL 干净停止流式会话。
+
+#### Scenario: 流式朗读首句即出声
+- **WHEN** 流式朗读启用,spokenText 第一句就绪
+- **THEN** 该句即喂同会话合成、推音频块,后续句接上
+
+#### Scenario: 打断停止流式会话
+- **WHEN** 朗读途中用户发新消息/点停
+- **THEN** abort 流式会话 + 发 ttsAudioStop,渲染层立即停播清队列
+
+#### Scenario: 翻译场景仍同会话流式
+- **WHEN** 显示≠合成语种(needsTranslation),翻译得整段 spokenText
+- **THEN** 仍句切 + 同会话逐句喂(流式合成);翻译延迟仍在(根治走 dual-output,非本能力)
+
+#### Scenario: 未启用沿用整段
+- **WHEN** `CHAT_A_TTS_STREAM_READOUT` 未启用
+- **THEN** 朗读走整段一次合成,逐字现状
+
+### Requirement: 换段对话后刷新心情栏
+
+reset(换段对话)后,desktop SHALL 刷新「心情」显示——先 reload 只读显示引擎到当前持久化 PAD,再 `emit(IPC.mood, ...)`,使心情栏立即反映当前心情,而非停在上一回合旧值直到下一回合。刷新失败 SHALL try/catch 兜底(不崩、不中断 reset,§3.2)。reset 的"换新 session、保留长期记忆与 PAD 续接"语义 SHALL 不变。
+
+#### Scenario: reset 后心情栏即时刷新
+- **WHEN** 用户点"换段对话"
+- **THEN** 心情栏立即按当前 PAD 刷新(不等下一回合)
+
+#### Scenario: 刷新失败不崩
+- **WHEN** reset 后 reload/emit mood 出错
+- **THEN** 吞错兜底,reset 正常完成,主链路不受影响
+
+#### Scenario: 换段保留心情续接
+- **WHEN** reset
+- **THEN** 仍保留长期记忆与 PAD 心情(不重置情绪),只是 UI 被通知重读
+
