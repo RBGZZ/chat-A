@@ -98,6 +98,11 @@ describe('client/loadEchoGuardConfig:语音模式默认开,CHAT_A_ECHO_GUARD=off
     expect(cfg?.enabled).toBe(true);
   });
 
+  it('缺省 → confirmFrames=3(真去抖,≈30ms 连续高置信才打断,压单帧回声/噪声误打断)', () => {
+    // barge-in-polish:装配层去抖默认从库默认 1 提升到 3(库默认仍 1=回归硬线)。
+    expect(loadEchoGuardConfig({})?.confirmFrames).toBe(3);
+  });
+
   it('CHAT_A_ECHO_GUARD=off → 不注入(undefined,回落逐字现状)', () => {
     expect(loadEchoGuardConfig({ CHAT_A_ECHO_GUARD: 'off' })).toBeUndefined();
     expect(loadEchoGuardConfig({ CHAT_A_ECHO_GUARD: 'false' })).toBeUndefined();
@@ -106,8 +111,10 @@ describe('client/loadEchoGuardConfig:语音模式默认开,CHAT_A_ECHO_GUARD=off
     expect(loadEchoGuardConfig({ CHAT_A_ECHO_GUARD: 'disabled' })).toBeUndefined();
   });
 
-  it('其它非关闭值(如 on)→ 仍默认开启', () => {
-    expect(loadEchoGuardConfig({ CHAT_A_ECHO_GUARD: 'on' })?.enabled).toBe(true);
+  it('其它非关闭值(如 on)→ 仍默认开启且去抖(confirmFrames=3)', () => {
+    const cfg = loadEchoGuardConfig({ CHAT_A_ECHO_GUARD: 'on' });
+    expect(cfg?.enabled).toBe(true);
+    expect(cfg?.confirmFrames).toBe(3);
   });
 });
 

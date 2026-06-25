@@ -55,6 +55,13 @@ describe('voice-detect/EchoGuardGate (Tier1 硬门控 + Tier2 RMS 双层冷却)'
     expect(gate.push(silence()).pass).toBe(true);
   });
 
+  it('库默认(回归硬线):confirmFrames=1 且 enabled=false(去抖提升只在装配层,不动库默认)', () => {
+    // barge-in-polish:语音模式装配层把 confirmFrames 覆盖为去抖值 3;库默认须保持 1
+    //(配 enabled:false,直接构造/外部注入时给「逐字现状」安全起点)。两者分工、互不耦合。
+    expect(DEFAULT_ECHO_GUARD_CONFIG.confirmFrames).toBe(1);
+    expect(DEFAULT_ECHO_GUARD_CONFIG.enabled).toBe(false);
+  });
+
   // ───────────────────────────── Tier 1:硬门控(最高 RMS 门槛 + N 帧去抖)──────────────────────────
 
   it('Tier1:agent 说话期用最高门槛 → 低能量回声帧被挡(不自打断)', () => {

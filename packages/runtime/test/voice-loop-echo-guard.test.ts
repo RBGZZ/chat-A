@@ -198,6 +198,89 @@ describe('runtime/VoiceLoop EchoGuard 硬门控 + RMS 双层冷却', () => {
     await flush();
   });
 
+  it('Tier1 去抖(confirmFrames=3):说话期高能量但连续帧仅 2(< N)不打断 → 保持 speaking', async () => {
+    // barge-in-polish:聚焦验「连续帧数」去抖本身(而非能量)——帧能量全部高(0.5 ≥ cooldownRms 0.03,
+    // 过能量门),唯连续帧数不足 N=3 时**不打断**。仅喂 2 帧 → 远不足 N → 保持 speaking、不 clearBuffer、不写半句。
+    const mem = fakeMemory();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const { deps, transport, bus } = makeDeps({
+      memory: { appendMessage: mem.appendMessage },
+      vad: new StubVadDetector([0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.9, 0.9]),
+      echoGuard: guard({ confirmFrames: 3, cooldownRmsThreshold: 0.03 }),
+      send: async (_t, onToken) => {
+        onToken('我正在说一句话。');
+        await gate;
+        return '我正在说一句话。';
+      },
+    });
+    const { down } = recorders(transport, bus);
+    const clearSpy = vi.spyOn(transport, 'clearBuffer');
+    const loop = new VoiceLoop(deps);
+    loop.start();
+
+    await driveSpeechThenSilence(transport);
+    await flush();
+    expect(loop.state).toBe('speaking');
+    const downBefore = down.length;
+
+    // 仅 2 帧高能量(< N=3)→ 连续帧不足 → 不打断
+    transport.sendAudio(micFrame(20_000, 0.5));
+    transport.sendAudio(micFrame(20_010, 0.5));
+    await flush();
+
+    expect(loop.state).toBe('speaking'); // 帧数去抖:不足 N 不打断
+    expect(clearSpy).not.toHaveBeenCalled();
+    expect(mem.appendMessage).not.toHaveBeenCalled();
+    expect(down.length).toBe(downBefore);
+
+    release();
+    await flush();
+  });
+
+  it('Tier1 去抖(confirmFrames=3):同样高能量帧连续足够多(≥N)则打断 → 回 listening(对照上例,证非「打不断」)', async () => {
+    // barge-in-polish:与上例同配置(N=3、高能量),区别仅连续帧数足够 → 必打断。
+    // 与上例构成「不足 N 不打断 / 足 N 打断」对照,钉死帧数去抖是真正生效的门槛(不会因去抖变「打不断」)。
+    const mem = fakeMemory();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const { deps, transport, bus } = makeDeps({
+      memory: { appendMessage: mem.appendMessage },
+      vad: new StubVadDetector([0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9]),
+      echoGuard: guard({ confirmFrames: 3, cooldownRmsThreshold: 0.03 }),
+      send: async (_t, onToken) => {
+        onToken('我正在说一句话。');
+        await gate;
+        onToken('后面还没说完。');
+        return '我正在说一句话。后面还没说完。';
+      },
+    });
+    recorders(transport, bus);
+    const clearSpy = vi.spyOn(transport, 'clearBuffer');
+    const loop = new VoiceLoop(deps);
+    loop.start();
+
+    await driveSpeechThenSilence(transport);
+    await flush();
+    expect(loop.state).toBe('speaking');
+
+    // 连续 6 帧高能量(足够覆盖 VAD speaking 翻真 + 连续达 N=3)→ 打断
+    for (let i = 0; i < 6; i++) transport.sendAudio(micFrame(20_000 + i * 10, 0.5));
+    await flush();
+
+    expect(loop.state).toBe('listening'); // 足 N → 打得断
+    expect(clearSpy).toHaveBeenCalled();
+    const written = mem.calls[0] as { content: string };
+    expect(written.content).toContain('[被用户打断]');
+
+    release();
+    await flush();
+  });
+
   it('Tier2 冷却窗:agent 说完 1.5s 内低能量混响尾被挡(不开启虚假回合)', async () => {
     // send 同步出尽 → speaking→listening(turn:end 时以最近帧时刻 50ms 开冷却窗到 1550ms)。
     // 7 帧闭环 + 2 帧高概率:若无 EchoGuard 抑制,这 2 帧会触 speech_start 进 endpointing;
