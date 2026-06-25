@@ -174,6 +174,33 @@ describe('CosyVoiceTts(注入 mock WS,不触网)', () => {
     );
   });
 
+  it('情感控制:instruction + enableSsml 进 parameters(单数 instruction / enable_ssml)', async () => {
+    const { factory, created } = mockFactory((ws) => {
+      ws.serverEvent('task-started');
+      ws.serverEvent('task-finished');
+    });
+    const tts = newTts(factory, { instruction: '语速较快,带明显上扬语调', enableSsml: true });
+    await collect(tts.synthesize('x'));
+    const params = (created[0]!.sent[0]!['payload'] as Record<string, unknown>)[
+      'parameters'
+    ] as Record<string, unknown>;
+    expect(params['instruction']).toBe('语速较快,带明显上扬语调');
+    expect(params['enable_ssml']).toBe(true);
+  });
+
+  it('回归:不设 instruction/enableSsml → parameters 不含这两键', async () => {
+    const { factory, created } = mockFactory((ws) => {
+      ws.serverEvent('task-started');
+      ws.serverEvent('task-finished');
+    });
+    await collect(newTts(factory).synthesize('x'));
+    const params = (created[0]!.sent[0]!['payload'] as Record<string, unknown>)[
+      'parameters'
+    ] as Record<string, unknown>;
+    expect('instruction' in params).toBe(false);
+    expect('enable_ssml' in params).toBe(false);
+  });
+
   it('run-task 用注入的 voiceId 作 parameters.voice', async () => {
     const { factory, created } = mockFactory((ws) => {
       ws.serverEvent('task-started');
@@ -322,5 +349,16 @@ describe('createTts / loadTtsConfig:cosyvoice', () => {
     expect(cfg.apiKey).toBe('sk-dash');
     expect(cfg.model).toBe('cosyvoice-v3.5-flash');
     expect(cfg.voice).toBe('v-clone');
+  });
+
+  it('loadTtsConfig:CHAT_A_TTS_INSTRUCTION / CHAT_A_TTS_ENABLE_SSML 解析', () => {
+    const cfg = loadTtsConfig({
+      CHAT_A_TTS_KIND: 'cosyvoice',
+      CHAT_A_DASHSCOPE_API_KEY: 'sk-dash',
+      CHAT_A_TTS_INSTRUCTION: '低沉一点,慢一些',
+      CHAT_A_TTS_ENABLE_SSML: '1',
+    }) as Extract<TtsConfig, { kind: 'cosyvoice' }>;
+    expect(cfg.instruction).toBe('低沉一点,慢一些');
+    expect(cfg.enableSsml).toBe(true);
   });
 });

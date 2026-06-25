@@ -198,6 +198,10 @@ export interface CosyVoiceTtsConfig {
   readonly pitch?: number;
   /** 音量(0~100)。 */
   readonly volume?: number;
+  /** 情感/风格指令(FreeStyle,≤100 字符;v3.5-flash 支持,复刻音色可叠加)。CHAT_A_TTS_INSTRUCTION。 */
+  readonly instruction?: string;
+  /** 是否启用 SSML 标记。CHAT_A_TTS_ENABLE_SSML=1。 */
+  readonly enableSsml?: boolean;
   readonly languages?: readonly string[];
 }
 
@@ -314,6 +318,8 @@ export function loadTtsConfig(env: NodeJS.ProcessEnv = process.env): TtsConfig {
         ...(rate !== undefined ? { rate } : {}),
         ...(pitch !== undefined ? { pitch } : {}),
         ...(volume !== undefined ? { volume } : {}),
+        ...(env['CHAT_A_TTS_INSTRUCTION'] ? { instruction: env['CHAT_A_TTS_INSTRUCTION'] } : {}),
+        ...(isTruthy(env['CHAT_A_TTS_ENABLE_SSML']) ? { enableSsml: true } : {}),
         ...(language ? { languages: [language] } : {}),
       };
     }

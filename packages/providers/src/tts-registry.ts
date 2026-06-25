@@ -139,6 +139,8 @@ const registry: { [K in TtsConfig['kind']]: TtsFactory<K> } = {
       ...(cfg.rate !== undefined ? { rate: cfg.rate } : {}),
       ...(cfg.pitch !== undefined ? { pitch: cfg.pitch } : {}),
       ...(cfg.volume !== undefined ? { volume: cfg.volume } : {}),
+      ...(cfg.instruction !== undefined ? { instruction: cfg.instruction } : {}),
+      ...(cfg.enableSsml !== undefined ? { enableSsml: cfg.enableSsml } : {}),
       ...(cfg.languages !== undefined ? { languages: cfg.languages } : {}),
       ...(ports.cosyVoiceWsFactory !== undefined ? { wsFactory: ports.cosyVoiceWsFactory } : {}),
     }),

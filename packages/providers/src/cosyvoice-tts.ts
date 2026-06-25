@@ -58,6 +58,17 @@ export interface CosyVoiceTtsOptions {
   readonly pitch?: number;
   /** 音量(0~100;默认服务端 50)。 */
   readonly volume?: number;
+  /**
+   * 情感/风格指令(FreeStyle 自然语言,≤100 字符,汉字按 2;CosyVoice v3.5-flash/plus、v3-flash 支持)。
+   * 例:'语速较快,带明显上扬语调' / '低沉一点,慢一些,带点疲惫感'。仅设置时发送(省略=不带,逐字回归)。
+   * **复刻音色可叠加 instruction**(复刻专属音色 + 情感控制并用)。
+   * ⚠️ 字段键名 `instruction`(单数,非 qwen-tts 的 `instructions`),WS 放 parameters.instruction(真机校准点)。
+   * TODO(深度优化):未来把小雪 §6 PAD 实时心情映射成 instruction,让复刻音色随情绪说话——见
+   * 记忆 cosyvoice-clone-synth-contract「情感/风格控制」,届时需开 per-call 指令(经 TtsOptions 透传)而非仅静态。
+   */
+  readonly instruction?: string;
+  /** 是否启用 SSML 标记(parameters.enable_ssml);开启后文本写 SSML。默认不发(=false)。 */
+  readonly enableSsml?: boolean;
   /** 声明支持语种(能力位);默认 ['*']。 */
   readonly languages?: readonly string[];
   /** 注入的 WS 工厂(测试用);缺省懒加载 `ws` 建真连接。 */
@@ -78,6 +89,8 @@ export class CosyVoiceTts implements TtsProvider {
   readonly #rate: number | undefined;
   readonly #pitch: number | undefined;
   readonly #volume: number | undefined;
+  readonly #instruction: string | undefined;
+  readonly #enableSsml: boolean | undefined;
   readonly #wsFactory: CosyVoiceWsFactory;
   readonly #taskId: TaskIdFactory;
 
@@ -97,6 +110,8 @@ export class CosyVoiceTts implements TtsProvider {
     this.#rate = opts.rate;
     this.#pitch = opts.pitch;
     this.#volume = opts.volume;
+    this.#instruction = opts.instruction;
+    this.#enableSsml = opts.enableSsml;
     this.#wsFactory = opts.wsFactory ?? defaultWsFactory;
     this.#taskId = opts.taskIdFactory ?? defaultTaskId;
     this.capabilities = {
@@ -150,6 +165,8 @@ export class CosyVoiceTts implements TtsProvider {
             ...(this.#rate !== undefined ? { rate: this.#rate } : {}),
             ...(this.#pitch !== undefined ? { pitch: this.#pitch } : {}),
             ...(this.#volume !== undefined ? { volume: this.#volume } : {}),
+            ...(this.#instruction !== undefined ? { instruction: this.#instruction } : {}),
+            ...(this.#enableSsml !== undefined ? { enableSsml: this.#enableSsml } : {}),
           }),
         ),
       );
@@ -226,6 +243,8 @@ interface RunTaskParams {
   rate?: number;
   pitch?: number;
   volume?: number;
+  instruction?: string;
+  enableSsml?: boolean;
 }
 
 /** run-task:开任务。`payload.input` 必须为空对象(官方约定)。 */
@@ -245,6 +264,12 @@ export function buildRunTask(taskId: string, model: string, p: RunTaskParams): R
         ...(p.rate !== undefined ? { rate: p.rate } : {}),
         ...(p.pitch !== undefined ? { pitch: p.pitch } : {}),
         ...(p.volume !== undefined ? { volume: p.volume } : {}),
+        // 情感/风格:instruction(单数键,FreeStyle 自然语言)+ enable_ssml(SSML 开关)。
+        // 仅设置时发送(省略=逐字回归)。⚠️ 真机校准:instruction 确切键名(SDK 用单数 instruction)。
+        ...(p.instruction !== undefined && p.instruction.length > 0
+          ? { instruction: p.instruction }
+          : {}),
+        ...(p.enableSsml !== undefined ? { enable_ssml: p.enableSsml } : {}),
       },
       input: {},
     },
