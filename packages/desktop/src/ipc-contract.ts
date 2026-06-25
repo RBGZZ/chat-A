@@ -37,6 +37,8 @@ export const IPC = {
   voiceStatus: 'voice:status',
   voiceCloneResult: 'voice:clone-result',
   voiceCloneStatus: 'voice:clone-status',
+  /** 主→渲染:复刻进行中进度(上传/创建/异步部署轮询期),渲染层显示"复刻处理中"。 */
+  voiceCloneProgress: 'voice:clone-progress',
   proactiveMessage: 'proactive:message', // —— 主动消息(代理B) ——
   // —— 记忆/设置(代理D) ——
   /** 渲染 → 主:只读列出最近 N 条记忆(陪伴工具记忆查看面板;绝不触发写/巩固)。 */
@@ -95,6 +97,11 @@ export interface VoiceCloneResult {
   /** 成功时:复刻得到的 voice id。 */
   readonly voiceId?: string;
   /** 文案(成功提示 / 失败友好中文)。 */
+  readonly message: string;
+}
+
+/** 复刻进行中进度(主→渲染):轮询/上传期的中文进度文案。 */
+export interface VoiceCloneProgress {
   readonly message: string;
 }
 

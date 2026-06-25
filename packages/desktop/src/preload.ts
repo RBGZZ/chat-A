@@ -13,6 +13,7 @@ import {
   type VoiceCloneInput,
   type VoiceCloneResult,
   type VoiceCloneStatus,
+  type VoiceCloneProgress,
   // —— 代理B:主动消息类型 ——
   type ProactiveMessage,
   type PersonaForm, // 代理C
@@ -52,6 +53,7 @@ export interface XiaoxueApi {
   onVoiceStatus(cb: (status: VoiceStatus) => void): () => void;
   onCloneResult(cb: (result: VoiceCloneResult) => void): () => void;
   onCloneStatus(cb: (status: VoiceCloneStatus) => void): () => void;
+  onCloneProgress(cb: (progress: VoiceCloneProgress) => void): () => void;
   // —— 代理B:订阅小雪主动消息(自发气泡);返回退订函数。
   onProactive(cb: (msg: ProactiveMessage) => void): () => void;
   // —— 人格自定义(代理C) ——
@@ -90,6 +92,7 @@ const api: XiaoxueApi = {
   onVoiceStatus: (cb) => subscribe<VoiceStatus>(IPC.voiceStatus, cb),
   onCloneResult: (cb) => subscribe<VoiceCloneResult>(IPC.voiceCloneResult, cb),
   onCloneStatus: (cb) => subscribe<VoiceCloneStatus>(IPC.voiceCloneStatus, cb),
+  onCloneProgress: (cb) => subscribe<VoiceCloneProgress>(IPC.voiceCloneProgress, cb),
   // —— 代理B:主动消息订阅 ——
   onProactive: (cb) => subscribe<ProactiveMessage>(IPC.proactiveMessage, cb),
   // —— 人格自定义(代理C) ——

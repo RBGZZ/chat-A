@@ -92,8 +92,18 @@ pnpm smoke:qwen            # 需真网络;无 key 时会跳过并提示。默认
 | `CHAT_A_AUDIO_IN_WAV` / `CHAT_A_AUDIO_OUT_WAV` | 无 / `out.wav` | WAV 设备的输入(须 16k/mono/s16le)/ 输出路径 |
 | `CHAT_A_VAD` | `stub` | `energy` = 无模型能量 VAD + 静音超时 EOU(零模型/零原生);`silero` = 真 ONNX(需模型) |
 | `CHAT_A_STT_KIND` | 无→`fake` | `qwen` = DashScope 云 ASR(OpenAI 兼容 `/audio/transcriptions`,`qwen3-asr-flash`) |
-| `CHAT_A_TTS_KIND` | 无→`fake` | `qwen-tts` = DashScope WS 流式 TTS |
+| `CHAT_A_TTS_KIND` | 无→`fake` | `qwen-tts` = DashScope WS 流式 TTS;`cosyvoice` = CosyVoice run-task WS(高保真复刻音色,见下) |
+| `CHAT_A_VOICE_CLONE_KIND` | `qwen` | `cosyvoice` = 用 CosyVoice v3.5-flash 复刻(保真更高);`qwen` = 千问云复刻 |
 | `CHAT_A_LLM_PROVIDER` | 见 start.bat | `qwen` 用 DashScope 纯文本(`pnpm test:voice` 已自动设好) |
+
+#### CosyVoice 音色复刻 + 合成(高保真,北京地域)
+
+qwen 云复刻保真度较低("不像")时,改用 **CosyVoice v3.5-flash**(零样本复刻,保真更高):
+
+- 复刻:设 `CHAT_A_VOICE_CLONE_KIND=cosyvoice`,desktop"一键复刻"选本地 15~20s 录音即可——本地文件经 DashScope 临时上传转 `oss://` URL(无需自备 OSS),创建后**异步部署**(轮询约几分钟到 `OK`)。复刻成功自动写回 `CHAT_A_TTS_KIND=cosyvoice` + `CHAT_A_TTS_MODEL=cosyvoice-v3.5-flash` + `CHAT_A_VOICE_ID`。
+- 合成:`CHAT_A_TTS_KIND=cosyvoice`,合成 `model` 须与复刻 `target_model` **逐字一致**(均 `cosyvoice-v3.5-flash`);音色经 `CHAT_A_VOICE_ID` 流入。
+- 约束:CosyVoice v3.5-flash **仅北京地域、无系统音色**(必须先复刻才能合成)。
+- ⚠️ 几处契约点待真机校准(隔离在可改函数,不通改一处):临时上传 getPolicy 的 `model` 参数、create_voice 接受 `oss://`+解析头、合成 WS 端点二选一、合成期语种参数——详见 `openspec/changes/cosyvoice-clone-synth/design.md` 的 Open Questions。
 
 ### 各路径能跑到什么程度(如实说明)
 

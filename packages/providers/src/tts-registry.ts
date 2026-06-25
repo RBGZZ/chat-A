@@ -8,6 +8,8 @@ import { QwenTtsRealtime } from './qwen-tts-realtime';
 import type { QwenWsFactory } from './qwen-tts-realtime';
 import { GptSoVitsTts } from './gpt-sovits-tts';
 import type { FetchLike } from './gpt-sovits-tts';
+import { CosyVoiceTts } from './cosyvoice-tts';
+import type { CosyVoiceWsFactory } from './cosyvoice-tts';
 
 /**
  * 运行时注入的 TTS 端口(R1 注入式接缝)。
@@ -26,6 +28,11 @@ export interface TtsPorts {
    * 缺省时 GptSoVitsTts 用 `globalThis.fetch` 走真网络,测试经此注入 mock fetch(不触网)。
    */
   readonly fetch?: FetchLike;
+  /**
+   * cosyvoice 的 WebSocket 工厂端口(可测性接缝);
+   * 缺省时 CosyVoiceTts 懒加载 `ws` 包建真连接,测试经此注入 mock WS(不触网)。
+   */
+  readonly cosyVoiceWsFactory?: CosyVoiceWsFactory;
 }
 
 /** 后端工厂:某一 kind 的子配置(+ 注入端口) → 具体 TtsProvider。 */
@@ -117,6 +124,23 @@ const registry: { [K in TtsConfig['kind']]: TtsFactory<K> } = {
       ...(cfg.languages !== undefined ? { languages: cfg.languages } : {}),
       ...(cfg.voiceCloning !== undefined ? { voiceCloning: cfg.voiceCloning } : {}),
       ...(ports.qwenWsFactory !== undefined ? { wsFactory: ports.qwenWsFactory } : {}),
+    }),
+  // cosyvoice:DashScope run-task WS 流式 TTS(二进制裸 PCM 帧)。缺 apiKey → 构造内 fail-fast。
+  // wsFactory 端口可注入(测试 mock WS);缺省时懒加载 `ws` 建真连接。
+  cosyvoice: (cfg, ports) =>
+    new CosyVoiceTts({
+      id: cfg.id ?? 'cosyvoice',
+      apiKey: cfg.apiKey,
+      ...(cfg.model !== undefined ? { model: cfg.model } : {}),
+      ...(cfg.voice !== undefined ? { voice: cfg.voice } : {}),
+      ...(cfg.endpoint !== undefined ? { endpoint: cfg.endpoint } : {}),
+      ...(cfg.format !== undefined ? { format: cfg.format } : {}),
+      ...(cfg.sampleRate !== undefined ? { sampleRate: cfg.sampleRate } : {}),
+      ...(cfg.rate !== undefined ? { rate: cfg.rate } : {}),
+      ...(cfg.pitch !== undefined ? { pitch: cfg.pitch } : {}),
+      ...(cfg.volume !== undefined ? { volume: cfg.volume } : {}),
+      ...(cfg.languages !== undefined ? { languages: cfg.languages } : {}),
+      ...(ports.cosyVoiceWsFactory !== undefined ? { wsFactory: ports.cosyVoiceWsFactory } : {}),
     }),
 };
 

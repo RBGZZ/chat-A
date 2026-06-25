@@ -25,8 +25,10 @@ import {
 } from '@chat-a/client';
 import {
   createVoice,
+  createCosyVoice,
   loadVoiceProfile,
   QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL,
+  COSYVOICE_DEFAULT_TARGET_MODEL,
   type TtsOptions,
   type TtsProvider,
 } from '@chat-a/providers';
@@ -115,26 +117,61 @@ function cloneStatus(handle: AppHandle): VoiceCloneStatus {
  * **逐字一致**(含日期快照),否则合成失败——音色绑单模型。故此处直接取合成配置 CHAT_A_TTS_MODEL
  * (当它是 vc 模型时)作 targetModel,确保复刻得到的 voiceId 能被同一 model 合成。
  */
+/** 复刻引擎选择:CHAT_A_VOICE_CLONE_KIND=cosyvoice → CosyVoice;缺省/其它 = qwen(保持现状)。 */
+function cloneEngine(handle: AppHandle): 'qwen' | 'cosyvoice' {
+  const raw = (handle.env['CHAT_A_VOICE_CLONE_KIND'] ?? '').trim().toLowerCase();
+  return raw === 'cosyvoice' ? 'cosyvoice' : 'qwen';
+}
+
 /**
- * 算本次复刻实际使用的 target_model(单一真相源:复刻 createVoice 与持久化 CHAT_A_TTS_MODEL 共用,
- * 杜绝两者算出不同值导致"复刻用 A、合成用 B"的硬约束违背)。
- * 取合成配置 CHAT_A_TTS_MODEL(当它是 vc 模型时)以保证复刻 voiceId 能被同一 model 合成;
- * 否则回落 providers 默认带快照的 vc 模型(QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL)。
+ * 算本次复刻实际使用的 target_model(单一真相源:复刻创建与持久化 CHAT_A_TTS_MODEL 共用,
+ * 杜绝两者算出不同值导致"复刻用 A、合成用 B"的硬约束违背)。**按引擎分支**:
+ * - cosyvoice:CHAT_A_TTS_MODEL 含 'cosyvoice' 则用它,否则回落 cosyvoice-v3.5-flash(无日期快照);
+ * - qwen:CHAT_A_TTS_MODEL 是 vc 模型则用它,否则回落带快照的 vc-realtime。
+ * (⚠️ 修旧 bug:此前一律 `includes('vc')`,对 'cosyvoice-v3.5-flash' 为 false → 错路由成 qwen 快照。)
  */
 function resolveCloneTargetModel(handle: AppHandle): string {
   const configModel = (handle.env['CHAT_A_TTS_MODEL'] ?? '').trim();
+  if (cloneEngine(handle) === 'cosyvoice') {
+    return configModel.includes('cosyvoice') ? configModel : COSYVOICE_DEFAULT_TARGET_MODEL;
+  }
   return configModel.includes('vc') ? configModel : QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL;
 }
 
-async function cloneVoiceViaDashScope(handle: AppHandle, input: VoiceCloneInput): Promise<string> {
+async function cloneVoiceViaDashScope(
+  handle: AppHandle,
+  input: VoiceCloneInput,
+  onProgress?: (message: string) => void,
+): Promise<string> {
   const apiKey = dashKey(handle);
   if (apiKey.length === 0) throw new Error(CLONE_NO_KEY_REASON);
-  // 注:复刻参考语种 CHAT_A_VOICE_CLONE_REF_LANG(语言面板可设)在 **qwen 云复刻(enrollment)** 里
-  // 语种中性——createVoice 不接受 prompt_lang,服务端自动处理。该值用于**即时复刻**(gpt-sovits 的
-  // refAudio.refLang)/ 未来 provider:经 loadVoiceProfile → buildVoiceTtsOptions 流入语音模式 TTS opts。
-  // 故此处不读它(读了也无处可传);语言面板设置它仍有效(供 voice-profile)。
-  // 取合成 model(vc 模型)作 target_model 以保证两者同串;否则回落默认 vc 模型(与持久化共用同一算法)。
+  // 取合成 model 作 target_model 以保证两者同串(按引擎分支;与持久化共用同一算法)。
   const targetModel = resolveCloneTargetModel(handle);
+
+  if (cloneEngine(handle) === 'cosyvoice') {
+    // CosyVoice 契约:音频只收公网/oss:// URL —— 本地文件经 DashScope 临时上传转 oss://(createCosyVoice 内置)。
+    // 复刻参考语种 CHAT_A_VOICE_CLONE_REF_LANG 作 language_hints(帮助提取音色特征)。
+    const refLang = (handle.env['CHAT_A_VOICE_CLONE_REF_LANG'] ?? '').trim();
+    const audio =
+      input.path !== undefined && input.path.length > 0
+        ? { path: input.path }
+        : input.bytes !== undefined
+          ? { data: input.bytes, filename: 'voice-sample.wav' }
+          : undefined;
+    if (audio === undefined) throw new Error('未选择音频文件;请先选择一段约 15~20 秒的清晰录音。');
+    onProgress?.('正在上传参考音频并创建音色…');
+    const { voiceId } = await createCosyVoice(audio, {
+      apiKey,
+      targetModel,
+      ...(refLang.length > 0 ? { languageHints: [refLang] } : {}),
+      onDeployPoll: (attempt, max) =>
+        onProgress?.(`音色部署中(可能需要几分钟)… ${attempt}/${max}`),
+    });
+    return voiceId;
+  }
+
+  // qwen 云复刻(enrollment):base64 内联本地文件,同步直返。
+  // 复刻参考语种在 qwen enrollment 里语种中性——createVoice 不接受 prompt_lang,服务端自动处理。
   const audio =
     input.path !== undefined && input.path.length > 0
       ? { path: input.path }
@@ -142,6 +179,7 @@ async function cloneVoiceViaDashScope(handle: AppHandle, input: VoiceCloneInput)
         ? { data: input.bytes, mime: input.mime ?? 'application/octet-stream' }
         : undefined;
   if (audio === undefined) throw new Error('未选择音频文件;请先选择一段约 15 秒的清晰录音。');
+  onProgress?.('正在创建音色…');
   const { voiceId } = await createVoice(audio, { apiKey, targetModel });
   return voiceId;
 }
@@ -156,11 +194,13 @@ async function cloneVoiceViaDashScope(handle: AppHandle, input: VoiceCloneInput)
 function persistVoiceId(handle: AppHandle, voiceId: string): void {
   // 本次复刻真正使用的 target_model(与 cloneVoiceViaDashScope 共用同一算法,确保逐字一致)。
   const targetModel = resolveCloneTargetModel(handle);
+  const engine = cloneEngine(handle);
+  // 合成引擎档:cosyvoice → 'cosyvoice'(run-task);qwen → 'qwen-tts'。**修旧 bug:此前一律写 qwen-tts**。
+  const ttsKind = engine === 'cosyvoice' ? 'cosyvoice' : 'qwen-tts';
   // 本进程即时生效(下次语音模式装配/朗读 loadVoiceProfile + ttsConfig 直接读到,无需重启)。
   handle.env['CHAT_A_VOICE_ID'] = voiceId;
   handle.env['CHAT_A_TTS_MODEL'] = targetModel;
-  handle.env['CHAT_A_TTS_VOICE_CLONING'] = '1';
-  handle.env['CHAT_A_TTS_KIND'] = 'qwen-tts';
+  handle.env['CHAT_A_TTS_KIND'] = ttsKind;
   const path = join(process.cwd(), '.env.local');
   let text = '';
   try {
@@ -171,8 +211,15 @@ function persistVoiceId(handle: AppHandle, voiceId: string): void {
   // 逐键 upsert(同键覆盖、不重复追加;幂等)。
   text = upsertEnvLocal(text, 'CHAT_A_VOICE_ID', voiceId);
   text = upsertEnvLocal(text, 'CHAT_A_TTS_MODEL', targetModel);
-  text = upsertEnvLocal(text, 'CHAT_A_TTS_VOICE_CLONING', '1');
-  text = upsertEnvLocal(text, 'CHAT_A_TTS_KIND', 'qwen-tts');
+  text = upsertEnvLocal(text, 'CHAT_A_TTS_KIND', ttsKind);
+  if (engine === 'cosyvoice') {
+    // CosyVoice 合成无需 qwen 专用复刻位(voiceCloning 是 qwen-tts vc 模型的能力开关);本进程清掉,避免误带。
+    handle.env['CHAT_A_TTS_VOICE_CLONING'] = '';
+  } else {
+    // qwen vc 合成需开复刻位(TtsOptions.voiceId 当 WS voice 透传)。
+    handle.env['CHAT_A_TTS_VOICE_CLONING'] = '1';
+    text = upsertEnvLocal(text, 'CHAT_A_TTS_VOICE_CLONING', '1');
+  }
   writeFileSync(path, text, 'utf8');
 }
 
@@ -481,11 +528,15 @@ function registerIpc(handle: AppHandle): void {
     return lang;
   });
 
-  // 一键复刻:读文件/字节 → createVoice → 持久化 CHAT_A_VOICE_ID;全程降级不崩(§3.2)。
+  // 一键复刻:据引擎(qwen/cosyvoice)读文件/字节 → 创建音色(cosyvoice 含临时上传+异步轮询)→
+  // 持久化;轮询期经 IPC.voiceCloneProgress 报进度;全程降级不崩(§3.2)。
   ipcMain.handle(IPC.voiceClone, async (_e, input: VoiceCloneInput) => {
     await runCloneVoice(
       {
-        clone: (i) => cloneVoiceViaDashScope(handle, i),
+        clone: (i) =>
+          cloneVoiceViaDashScope(handle, i, (message) =>
+            emit(IPC.voiceCloneProgress, { message }),
+          ),
         persist: (voiceId) => persistVoiceId(handle, voiceId),
         emit: (ch, p) => emit(ch, p),
       },

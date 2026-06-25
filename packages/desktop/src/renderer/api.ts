@@ -39,6 +39,11 @@ export interface VoiceCloneStatus {
   readonly reason?: string;
 }
 
+/** 复刻进行中进度(主→渲染);上传/异步部署轮询期的中文文案。 */
+export interface VoiceCloneProgress {
+  readonly message: string;
+}
+
 export interface AppInfo {
   readonly name: string;
   readonly provider: string;
@@ -71,6 +76,7 @@ export interface XiaoxueApi {
   onVoiceStatus(cb: (status: VoiceStatus) => void): () => void;
   onCloneResult(cb: (result: VoiceCloneResult) => void): () => void;
   onCloneStatus(cb: (status: VoiceCloneStatus) => void): () => void;
+  onCloneProgress(cb: (progress: VoiceCloneProgress) => void): () => void;
   // —— 代理B:订阅小雪主动消息(自发气泡);返回退订函数。
   onProactive(cb: (msg: ProactiveMessage) => void): () => void;
   // —— 人格自定义(代理C) ——

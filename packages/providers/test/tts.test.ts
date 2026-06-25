@@ -183,6 +183,7 @@ describe('createTts(工厂按判别联合切换)+ loadTtsConfig', () => {
 
   it('已注册 kind 列表', () => {
     expect([...listTtsKinds()].sort()).toEqual([
+      'cosyvoice',
       'edge',
       'fake',
       'gpt-sovits',

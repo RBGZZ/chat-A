@@ -223,6 +223,13 @@ xiaoxue.onCloneStatus((status: VoiceCloneStatus) => {
   refreshCloneButton();
 });
 
+// 复刻进行中进度(CosyVoice 异步部署可达数分钟):实时更新状态文案,避免误以为卡死。
+xiaoxue.onCloneProgress((progress) => {
+  if (!cloning) return; // 只在复刻进行中更新(防止迟到事件覆盖结果)。
+  $cloneStatus.textContent = progress.message;
+  $cloneStatus.className = 'clone-status';
+});
+
 xiaoxue.onCloneResult((result: VoiceCloneResult) => {
   cloning = false;
   refreshCloneButton();

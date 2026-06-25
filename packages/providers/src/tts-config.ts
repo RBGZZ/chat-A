@@ -18,7 +18,8 @@ export type TtsConfig =
   | KokoroTtsConfig
   | OpenAiCompatTtsConfig
   | GptSovitsTtsConfig
-  | QwenTtsRealtimeConfig;
+  | QwenTtsRealtimeConfig
+  | CosyVoiceTtsConfig;
 
 /** 确定性桩(无依赖、可复现;支持复刻路径供单测)。 */
 export interface FakeTtsConfig {
@@ -171,6 +172,36 @@ export interface QwenTtsRealtimeConfig {
 }
 
 /**
+ * CosyVoice(阿里 DashScope)语音合成 —— WebSocket DashScope `run-task` 协议(**与 qwen-tts 不同**)。
+ * 仅北京地域、**无系统音色**(必须先复刻):合成 model 须与复刻 target_model 逐字一致(cosyvoice-v3.5-flash);
+ * voice = 复刻 voice_id(经 CHAT_A_VOICE_ID / voice-profile → TtsOptions.voiceId 流入);音频走二进制裸帧。
+ * 协议详见 openspec/changes/cosyvoice-clone-synth/design.md。
+ */
+export interface CosyVoiceTtsConfig {
+  readonly kind: 'cosyvoice';
+  readonly id?: string;
+  /** 模型 id(默认 cosyvoice-v3.5-flash;须与复刻 target_model 逐字一致)。 */
+  readonly model?: string;
+  /** DASHSCOPE_API_KEY(缺省时 provider fail-fast)。 */
+  readonly apiKey: string;
+  /** 默认音色(复刻 voice_id;通常由 opts.voiceId 在合成时传入,config 可留空)。 */
+  readonly voice?: string;
+  /** WebSocket 端点(默认北京区)。 */
+  readonly endpoint?: string;
+  /** 输出格式(pcm|wav|mp3|opus;默认 pcm)。 */
+  readonly format?: string;
+  /** 输出采样率(默认 24000)。 */
+  readonly sampleRate?: number;
+  /** 语速(0.5~2.0)。 */
+  readonly rate?: number;
+  /** 音调(0.5~2.0)。 */
+  readonly pitch?: number;
+  /** 音量(0~100)。 */
+  readonly volume?: number;
+  readonly languages?: readonly string[];
+}
+
+/**
  * 从环境变量加载——用户自己选 TTS 引擎:
  *   CHAT_A_TTS_KIND      = fake | edge | kokoro | openai-compat | gpt-sovits | qwen-tts
  *                          (默认:有 base URL+key+model 则 openai-compat,否则 fake)
@@ -261,6 +292,29 @@ export function loadTtsConfig(env: NodeJS.ProcessEnv = process.env): TtsConfig {
         ...(language ? { languages: [language] } : {}),
         // 复刻能力位:CHAT_A_TTS_VOICE_CLONING=1/true 时启用(配 vc 实时模型用);省略=内置音色。
         ...(isTruthy(env['CHAT_A_TTS_VOICE_CLONING']) ? { voiceCloning: true } : {}),
+      };
+    }
+    case 'cosyvoice': {
+      // apiKey 回落 DashScope 专用环境变量(CHAT_A_TTS_API_KEY 优先,缺省取 CHAT_A_DASHSCOPE_API_KEY)。
+      const dashKey = apiKey ?? env['CHAT_A_DASHSCOPE_API_KEY'];
+      const num = (v: string | undefined): number | undefined =>
+        v !== undefined && Number.isFinite(Number(v)) ? Number(v) : undefined;
+      const rate = num(env['CHAT_A_TTS_RATE']);
+      const pitch = num(env['CHAT_A_TTS_PITCH']);
+      const volume = num(env['CHAT_A_TTS_VOLUME']);
+      return {
+        kind: 'cosyvoice',
+        apiKey: dashKey ?? '',
+        ...(model !== undefined ? { model } : {}),
+        ...(voice !== undefined ? { voice } : {}),
+        ...(env['CHAT_A_TTS_ID'] ? { id: env['CHAT_A_TTS_ID'] } : {}),
+        ...(env['CHAT_A_TTS_ENDPOINT'] ? { endpoint: env['CHAT_A_TTS_ENDPOINT'] } : {}),
+        ...(env['CHAT_A_TTS_RESPONSE_FORMAT'] ? { format: env['CHAT_A_TTS_RESPONSE_FORMAT'] } : {}),
+        ...(sampleRate !== undefined ? { sampleRate } : {}),
+        ...(rate !== undefined ? { rate } : {}),
+        ...(pitch !== undefined ? { pitch } : {}),
+        ...(volume !== undefined ? { volume } : {}),
+        ...(language ? { languages: [language] } : {}),
       };
     }
     case 'gpt-sovits':
