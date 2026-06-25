@@ -188,6 +188,32 @@ describe('CosyVoiceTts(注入 mock WS,不触网)', () => {
     expect(params['enable_ssml']).toBe(true);
   });
 
+  it('per-call:opts.instruction 覆盖构造期静态 instruction', async () => {
+    const { factory, created } = mockFactory((ws) => {
+      ws.serverEvent('task-started');
+      ws.serverEvent('task-finished');
+    });
+    const tts = newTts(factory, { instruction: '静态:温柔' });
+    await collect(tts.synthesize('x', { instruction: '逐回合:很开心上扬' }));
+    const params = (created[0]!.sent[0]!['payload'] as Record<string, unknown>)[
+      'parameters'
+    ] as Record<string, unknown>;
+    expect(params['instruction']).toBe('逐回合:很开心上扬');
+  });
+
+  it('per-call:未传 opts.instruction → 回落构造期静态', async () => {
+    const { factory, created } = mockFactory((ws) => {
+      ws.serverEvent('task-started');
+      ws.serverEvent('task-finished');
+    });
+    const tts = newTts(factory, { instruction: '静态:温柔' });
+    await collect(tts.synthesize('x'));
+    const params = (created[0]!.sent[0]!['payload'] as Record<string, unknown>)[
+      'parameters'
+    ] as Record<string, unknown>;
+    expect(params['instruction']).toBe('静态:温柔');
+  });
+
   it('回归:不设 instruction/enableSsml → parameters 不含这两键', async () => {
     const { factory, created } = mockFactory((ws) => {
       ws.serverEvent('task-started');

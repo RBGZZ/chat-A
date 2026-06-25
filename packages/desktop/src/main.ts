@@ -291,6 +291,15 @@ function speakAvailable(handle: AppHandle): boolean {
   return isSpeakAvailable(handle.ttsConfig.kind);
 }
 
+/**
+ * "随心情说话"开关(env CHAT_A_TTS_EMOTION_FROM_MOOD=on/1/true/yes;默认 off)。
+ * 启用 → 朗读按当前 PAD 心情注入情绪指令(仅 cosyvoice 引擎实际消费;qwen 忽略)。默认关 = 逐字回归。
+ */
+function isEmotionFromMood(handle: AppHandle): boolean {
+  const raw = (handle.env['CHAT_A_TTS_EMOTION_FROM_MOOD'] ?? '').trim().toLowerCase();
+  return raw === 'on' || raw === '1' || raw === 'true' || raw === 'yes';
+}
+
 /** 当前三语种 + 朗读开关 + 可用性(供 lang:get 返回与初值回填)。 */
 function buildLangForm(handle: AppHandle): LangForm {
   const env = handle.env;
@@ -377,12 +386,16 @@ class SpeakController {
 function makeSynthesize(
   tts: TtsProvider,
   env: NodeJS.ProcessEnv,
+  instruction?: string,
 ): (sentence: string, ttsLang: string, signal: AbortSignal) => AsyncIterable<TtsAudioChunk> {
   const profile = loadVoiceProfile(env);
   return async function* synth(sentence, ttsLang, signal) {
     const opts: TtsOptions = {
       ...(ttsLang.length > 0 ? { language: ttsLang } : {}),
       ...(profile.voiceId !== undefined ? { voiceId: profile.voiceId } : {}),
+      // 随心情说话:speakReply 据当前 PAD 心情算出的 per-call 情绪指令(开关启用时才有值);
+      // 条件展开 → 关闭/无心情时键不出现(exactOptional,逐字回归)。仅 cosyvoice 消费,qwen 忽略。
+      ...(instruction !== undefined && instruction.length > 0 ? { instruction } : {}),
     };
     try {
       for await (const chunk of tts.synthesize(sentence, opts, signal)) {
@@ -417,11 +430,22 @@ async function speakReply(handle: AppHandle, reply: string, signal: AbortSignal)
   const env = handle.env;
   const displayLang = normalizeLangCode(env['CHAT_A_DISPLAY_LANG']);
   const ttsLang = (env['CHAT_A_TTS_LANG'] ?? '').trim();
+  // 随心情说话(§6 PAD → §4.1 TTS 情感):开关启用时读当前心情的 voiceInstruction,作 per-call 指令注入。
+  // 每条回复读一次(朗读整段一次合成);读心情失败优雅降级为无指令(§3.2)。仅 cosyvoice 引擎实际生效。
+  let moodInstruction: string | undefined;
+  if (isEmotionFromMood(handle)) {
+    try {
+      const vi = handle.persona.tone().voiceInstruction;
+      if (vi.length > 0) moodInstruction = vi;
+    } catch {
+      /* 读心情失败 → 回落无指令(不崩、不中断朗读) */
+    }
+  }
   try {
     await runSpeakReply(
       {
         splitSentences: splitReplySentences,
-        synthesize: makeSynthesize(handle.tts, env),
+        synthesize: makeSynthesize(handle.tts, env, moodInstruction),
         // 翻译通道:用文字链路同一 handle.llm 发一条 system + user(显示 reply)→ 译文喂 TTS。
         translate: (displayText, targetLang) =>
           translateForSpeech(

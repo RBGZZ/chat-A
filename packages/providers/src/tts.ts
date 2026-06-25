@@ -94,6 +94,13 @@ export interface TtsOptions {
    * 与 `voiceId` 二选一为主:voiceId 选已注册复刻音色;refAudio 现场复刻。
    */
   readonly refAudio?: TtsRefAudio;
+  /**
+   * **按调用透传**的说话风格/情绪指令(自然语言)。支持指令控制的 provider(如 CosyVoice)
+   * 以此**优先于构造期静态指令**;未给则回落静态。不支持指令的 provider 忽略(纯加法)。
+   * 用于"随心情说话"(persona PAD → 指令 → 逐回合注入)。⚠️ qwen-tts 当前仅用构造期静态指令、
+   * 忽略本字段(per-call 接入为后续)。
+   */
+  readonly instruction?: string;
 }
 
 /**

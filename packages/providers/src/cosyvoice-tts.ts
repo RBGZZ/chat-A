@@ -139,6 +139,10 @@ export class CosyVoiceTts implements TtsProvider {
       );
     }
 
+    // 情绪/风格指令:按调用 opts.instruction 优先于构造期静态 #instruction(未给则回落静态)。
+    // 支撑"随心情说话"(persona PAD → 指令逐回合注入);未配置两者均 undefined → 不发 instruction(回归)。
+    const instruction = opts?.instruction ?? this.#instruction;
+
     const taskId = this.#taskId();
     const ws = this.#wsFactory(this.#endpoint, { Authorization: `Bearer ${this.#apiKey}` });
     const queue = new ByteFrameQueue();
@@ -165,7 +169,7 @@ export class CosyVoiceTts implements TtsProvider {
             ...(this.#rate !== undefined ? { rate: this.#rate } : {}),
             ...(this.#pitch !== undefined ? { pitch: this.#pitch } : {}),
             ...(this.#volume !== undefined ? { volume: this.#volume } : {}),
-            ...(this.#instruction !== undefined ? { instruction: this.#instruction } : {}),
+            ...(instruction !== undefined ? { instruction } : {}),
             ...(this.#enableSsml !== undefined ? { enableSsml: this.#enableSsml } : {}),
           }),
         ),

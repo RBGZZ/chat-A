@@ -14,6 +14,7 @@ import type {
 } from './types';
 import { clampUnit, DEFAULT_PERSONA_CONFIG } from './defaults';
 import { oceanToPadBaseline, padToEmotion, stepPad } from './numeric';
+import { padToVoiceInstruction } from './pad-voice-instruction';
 import { prosodyToPadPull, type SttEmotionLike } from './prosody';
 import { renderToneFragment } from './tone';
 import { resolveNegativePosture } from './posture';
@@ -50,6 +51,12 @@ export interface ToneView {
   readonly pad: Pad;
   /** 当轮负面人际姿态(§7#6);无则 null。 */
   readonly posture: Posture | null;
+  /**
+   * 当前心情对应的"语音情绪指令"(§4.1 TTS 情感;由 PAD 经 {@link padToVoiceInstruction} 得出)。
+   * 供编排层作 TtsOptions.instruction 注入 CosyVoice,使复刻音色随情绪说话。空串=中性不强加。
+   * 纯加法字段;不改变 emotion/toneFragment/pad/posture 的值与行为。
+   */
+  readonly voiceInstruction: string;
 }
 
 export interface PersonaEngineOptions {
@@ -114,6 +121,7 @@ export class PersonaEngine {
       toneFragment: renderToneFragment(this.#snapshot.pad, dials, ...closeArgs),
       pad: this.#snapshot.pad,
       posture: resolveNegativePosture(this.#snapshot.pad, dials),
+      voiceInstruction: padToVoiceInstruction(this.#snapshot.pad, dials),
     };
   }
 

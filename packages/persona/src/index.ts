@@ -3,6 +3,7 @@ export * from './defaults';
 export * from './numeric';
 export * from './prosody';
 export * from './tone';
+export * from './pad-voice-instruction';
 export * from './appraiser';
 export * from './llm-appraiser';
 export * from './ocean-evolution';
