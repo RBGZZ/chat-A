@@ -674,11 +674,29 @@ function wireBus(handle: AppHandle): () => void {
   });
   // 语音转写(STT final)→ 渲染层可显示用户说的话。
   const offStt = handle.bus.on('stt:final', (e) => emit(IPC.transcript, e.data.text));
+  // 🔍 临时诊断(语音真机测试):把语音管线事件打到终端,定位"说话没反应"卡在哪一步。
+  // tts:chunk 太密只在首块标记;其余事件全打(含 data 摘要)。测完删此 onAny 块。
+  let sawChunk = false;
+  const offTrace = handle.bus.onAny((e) => {
+    // 诊断:宽松取 action/data(BusEvent 联合不含部分 raw action 字面量,转 string 避免字面量比较报错)。
+    const ev = e as unknown as { action: string; data?: { text?: string } };
+    const t = ev.action; // BusEvent 的事件名字段是 action(非 type)
+    if (t === 'tts:chunk') {
+      if (!sawChunk) { sawChunk = true; console.log('[trace] tts:chunk 首块(开始出音频)'); }
+      return;
+    }
+    if (t === 'turn:end') sawChunk = false;
+    const data =
+      t === 'stt:final' || t === 'stt:partial' ? ` "${ev.data?.text ?? ''}"`
+      : t === 'error' ? ` ${JSON.stringify(ev.data)}` : '';
+    console.log(`[trace] ${t}${data}`);
+  });
   return () => {
     offTracker();
     offChange();
     offTurnEnd();
     offStt();
+    offTrace();
   };
 }
 
@@ -814,7 +832,9 @@ function registerIpc(handle: AppHandle): void {
   // 语音开始:先探测 naudiodon 可用性,不可用即优雅降级(不进 startVoiceMode)。
   ipcMain.handle(IPC.voiceStart, async () => {
     try {
+      console.log('[voiceStart] 收到点击,开始探测 naudiodon…');
       const probe = await probeVoice(() => new NodeAudioDevice());
+      console.log('[voiceStart] 探测结果:', JSON.stringify(probe));
       if (!probe.available) {
         emit(IPC.voiceStatus, probe);
         return;
@@ -838,6 +858,7 @@ function registerIpc(handle: AppHandle): void {
         // §4.1:复刻得到的 CHAT_A_VOICE_ID(及 voice-profile 其它键)拼成的合成 opts;缺省全空 → undefined(逐字现状)。
         ...(ttsOptions ? { ttsOptions } : {}),
       });
+      console.log('[voiceStart] startVoiceMode 已启动 info=', JSON.stringify(voiceHandle.info));
       emit(IPC.voiceStatus, {
         available: true,
         path: voiceHandle.info.path,
@@ -845,6 +866,7 @@ function registerIpc(handle: AppHandle): void {
       });
     } catch (err) {
       // 任何失败 → 降级通知,文字路不受影响、绝不崩(§3.2)。
+      console.error('[voiceStart] 失败(降级):', err);
       emit(IPC.voiceStatus, {
         available: false,
         reason: `${VOICE_UNAVAILABLE_REASON}(${err instanceof Error ? err.message : String(err)})`,

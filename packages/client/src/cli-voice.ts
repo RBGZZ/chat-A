@@ -302,8 +302,18 @@ export async function createAudioDevice(
   const mode = (env['CHAT_A_AUDIO_DEVICE'] ?? 'fake').toLowerCase();
   if (mode === 'node' || mode === 'naudiodon' || mode === 'real') {
     const nativeModule = env['CHAT_A_AUDIO_MODULE'];
+    // 输入设备号(PortAudio deviceId):缺省 -1=系统默认设备。⚠️ 真机若默认设备是「立体声混音/环回」
+    // 会把扬声器输出采回当输入(输出转录被当输入),且真麦近静音 → 用此 env 选真麦克风 id(见 init 枚举日志)。
+    const rawDevId = (env['CHAT_A_AUDIO_INPUT_DEVICE_ID'] ?? '').trim();
+    const deviceId = rawDevId.length > 0 && Number.isFinite(Number(rawDevId)) ? Number(rawDevId) : undefined;
+    // 设备开流采样率(Hz):某些设备(ToDesk 虚拟麦/WASAPI)只支持原生率(44100/48000),强开 16k 会报错或返回
+    // 循环缓冲。设为设备原生率 → 按原生率开流 + 本地重采样到 16k 喂下游(STT/VAD 恒见 16k)。缺省不设=16k 现状。
+    const rawRate = (env['CHAT_A_AUDIO_CAPTURE_RATE'] ?? '').trim();
+    const deviceCaptureRate = rawRate.length > 0 && Number.isFinite(Number(rawRate)) ? Number(rawRate) : undefined;
     const device = new NodeAudioDevice({
       ...(nativeModule ? { nativeModule } : {}),
+      ...(deviceId !== undefined ? { deviceId } : {}),
+      ...(deviceCaptureRate !== undefined ? { deviceCaptureRate } : {}),
     });
     await device.init(); // 装不上 → 抛明确报错(调用方 catch 后回落 Fake)
     return { device, real: true };

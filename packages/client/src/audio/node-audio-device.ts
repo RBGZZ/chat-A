@@ -31,6 +31,29 @@ import type { AudioDevice, CaptureListener, PlaybackChunk, StopCapture } from '.
 /** 默认要动态加载的原生库模块名(可经构造参数覆盖)。 */
 const DEFAULT_NATIVE_MODULE = 'naudiodon';
 
+/**
+ * 单声道 Int16 线性重采样到目标样本数(用于设备原生率帧 → 16k 帧)。
+ * 线性插值足够把语音闭环跑通(STT 对轻微重采样伪影鲁棒);outLen ≤ in 或 ≥ in 均可。
+ */
+function resampleLinearTo(input: Int16Array, outLen: number): Int16Array {
+  const inLen = input.length;
+  const out = new Int16Array(outLen);
+  if (inLen === 0 || outLen === 0) return out;
+  if (inLen === 1) {
+    out.fill(input[0]!);
+    return out;
+  }
+  const ratio = (inLen - 1) / (outLen - 1 || 1);
+  for (let i = 0; i < outLen; i++) {
+    const pos = i * ratio;
+    const i0 = Math.floor(pos);
+    const i1 = Math.min(i0 + 1, inLen - 1);
+    const frac = pos - i0;
+    out[i] = Math.round(input[i0]! + (input[i1]! - input[i0]!) * frac);
+  }
+  return out;
+}
+
 /** 鸭子类型:一个「音频流」对端的最小面(输入 Readable / 输出 Writable 的交集子集)。 */
 interface NativeStream {
   on?(event: string, cb: (...args: unknown[]) => void): unknown;
@@ -52,6 +75,12 @@ export interface NodeAudioDeviceOptions {
   readonly nativeModule?: string;
   /** 采集采样率(Hz);缺省 16000(STT 硬约定)。 */
   readonly captureSampleRate?: number;
+  /**
+   * **设备开流采样率**(Hz);缺省 = captureSampleRate(16000)。某些设备(如 ToDesk 虚拟麦/WASAPI 共享模式)
+   * 只支持原生率(44100/48000),强行开 16k 会报「Invalid sample rate」或返回循环重放缓冲。此时设为设备原生率,
+   * 设备按原生率开流、本类**每帧线性重采样到 captureSampleRate(16k)**再喂下游(STT/VAD 仍见 16k)。
+   */
+  readonly deviceCaptureRate?: number;
   /** 播放采样率(Hz);缺省 24000(TTS 常见)。真库不支持动态改时按此开输出流。 */
   readonly playbackSampleRate?: number;
   /** 设备号(PortAudio deviceId;-1 = 默认设备)。 */
@@ -63,6 +92,7 @@ export class NodeAudioDevice implements AudioDevice {
 
   readonly #nativeModule: string;
   readonly #captureRate: number;
+  readonly #deviceCaptureRate: number;
   readonly #playbackRate: number;
   readonly #deviceId: number;
 
@@ -77,6 +107,8 @@ export class NodeAudioDevice implements AudioDevice {
   constructor(opts: NodeAudioDeviceOptions = {}) {
     this.#nativeModule = opts.nativeModule ?? DEFAULT_NATIVE_MODULE;
     this.#captureRate = opts.captureSampleRate ?? SAMPLE_RATE_HZ;
+    // 设备开流率:缺省=输出率(16k,行为不变)。设了不同值 → 按原生率开流 + 重采样到 #captureRate。
+    this.#deviceCaptureRate = opts.deviceCaptureRate ?? this.#captureRate;
     this.#playbackRate = opts.playbackSampleRate ?? 24_000;
     this.#deviceId = opts.deviceId ?? -1;
     this.id = `node:${this.#nativeModule}`;
@@ -106,6 +138,22 @@ export class NodeAudioDevice implements AudioDevice {
       );
     }
     this.#factory = factory;
+    // 🔍 临时诊断:枚举音频设备(naudiodon getDevices),打印输入设备 id/名/默认标记,
+    // 用于定位"默认设备是环回/立体声混音致输出被当输入 + 真麦近静音"。测完删此块。
+    try {
+      const m = mod as { getDevices?: () => Array<Record<string, unknown>>; getHostAPIs?: () => unknown };
+      const devs = typeof m.getDevices === 'function' ? m.getDevices() : [];
+      const inputs = devs.filter((d) => Number(d['maxInputChannels'] ?? 0) > 0);
+      console.log(`[audio-devices] 选用 deviceId=${this.#deviceId}(-1=系统默认)。输入设备清单:`);
+      for (const d of inputs) {
+        console.log(
+          `  id=${d['id']} maxIn=${d['maxInputChannels']} rate=${d['defaultSampleRate']} ` +
+            `name=${JSON.stringify(d['name'])} host=${JSON.stringify(d['hostAPIName'])}`,
+        );
+      }
+    } catch (err) {
+      console.warn('[audio-devices] 枚举设备失败(不影响运行):', err instanceof Error ? err.message : err);
+    }
   }
 
   captureStart(onFrame: CaptureListener): StopCapture {
@@ -119,7 +167,7 @@ export class NodeAudioDevice implements AudioDevice {
       inOptions: {
         channelCount: CHANNELS,
         sampleFormat: 16, // s16le(naudiodon SampleFormat16Bit=16)
-        sampleRate: this.#captureRate,
+        sampleRate: this.#deviceCaptureRate, // 按设备原生率开流(避免 16k 强开导致 Invalid rate/循环缓冲)
         deviceId: this.#deviceId,
         closeOnError: false,
       },
@@ -134,16 +182,24 @@ export class NodeAudioDevice implements AudioDevice {
     return () => this.#stopCapture();
   }
 
-  /** 攒字节 → 满 320 字节(160 样本)切一帧 PcmFrame,带 wall-clock 时刻喂 onFrame。 */
+  /**
+   * 攒字节 → 切「设备率下一个 10ms 帧」→(必要时)线性重采样到 #captureRate(16k)的 160 样本帧 → 喂 onFrame。
+   * 设备率=16k 时切 160 样本、不重采样(逐字现状);设备率=44100 时切 441 样本、重采样到 160(下游恒见 16k)。
+   */
   #onCaptureBytes(buf: Buffer, onFrame: CaptureListener): void {
     if (this.#closed) return;
     this.#pending = this.#pending.length === 0 ? buf : Buffer.concat([this.#pending, buf]);
-    const frameBytes = SAMPLES_PER_FRAME * SAMPLE_BYTES; // 320
+    // 设备率下 10ms 一帧的样本数(16k→160,44100→441,48000→480);按此切片,保证每帧恒为 10ms。
+    const inFrameSamples = Math.max(1, Math.round(this.#deviceCaptureRate / 100));
+    const inFrameBytes = inFrameSamples * SAMPLE_BYTES;
     let offset = 0;
-    while (this.#pending.length - offset >= frameBytes) {
-      const slice = this.#pending.subarray(offset, offset + frameBytes);
-      const samples = new Int16Array(SAMPLES_PER_FRAME);
-      for (let i = 0; i < SAMPLES_PER_FRAME; i++) samples[i] = slice.readInt16LE(i * SAMPLE_BYTES);
+    while (this.#pending.length - offset >= inFrameBytes) {
+      const slice = this.#pending.subarray(offset, offset + inFrameBytes);
+      const inSamples = new Int16Array(inFrameSamples);
+      for (let i = 0; i < inFrameSamples; i++) inSamples[i] = slice.readInt16LE(i * SAMPLE_BYTES);
+      // 重采样到 16k 的 160 样本(设备率=16k 时 inFrameSamples=160=SAMPLES_PER_FRAME,恒等拷贝)。
+      const samples =
+        inFrameSamples === SAMPLES_PER_FRAME ? inSamples : resampleLinearTo(inSamples, SAMPLES_PER_FRAME);
       const frame: PcmFrame = {
         samples,
         sampleRate: this.#captureRate,
@@ -155,7 +211,7 @@ export class NodeAudioDevice implements AudioDevice {
       } catch {
         // 上行回调抛错不应崩设备(§3.2);丢这一帧继续。
       }
-      offset += frameBytes;
+      offset += inFrameBytes;
     }
     this.#pending = offset > 0 ? Buffer.from(this.#pending.subarray(offset)) : this.#pending;
   }

@@ -485,6 +485,10 @@ export class VoiceLoop {
       const pcm = frame.payload.audio; // payload.audio 本就是 PcmFrame，直接喂 VAD
       this.#lastFrameSamples = pcm.samples; // 供 EchoGuard 算本帧能量
       this.#lastFrameAtMs = pcm.timestampMs; // 供 EchoGuard 冷却窗起点对齐帧时间轴(确定性)
+      // 🔍 临时诊断:每 50 帧(~0.5s)打一次帧 rms + 当前态,定位"麦克风有没有音频进来/电平多高"。测完删。
+      if (++this.#diagN % 50 === 0) {
+        console.log(`[mic] rms=${this.#frameEnergy01().toFixed(4)} state=${this.#state} samples=${pcm.samples.length}`);
+      }
       const result = this.#vad.pushFrame(pcm);
       const evt = result.event;
 
@@ -1038,6 +1042,8 @@ export class VoiceLoop {
 
   /** 本帧归一化 RMS 能量(0~1);喂 EchoGuard 双层 RMS 门槛判定。 */
   #lastFrameSamples: Int16Array | null = null;
+  /** 🔍 临时诊断:节流帧计数(每 N 帧打一次 listening 态 rms,定位麦克风是否有音频进来)。测完删。 */
+  #diagN = 0;
   #frameEnergy01(): number {
     const s = this.#lastFrameSamples;
     if (s === null || s.length === 0) return 0;

@@ -1,0 +1,1109 @@
+=== 物理机语音输入调试日志(2026-06-26, id=8 Intel麦/48k) ===
+--- mic rms 全序列(状态机推进) ---
+[mic] rms=0.0005 state=listening samples=160
+[mic] rms=0.0393 state=endpointing samples=160
+[mic] rms=0.1040 state=endpointing samples=160
+[mic] rms=0.0171 state=endpointing samples=160
+[mic] rms=0.0932 state=endpointing samples=160
+[mic] rms=0.0001 state=endpointing samples=160
+[mic] rms=0.0001 state=endpointing samples=160
+[mic] rms=0.0001 state=endpointing samples=160
+[mic] rms=0.0001 state=endpointing samples=160
+[mic] rms=0.0001 state=thinking samples=160
+[mic] rms=0.0001 state=thinking samples=160
+[mic] rms=0.0001 state=thinking samples=160
+[mic] rms=0.0001 state=speaking samples=160
+[mic] rms=0.0001 state=speaking samples=160
+[mic] rms=0.0001 state=speaking samples=160
+[mic] rms=0.0001 state=speaking samples=160
+[mic] rms=0.0001 state=speaking samples=160
+[mic] rms=0.0001 state=speaking samples=160
+[mic] rms=0.0001 state=listening samples=160
+[mic] rms=0.0001 state=listening samples=160
+[mic] rms=0.0001 state=listening samples=160
+[mic] rms=0.0001 state=listening samples=160
+[mic] rms=0.0001 state=listening samples=160
+[mic] rms=0.0001 state=listening samples=160
+[mic] rms=0.0001 state=listening samples=160
+[mic] rms=0.0001 state=listening samples=160
+[mic] rms=0.0001 state=listening samples=160
+[mic] rms=0.0001 state=listening samples=160
+[mic] rms=0.0001 state=listening samples=160
+[mic] rms=0.0001 state=listening samples=160
+[mic] rms=0.0001 state=listening samples=160
+[mic] rms=0.0001 state=listening samples=160
+[mic] rms=0.0001 state=listening samples=160
+[mic] rms=0.0359 state=endpointing samples=160
+[mic] rms=0.0393 state=endpointing samples=160
+[mic] rms=0.0113 state=endpointing samples=160
+[mic] rms=0.0001 state=endpointing samples=160
+[mic] rms=0.0001 state=endpointing samples=160
+[mic] rms=0.0001 state=endpointing samples=160
+[mic] rms=0.0001 state=thinking samples=160
+[mic] rms=0.0001 state=thinking samples=160
+[mic] rms=0.0013 state=thinking samples=160
+[mic] rms=0.0009 state=speaking samples=160
+[mic] rms=0.0001 state=speaking samples=160
+
+--- 关键事件/错误(去刷屏) ---
+1:
+2:[audioFirst] display="zh" → 回复/合成="ja"
+3:[voiceStart] 收到点击,开始探测 naudiodon…
+4:[audio-devices] 选用 deviceId=-1(-1=系统默认)。输入设备清单:
+17:[voiceStart] 探测结果: {"available":true}
+18:[audio-devices] 选用 deviceId=8(-1=系统默认)。输入设备清单:
+48:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+49:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+50:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+51:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+52:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+53:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+54:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+55:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+56:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+57:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+58:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+59:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+60:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+61:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+62:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+63:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+64:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+65:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+66:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+67:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+68:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+69:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+70:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+71:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+72:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+73:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+74:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+75:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+76:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+77:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+78:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+79:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+97:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+98:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+99:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+100:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+101:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+102:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+103:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+104:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+105:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+106:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+107:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+108:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+109:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+110:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+111:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+112:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+113:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+114:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+115:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+116:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+117:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+118:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+119:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+120:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+121:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+122:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+123:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+124:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+125:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+126:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+127:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+128:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+129:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+130:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+131:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+132:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+133:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+134:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+135:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+136:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+154:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+155:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+156:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+157:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+158:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+159:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+160:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+161:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+162:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+163:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+164:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+165:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+166:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+167:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+168:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+169:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+170:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+171:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+172:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+173:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+174:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+175:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+176:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+177:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+178:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+179:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+180:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+181:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+182:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+183:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+184:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+185:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+186:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+187:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+188:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+189:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+190:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+191:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+192:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+193:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+194:PortAudio V19.6.0-devel, revision unknown
+195:Input audio options: device 8, sample rate 48000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+196:Input device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+197:PortAudio V19.6.0-devel, revision unknown
+198:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+199:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+200:PortAudio V19.6.0-devel, revision unknown
+201:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+202:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+203:PortAudio V19.6.0-devel, revision unknown
+204:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+205:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+206:PortAudio V19.6.0-devel, revision unknown
+207:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+208:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+209:PortAudio V19.6.0-devel, revision unknown
+210:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+211:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+212:PortAudio V19.6.0-devel, revision unknown
+213:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+214:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+215:PortAudio V19.6.0-devel, revision unknown
+216:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+217:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+218:PortAudio V19.6.0-devel, revision unknown
+219:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+220:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+221:PortAudio V19.6.0-devel, revision unknown
+222:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+223:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+224:PortAudio V19.6.0-devel, revision unknown
+225:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+226:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+227:PortAudio V19.6.0-devel, revision unknown
+228:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+229:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+230:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+231:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+232:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+233:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+234:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+235:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+236:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+237:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+238:PortAudio V19.6.0-devel, revision unknown
+239:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+240:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+241:PortAudio V19.6.0-devel, revision unknown
+242:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+243:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+244:PortAudio V19.6.0-devel, revision unknown
+245:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+246:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+247:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+248:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+249:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+250:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+251:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+252:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+253:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+254:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+255:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+256:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+257:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+258:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+259:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+260:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+261:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+262:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+281:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+282:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+283:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+284:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+285:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+286:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+287:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+288:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+289:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+290:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+291:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+292:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+293:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+294:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+295:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+296:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+297:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+298:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+299:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+300:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+301:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+302:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+303:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+304:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+375:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+376:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+377:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+378:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+379:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+380:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+381:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+382:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+383:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+384:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+385:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+386:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+387:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+388:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+389:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+390:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+391:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+392:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+393:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+394:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+395:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+396:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+397:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+398:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+399:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+400:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+401:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+420:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+421:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+422:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+423:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+424:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+425:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+426:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+427:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+428:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+429:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+430:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+431:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+432:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+433:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+434:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+435:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+436:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+437:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+438:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+439:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+440:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+441:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+442:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+443:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+444:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+445:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+446:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+447:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+448:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+449:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+450:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+451:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+452:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+453:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+454:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+455:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+474:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+475:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+476:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+477:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+478:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+479:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+480:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+481:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+482:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+483:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+484:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+485:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+486:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+487:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+488:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+489:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+490:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+491:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+492:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+493:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+494:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+495:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+496:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+497:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+498:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+499:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+500:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+501:devel, revision unknown
+502:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+503:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+504:PortAudio V19.6.0-devel, revision unknown
+505:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+506:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+507:PortAudio V19.6.0-devel, revision unknown
+508:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+509:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+510:PortAudio V19.6.0-devel, revision unknown
+511:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+512:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+513:PortAudio V19.6.0-devel, revision unknown
+514:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+515:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+516:PortAudio V19.6.0-devel, revision unknown
+517:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+518:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+519:PortAudio V19.6.0-devel, revision unknown
+520:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+521:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+522:PortAudio V19.6.0-devel, revision unknown
+523:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+524:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+525:PortAudio V19.6.0-devel, revision unknown
+526:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+527:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+528:PortAudio V19.6.0-devel, revision unknown
+529:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+530:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+531:PortAudio V19.6.0-devel, revision unknown
+532:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+533:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+534:PortAudio V19.6.0-devel, revision unknown
+535:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+536:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+537:PortAudio V19.6.0-devel, revision unknown
+538:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+539:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+540:PortAudio V19.6.0-devel, revision unknown
+541:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+542:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+543:PortAudio V19.6.0-devel, revision unknown
+544:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+545:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+546:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+547:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+548:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+549:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+550:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+551:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+552:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+553:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+554:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+555:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+556:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+557:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+558:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+559:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+560:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+561:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+562:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+563:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+564:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+565:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+566:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+567:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+568:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+569:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+570:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+571:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+572:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+573:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+574:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+575:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+576:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+577:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+578:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+579:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+580:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+581:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+582:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+583:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+584:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+585:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+586:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+587:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+588:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+589:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+590:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+591:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+592:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+593:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+594:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+595:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+596:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+597:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+598:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+599:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+600:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+601:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+602:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+603:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+604:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+605:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+606:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+607:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+608:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+678:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+679:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+680:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+681:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+682:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+683:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+684:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+685:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+686:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+687:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+688:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+689:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+690:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+691:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+692:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+693:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+694:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+695:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+696:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+697:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+698:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+699:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+700:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+701:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+702:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+703:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+704:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+705:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+706:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+707:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+708:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+709:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+710:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+711:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+712:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+713:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+732:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+733:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+734:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+735:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+736:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+737:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+738:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+739:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+740:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+741:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+742:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+743:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+744:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+745:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+746:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+747:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+748:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+749:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+750:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+751:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+752:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+753:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+754:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+755:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+756:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+757:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+758:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+759:unknown
+760:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+761:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+762:PortAudio V19.6.0-devel, revision unknown
+763:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+764:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+765:PortAudio V19.6.0-devel, revision unknown
+766:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+767:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+768:PortAudio V19.6.0-devel, revision unknown
+769:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+770:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+771:PortAudio V19.6.0-devel, revision unknown
+772:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+773:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+774:PortAudio V19.6.0-devel, revision unknown
+775:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+776:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+777:PortAudio V19.6.0-devel, revision unknown
+778:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+779:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+780:PortAudio V19.6.0-devel, revision unknown
+781:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+782:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+783:PortAudio V19.6.0-devel, revision unknown
+784:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+785:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+786:PortAudio V19.6.0-devel, revision unknown
+787:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+788:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+789:PortAudio V19.6.0-devel, revision unknown
+790:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+791:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+792:PortAudio V19.6.0-devel, revision unknown
+793:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+794:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+795:PortAudio V19.6.0-devel, revision unknown
+796:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+797:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+798:PortAudio V19.6.0-devel, revision unknown
+799:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+800:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+801:PortAudio V19.6.0-devel, revision unknown
+802:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+803:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+804:PortAudio V19.6.0-devel, revision unknown
+805:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+806:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+807:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+808:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+809:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+810:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+811:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+812:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+813:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+814:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+815:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+816:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+817:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+818:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+819:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+820:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+821:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+822:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+840:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+841:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+842:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+843:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+844:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+845:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+846:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+847:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+848:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+849:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+850:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+851:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+852:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+853:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+854:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+855:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+856:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+857:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+858:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+859:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+860:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+861:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+862:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+863:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+864:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+865:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+866:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+867:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+868:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+869:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+870:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+871:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+872:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+873:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+874:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+875:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+893:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+894:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+895:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+896:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+897:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+898:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+899:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+900:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+901:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+902:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+903:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+904:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+905:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+906:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+907:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+908:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+909:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+910:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+911:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+912:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+913:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+914:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+915:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+916:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+917:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+918:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+919:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+920:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+921:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+922:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+923:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+924:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+925:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+926:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+927:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+928:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+947:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+948:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+949:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+950:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+951:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+952:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+953:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+954:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+955:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+956:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+957:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+958:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+959:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+960:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+961:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+962:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+963:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+964:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+965:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+966:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+967:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+968:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+969:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+970:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+971:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+972:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+973:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+974:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+975:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+976:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+977:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+978:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+979:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+980:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+981:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+982:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+983:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+984:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+985:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+986:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+987:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+988:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+989:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+990:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+991:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+992:udio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+993:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+994:PortAudio V19.6.0-devel, revision unknown
+995:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+996:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+997:PortAudio V19.6.0-devel, revision unknown
+998:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+999:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1000:PortAudio V19.6.0-devel, revision unknown
+1001:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1002:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1003:PortAudio V19.6.0-devel, revision unknown
+1004:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1005:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1006:PortAudio V19.6.0-devel, revision unknown
+1007:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1008:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1009:PortAudio V19.6.0-devel, revision unknown
+1010:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1011:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1012:PortAudio V19.6.0-devel, revision unknown
+1013:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1014:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1015:PortAudio V19.6.0-devel, revision unknown
+1016:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1017:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1018:PortAudio V19.6.0-devel, revision unknown
+1019:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1020:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1021:PortAudio V19.6.0-devel, revision unknown
+1022:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1023:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1024:PortAudio V19.6.0-devel, revision unknown
+1025:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1026:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1027:PortAudio V19.6.0-devel, revision unknown
+1028:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1029:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1030:PortAudio V19.6.0-devel, revision unknown
+1031:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1032:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1033:PortAudio V19.6.0-devel, revision unknown
+1034:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1035:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1036:PortAudio V19.6.0-devel, revision unknown
+1037:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1038:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1039:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1040:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1041:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1042:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1043:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1044:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1045:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1046:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1047:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1048:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1049:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1050:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1051:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1052:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1053:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1054:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1055:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1056:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1057:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1058:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1059:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1060:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1061:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1062:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1063:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1064:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1065:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1066:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1067:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1068:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1069:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1070:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1071:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1072:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1073:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1074:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1075:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1076:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1077:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1078:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1079:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1080:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1081:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1082:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1083:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1084:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1085:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1086:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1087:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1088:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1089:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1090:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1091:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1092:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1093:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1094:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1095:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1096:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1097:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1098:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1099:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1100:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1101:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1102:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1103:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1104:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1105:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1106:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1107:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1108:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1138:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1139:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1140:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1141:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1142:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1143:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1144:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1145:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1146:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1147:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1148:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1149:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1150:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1151:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1152:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1153:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1154:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1155:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1156:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1157:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1158:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1159:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1160:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1161:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1162:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1163:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1164:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1165:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1166:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1167:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1168:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1169:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1170:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1171:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1172:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1173:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1174:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1175:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1176:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1177:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1195:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1196:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1197:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1198:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1199:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1200:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1201:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1202:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1203:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1204:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1205:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1206:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1207:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1208:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1209:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1210:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1211:vice 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1212:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1213:PortAudio V19.6.0-devel, revision unknown
+1214:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1215:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1216:PortAudio V19.6.0-devel, revision unknown
+1217:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1218:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1219:PortAudio V19.6.0-devel, revision unknown
+1220:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1221:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1222:PortAudio V19.6.0-devel, revision unknown
+1223:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1224:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1225:PortAudio V19.6.0-devel, revision unknown
+1226:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1227:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1228:PortAudio V19.6.0-devel, revision unknown
+1229:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1230:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1231:PortAudio V19.6.0-devel, revision unknown
+1232:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1233:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1234:PortAudio V19.6.0-devel, revision unknown
+1235:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1236:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1237:PortAudio V19.6.0-devel, revision unknown
+1238:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1239:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1240:PortAudio V19.6.0-devel, revision unknown
+1241:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1242:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1243:PortAudio V19.6.0-devel, revision unknown
+1244:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1245:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1246:PortAudio V19.6.0-devel, revision unknown
+1247:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1248:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1249:PortAudio V19.6.0-devel, revision unknown
+1250:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1251:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1252:PortAudio V19.6.0-devel, revision unknown
+1253:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1254:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1255:PortAudio V19.6.0-devel, revision unknown
+1256:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1257:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1258:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1259:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1260:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1261:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1262:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1263:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1264:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1265:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1266:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1267:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1268:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1269:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1270:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1271:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1272:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1273:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1274:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1275:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1276:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1277:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1278:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1279:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1280:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1281:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1282:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1283:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1284:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1285:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1286:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1287:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1288:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1289:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1290:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1291:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1292:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1293:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1294:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1295:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1296:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1297:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1298:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1299:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1300:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1301:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1302:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1303:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1304:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1305:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1306:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1307:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1308:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1309:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1310:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1311:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1312:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1313:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1314:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1315:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1316:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1317:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1318:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1319:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1391:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1392:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1393:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1394:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1395:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1396:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1397:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1398:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1399:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1400:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1401:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1402:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1403:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1404:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1405:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1406:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1407:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1408:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1409:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1410:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1411:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1412:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1413:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1414:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1415:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1416:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1417:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1418:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1419:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1420:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1421:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1422:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1423:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1424:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1425:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1426:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1427:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1428:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1429:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1430:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1431:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1432:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1433:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1434:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1435:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1453:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1454:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1455:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1456:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1457:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1458:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1459:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1460:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1461:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1462:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1463:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1464:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1465:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1466:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1467:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1468:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1469:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1470:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1471:ate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1472:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1473:PortAudio V19.6.0-devel, revision unknown
+1474:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1475:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1476:PortAudio V19.6.0-devel, revision unknown
+1477:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1478:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1479:PortAudio V19.6.0-devel, revision unknown
+1480:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1481:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1482:PortAudio V19.6.0-devel, revision unknown
+1483:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1484:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1485:PortAudio V19.6.0-devel, revision unknown
+1486:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1487:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1488:PortAudio V19.6.0-devel, revision unknown
+1489:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1490:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1491:PortAudio V19.6.0-devel, revision unknown
+1492:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1493:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1494:PortAudio V19.6.0-devel, revision unknown
+1495:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1496:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1497:PortAudio V19.6.0-devel, revision unknown
+1498:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1499:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1500:PortAudio V19.6.0-devel, revision unknown
+1501:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1502:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1503:PortAudio V19.6.0-devel, revision unknown
+1504:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1505:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1506:PortAudio V19.6.0-devel, revision unknown
+1507:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1508:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1509:PortAudio V19.6.0-devel, revision unknown
+1510:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1511:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1512:PortAudio V19.6.0-devel, revision unknown
+1513:Output audio options: device 8, sample rate 24000, channels 1, bits per sample 16, max queue 2, frames per buffer 0, close on error false
+1514:Output device name is 麦克风阵列 (适用于数字麦克风的英特尔® 智音技术)
+1515:PortAudio V19.6.0-devel, revision unknown
+1516:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1517:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1518:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1519:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1520:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1521:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1522:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1523:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1524:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
+1525:[31;1m[InProcessAudioTransport] listener 抛错(已捕获,不影响其它 listener): Error: Channel count exceeds maximum number of channels for device[0m
+1526:[31;1m    at NodeAudioDevice.AudioIO (D:\chat-A\node_modules\.pnpm\naudiodon@2.3.6\node_modules\naudiodon\index.js:32:41)[0m
+1527:[31;1m    at #openOutput (file:///D:/chat-A/packages/desktop/dist/main.mjs:36715:33)[0m
+1528:[31;1m    at NodeAudioDevice.play (file:///D:/chat-A/packages/desktop/dist/main.mjs:36703:51)[0m
+1529:[31;1m    at file:///D:/chat-A/packages/desktop/dist/main.mjs:37053:12[0m
+1530:[31;1m    at InProcessAudioTransport.deliver (file:///D:/chat-A/packages/desktop/dist/main.mjs:27238:7)[0m
+1531:[31;1m    at InProcessAudioTransport.sendAudio (file:///D:/chat-A/packages/desktop/dist/main.mjs:27216:37)[0m
+1532:[31;1m    at #speak (file:///D:/chat-A/packages/desktop/dist/main.mjs:35678:25)[0m
+1533:[31;1m    at async file:///D:/chat-A/packages/desktop/dist/main.mjs:35479:7[0m
