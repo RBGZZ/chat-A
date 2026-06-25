@@ -20,6 +20,8 @@ export const IPC = {
   reset: 'session:reset',
   getInfo: 'app:get-info',
   voiceClone: 'voice:clone',
+  /** 渲染→主:设置面板写回语音输出语种(CHAT_A_VOICE_OUTPUT_LANG;运行时即时生效 + 持久化)。 */
+  settingsSetOutputLang: 'settings:set-output-lang',
   // —— 人格自定义(代理C) ——
   /** 渲染→主:读当前可编辑人格(名字 + 三档)。 */
   personaGet: 'persona:get',
@@ -103,7 +105,7 @@ export interface VoiceCloneStatus {
   readonly reason?: string;
 }
 
-/** 应用信息(横幅用;getInfo 返回)。 */
+/** 应用信息(横幅 + 设置面板用;getInfo 返回)。 */
 export interface AppInfo {
   readonly name: string;
   readonly provider: string;
@@ -113,6 +115,11 @@ export interface AppInfo {
   readonly warmth: number;
   readonly expressiveness: number;
   readonly volatility: number;
+  /**
+   * 语音输出语种(CHAT_A_VOICE_OUTPUT_LANG;''=自动)。设置面板据此回填可写下拉。
+   * **与输入 STT 语种、与 voiceId 正交**(语种解耦既定原则);独立于语言面板的显示文字语种。
+   */
+  readonly outputLang: string;
 }
 
 // ───────────────────────────── state 派生(纯) ─────────────────────────────

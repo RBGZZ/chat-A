@@ -40,6 +40,8 @@ export interface XiaoxueApi {
   getInfo(): Promise<AppInfo>;
   /** 一键复刻:给本地文件路径(优先)或字节(兜底);主进程调 createVoice + 持久化。 */
   voiceClone(input: VoiceCloneInput): Promise<void>;
+  /** 设置面板:写回语音输出语种(CHAT_A_VOICE_OUTPUT_LANG);resolve 规整后的最终值。 */
+  setOutputLang(lang: string): Promise<string>;
   // 主 → 渲染(返回退订函数)
   onToken(cb: (token: string) => void): () => void;
   onReply(cb: (reply: string) => void): () => void;
@@ -78,6 +80,7 @@ const api: XiaoxueApi = {
   reset: () => ipcRenderer.invoke(IPC.reset),
   getInfo: () => ipcRenderer.invoke(IPC.getInfo),
   voiceClone: (input) => ipcRenderer.invoke(IPC.voiceClone, input),
+  setOutputLang: (lang) => ipcRenderer.invoke(IPC.settingsSetOutputLang, lang),
   onToken: (cb) => subscribe<string>(IPC.token, cb),
   onReply: (cb) => subscribe<string>(IPC.reply, cb),
   onError: (cb) => subscribe<{ text: string; detail: string }>(IPC.error, cb),

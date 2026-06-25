@@ -319,6 +319,8 @@ const $settingsToggle = document.getElementById('settings-toggle') as HTMLButton
 const $setProvider = document.getElementById('set-provider') as HTMLElement;
 const $setModel = document.getElementById('set-model') as HTMLElement;
 const $setMemory = document.getElementById('set-memory') as HTMLElement;
+const $setOutputLang = document.getElementById('set-output-lang') as HTMLSelectElement;
+const $setOutputLangStatus = document.getElementById('set-output-lang-status') as HTMLElement;
 
 // —— 换段对话:换新 session(长期记忆保留)+ 清空消息区,给一条分隔提示 ——
 $reset.addEventListener('click', () => {
@@ -374,6 +376,22 @@ void xiaoxue.getInfo().then((info) => {
   $setProvider.textContent = info.isFake ? `${info.provider}(占位）` : info.provider;
   $setModel.textContent = info.model;
   $setMemory.textContent = info.memory;
+  // 可写项:语音输出语种回填当前值(''=自动)。
+  $setOutputLang.value = info.outputLang;
+});
+
+// —— 设置面板可写项:语音输出语种 —— 选/改即写回 .env.local + 即时生效(下次语音模式装配读到)。
+$setOutputLang.addEventListener('change', () => {
+  $setOutputLangStatus.textContent = '正在应用…';
+  void xiaoxue
+    .setOutputLang($setOutputLang.value)
+    .then((applied) => {
+      $setOutputLang.value = applied; // 用规整后的最终值回填。
+      $setOutputLangStatus.textContent = '已保存(语音模式下次启动生效)。';
+    })
+    .catch((err: unknown) => {
+      $setOutputLangStatus.textContent = `保存没成功——${err instanceof Error ? err.message : String(err)}`;
+    });
 });
 
 // ═══════════════════════════════ 朗读:最小 Web Audio 播放器(本批次) ═══════════════════════════════

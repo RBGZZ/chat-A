@@ -87,6 +87,8 @@ function buildAppInfo(handle: AppHandle): AppInfo {
     warmth: handle.seed.dials.baselineWarmth,
     expressiveness: handle.seed.dials.expressiveness,
     volatility: handle.seed.dials.emotionalVolatility,
+    // 语音输出语种(设置面板可写项;''=自动)。与显示文字语种解耦、与 voiceId/输入语种正交。
+    outputLang: normalizeLangCode(handle.env['CHAT_A_VOICE_OUTPUT_LANG']),
   };
 }
 
@@ -113,6 +115,17 @@ function cloneStatus(handle: AppHandle): VoiceCloneStatus {
  * **逐字一致**(含日期快照),否则合成失败——音色绑单模型。故此处直接取合成配置 CHAT_A_TTS_MODEL
  * (当它是 vc 模型时)作 targetModel,确保复刻得到的 voiceId 能被同一 model 合成。
  */
+/**
+ * 算本次复刻实际使用的 target_model(单一真相源:复刻 createVoice 与持久化 CHAT_A_TTS_MODEL 共用,
+ * 杜绝两者算出不同值导致"复刻用 A、合成用 B"的硬约束违背)。
+ * 取合成配置 CHAT_A_TTS_MODEL(当它是 vc 模型时)以保证复刻 voiceId 能被同一 model 合成;
+ * 否则回落 providers 默认带快照的 vc 模型(QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL)。
+ */
+function resolveCloneTargetModel(handle: AppHandle): string {
+  const configModel = (handle.env['CHAT_A_TTS_MODEL'] ?? '').trim();
+  return configModel.includes('vc') ? configModel : QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL;
+}
+
 async function cloneVoiceViaDashScope(handle: AppHandle, input: VoiceCloneInput): Promise<string> {
   const apiKey = dashKey(handle);
   if (apiKey.length === 0) throw new Error(CLONE_NO_KEY_REASON);
@@ -120,10 +133,8 @@ async function cloneVoiceViaDashScope(handle: AppHandle, input: VoiceCloneInput)
   // 语种中性——createVoice 不接受 prompt_lang,服务端自动处理。该值用于**即时复刻**(gpt-sovits 的
   // refAudio.refLang)/ 未来 provider:经 loadVoiceProfile → buildVoiceTtsOptions 流入语音模式 TTS opts。
   // 故此处不读它(读了也无处可传);语言面板设置它仍有效(供 voice-profile)。
-  const configModel = (handle.env['CHAT_A_TTS_MODEL'] ?? '').trim();
-  // 取合成 model(vc 模型)作 target_model 以保证两者同串;否则回落默认 vc 模型。
-  const targetModel =
-    configModel.includes('vc') ? configModel : QWEN_VOICE_CLONE_DEFAULT_TARGET_MODEL;
+  // 取合成 model(vc 模型)作 target_model 以保证两者同串;否则回落默认 vc 模型(与持久化共用同一算法)。
+  const targetModel = resolveCloneTargetModel(handle);
   const audio =
     input.path !== undefined && input.path.length > 0
       ? { path: input.path }
@@ -136,11 +147,20 @@ async function cloneVoiceViaDashScope(handle: AppHandle, input: VoiceCloneInput)
 }
 
 /**
- * 持久化复刻 voiceId:写项目根 .env.local 的 CHAT_A_VOICE_ID(保留其它行)+ 即时设入当前进程 env
- * (无需重启即可被后续语音模式装配读到)。写盘失败抛错由 runCloneVoice 降级提示。
+ * 持久化复刻结果到项目根 .env.local(保留其它行)+ 即时设入当前进程 env(无需重启即可被后续装配读到)。
+ * 写盘失败抛错由 runCloneVoice 降级提示。除 CHAT_A_VOICE_ID 外,**还把本次复刻实际用的 target_model
+ * 写进 CHAT_A_TTS_MODEL,并开启 CHAT_A_TTS_VOICE_CLONING=1 + 钉死 CHAT_A_TTS_KIND=qwen-tts**——
+ * 关键硬约束:复刻 target_model 必须与合成 model 逐字一致(含日期快照)。此前复刻后用户得手动把
+ * CHAT_A_TTS_MODEL 配成对应快照、极易出错;现自动同步,复刻成功即可直接朗读出复刻音色,零手配。
  */
 function persistVoiceId(handle: AppHandle, voiceId: string): void {
-  handle.env['CHAT_A_VOICE_ID'] = voiceId; // 本进程即时生效。
+  // 本次复刻真正使用的 target_model(与 cloneVoiceViaDashScope 共用同一算法,确保逐字一致)。
+  const targetModel = resolveCloneTargetModel(handle);
+  // 本进程即时生效(下次语音模式装配/朗读 loadVoiceProfile + ttsConfig 直接读到,无需重启)。
+  handle.env['CHAT_A_VOICE_ID'] = voiceId;
+  handle.env['CHAT_A_TTS_MODEL'] = targetModel;
+  handle.env['CHAT_A_TTS_VOICE_CLONING'] = '1';
+  handle.env['CHAT_A_TTS_KIND'] = 'qwen-tts';
   const path = join(process.cwd(), '.env.local');
   let text = '';
   try {
@@ -148,7 +168,12 @@ function persistVoiceId(handle: AppHandle, voiceId: string): void {
   } catch {
     // 文件不存在 → 从空文本新建。
   }
-  writeFileSync(path, upsertEnvLocal(text, 'CHAT_A_VOICE_ID', voiceId), 'utf8');
+  // 逐键 upsert(同键覆盖、不重复追加;幂等)。
+  text = upsertEnvLocal(text, 'CHAT_A_VOICE_ID', voiceId);
+  text = upsertEnvLocal(text, 'CHAT_A_TTS_MODEL', targetModel);
+  text = upsertEnvLocal(text, 'CHAT_A_TTS_VOICE_CLONING', '1');
+  text = upsertEnvLocal(text, 'CHAT_A_TTS_KIND', 'qwen-tts');
+  writeFileSync(path, text, 'utf8');
 }
 
 /**
@@ -234,8 +259,11 @@ function buildLangForm(handle: AppHandle): LangForm {
 /**
  * 持久化三语种 + 朗读开关到项目根 .env.local(保留其它行;仿 persistPersona):
  *   CHAT_A_DISPLAY_LANG / CHAT_A_TTS_LANG / CHAT_A_VOICE_CLONE_REF_LANG / CHAT_A_DESKTOP_SPEAK
- *   + 同步 CHAT_A_VOICE_OUTPUT_LANG(供语音模式 voice-profile 读出输出语种,与显示语种对齐)。
  * 运行时已由 handle.applyLang 即时生效;此处只为跨重启留存。写盘失败抛错由上层吞掉(§3.2)。
+ *
+ * 注:语音模式输出语种 CHAT_A_VOICE_OUTPUT_LANG **不再**由本面板写(此前被强绑 = displayLang)。
+ * 输出语种已是设置面板的独立可写项(与显示文字语种、输入 STT 语种、voiceId 正交,见 persistOutputLang),
+ * 语言面板改显示语种不再覆盖它,避免两面板互相打架。
  */
 function persistLang(form: LangForm): void {
   const path = join(process.cwd(), '.env.local');
@@ -249,9 +277,24 @@ function persistLang(form: LangForm): void {
   text = upsertEnvLocal(text, 'CHAT_A_TTS_LANG', form.ttsLang);
   text = upsertEnvLocal(text, 'CHAT_A_VOICE_CLONE_REF_LANG', form.cloneRefLang);
   text = upsertEnvLocal(text, 'CHAT_A_DESKTOP_SPEAK', form.speak ? 'on' : 'off');
-  // 语音模式输出语种与显示语种对齐(voice-profile 读 CHAT_A_VOICE_OUTPUT_LANG)。
-  text = upsertEnvLocal(text, 'CHAT_A_VOICE_OUTPUT_LANG', form.displayLang);
   writeFileSync(path, text, 'utf8');
+}
+
+/**
+ * 持久化语音输出语种(设置面板可写项)到项目根 .env.local 的 CHAT_A_VOICE_OUTPUT_LANG(保留其它行)
+ * + 即时设入进程 env(语音模式装配 loadVoiceProfile 读出 → TTS opts.language;无需重启)。
+ * 入参已经 normalizeLangCode 规整(''=自动 → 写空值,voice-profile 视作不强制)。写盘失败抛错由上层吞掉。
+ */
+function persistOutputLang(handle: AppHandle, lang: string): void {
+  handle.env['CHAT_A_VOICE_OUTPUT_LANG'] = lang; // 本进程即时生效。
+  const path = join(process.cwd(), '.env.local');
+  let text = '';
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    // 文件不存在 → 从空文本新建。
+  }
+  writeFileSync(path, upsertEnvLocal(text, 'CHAT_A_VOICE_OUTPUT_LANG', lang), 'utf8');
 }
 
 /**
@@ -422,8 +465,21 @@ function registerIpc(handle: AppHandle): void {
     handle.reset();
   });
 
-  // 横幅信息。
+  // 横幅 + 设置面板信息(含语音输出语种回填值)。
   ipcMain.handle(IPC.getInfo, () => buildAppInfo(handle));
+
+  // 设置面板:写回语音输出语种(CHAT_A_VOICE_OUTPUT_LANG)。规整(''=自动)→ 即时设进程 env + 持久化。
+  // 返回规整后的最终值(渲染层据此回填下拉)。持久化失败不影响本次即时生效,仅吞掉(§3.2)。
+  ipcMain.handle(IPC.settingsSetOutputLang, (_e, raw: string): string => {
+    const lang = normalizeLangCode(raw);
+    try {
+      persistOutputLang(handle, lang);
+    } catch {
+      // 写盘失败:进程 env 已即时生效;下次重启可能不续接,但不崩(§3.2)。
+      handle.env['CHAT_A_VOICE_OUTPUT_LANG'] = lang;
+    }
+    return lang;
+  });
 
   // 一键复刻:读文件/字节 → createVoice → 持久化 CHAT_A_VOICE_ID;全程降级不崩(§3.2)。
   ipcMain.handle(IPC.voiceClone, async (_e, input: VoiceCloneInput) => {

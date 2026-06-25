@@ -48,6 +48,8 @@ export interface AppInfo {
   readonly warmth: number;
   readonly expressiveness: number;
   readonly volatility: number;
+  /** 语音输出语种(CHAT_A_VOICE_OUTPUT_LANG;''=自动);设置面板可写下拉据此回填。 */
+  readonly outputLang: string;
 }
 
 /** preload 经 `window.xiaoxue` 暴露的安全 API(与 preload.ts 的 XiaoxueApi 形态一致)。 */
@@ -58,6 +60,8 @@ export interface XiaoxueApi {
   reset(): Promise<void>;
   getInfo(): Promise<AppInfo>;
   voiceClone(input: VoiceCloneInput): Promise<void>;
+  /** 设置面板:写回语音输出语种(CHAT_A_VOICE_OUTPUT_LANG);resolve 规整后的最终值。 */
+  setOutputLang(lang: string): Promise<string>;
   onToken(cb: (token: string) => void): () => void;
   onReply(cb: (reply: string) => void): () => void;
   onError(cb: (err: { text: string; detail: string }) => void): () => void;
