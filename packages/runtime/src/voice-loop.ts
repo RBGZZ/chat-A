@@ -34,6 +34,7 @@ import type { SttEmotionLike } from '@chat-a/persona';
 import type { MemoryStore } from '@chat-a/memory';
 import type { LightVoiceBus } from './bus';
 import { SentenceSplitter } from './sentence-splitter';
+import { stripUserEmotionTag, splitSafeTextForTag } from './user-emotion-tag';
 import { nextState, type VoiceBusEvent, type VoiceState } from './voice-turn-state';
 import {
   evaluateAttention,
@@ -157,6 +158,16 @@ export interface VoiceLoopDeps {
    */
   readonly composeOmniInstructions?: () => string | Promise<string>;
   /**
+   * omni 路「情感→PAD」prosody 推进钩子（path B，§7#5 prosody / omni-prosody-to-pad，**可选**、纯加法）。
+   * 不注入（缺省）→ omni 路**逐字现状**(只是没有 prosody→PAD)；注入后,omni 回合从模型回复尾部剥出的
+   * `[user_emotion:label-intensity]` 标签 → 映射成 `SttEmotionLike` → 经此钩子喂进 PAD 情感内核。
+   * 装配层(cli/app)把它接到 persona 的 prosody-only 推进通道(`convo.advanceProsody`,内部复用现成
+   * `prosodyToPadPull` → `persona.advance('', { prosodyEmotion })`，**不新写映射**)。
+   * **降级**(§3.2):抛错/reject 被 VoiceLoop 捕获并记 warn,**绝不中断回合**(分句→TTS→收尾照常)。
+   * 仅 omni 路用此钩子;STT 路情绪走 `#send` 第 4 参,不经过它。
+   */
+  readonly advanceProsody?: (emotion: SttEmotionLike) => void | Promise<void>;
+  /**
    * 语音路径开关（缺省 `stt`）；仅当为 `omni` **且**注入了 `omni` 端口时走 audio-in 直路，
    * 否则一律走现有 STT 路径（双保险：端口缺失即便选 omni 也回落 STT，行为逐字不变）。
    */
@@ -241,6 +252,11 @@ export class VoiceLoop {
    * 注入后在 `#startThinkingOmni` 调 `respondToAudio` 前 `await` 它得 instructions(失败/空→退回空 opts)。
    */
   readonly #composeOmniInstructions: (() => string | Promise<string>) | undefined;
+  /**
+   * omni 路「情感→PAD」prosody 推进钩子（omni-prosody-to-pad）；未注入 → undefined → omni 路逐字现状。
+   * 注入后在 `#startThinkingOmni` 收尾处把剥出的情绪喂它(失败吞错,不中断回合)。
+   */
+  readonly #advanceProsody: ((emotion: SttEmotionLike) => void | Promise<void>) | undefined;
   /** 语音路径开关（缺省 `stt`）；决定 `#beginThinking` 走 STT 还是 omni 直路。 */
   readonly #voicePath: VoicePath;
   /**
@@ -298,6 +314,7 @@ export class VoiceLoop {
         : undefined;
     this.#omni = deps.omni;
     this.#composeOmniInstructions = deps.composeOmniInstructions;
+    this.#advanceProsody = deps.advanceProsody;
     this.#voicePath = deps.voicePath ?? 'stt';
     this.#sttLanguage = deps.sttLanguage;
     this.#ttsOptions = deps.ttsOptions;
@@ -703,6 +720,17 @@ export class VoiceLoop {
     }
 
     let sawTranscript = false; // 仅首条 transcript 触发迁移/写记忆（避免重复迁移）
+    // omni-prosody-to-pad（方案 A）:流式剥 `[user_emotion:label-intensity]` 标签——
+    // `pendingText` 暂存「可能是半截标签」的尾巴(hold-back),保证标签**绝不**进 TTS/显示/记忆;
+    // `lastEmotion` 记本轮解析出的最后一个合法情绪,收尾时经 `#advanceProsody` 喂 PAD(复用 prosodyToPadPull)。
+    let pendingText = '';
+    let lastEmotion: SttEmotionLike | undefined;
+    // 把一段「确认安全可出」的文本(已无完整标签)累积进 #replyAccum 并分句喂 TTS。
+    const consumeClean = (clean: string): void => {
+      if (clean.length === 0) return;
+      this.#replyAccum += clean;
+      for (const sentence of splitter.push(clean)) enqueueSpeak(sentence);
+    };
     this.#currentTurn = (async () => {
       try {
         // 组装本回合系统提示（persona/记忆/语气，§5.4/§6）：在开 WS / 首音前先取（失败/空→空 opts，§3.2/§5.5）。
@@ -730,17 +758,35 @@ export class VoiceLoop {
               }
             }
           } else if (ev.type === 'text') {
-            this.#replyAccum += ev.text;
-            for (const sentence of splitter.push(ev.text)) enqueueSpeak(sentence);
+            // 累积到 pending,切出「保证不可能再属于未完成标签前缀」的安全部分(hold-back);
+            // 安全部分里若已含**完整**标签(如中段标签后又跟正文)则就地剥除并记最后情绪。
+            pendingText += ev.text;
+            const { emit, hold } = splitSafeTextForTag(pendingText);
+            pendingText = hold;
+            if (emit.length > 0) {
+              const { cleanText, emotion } = stripUserEmotionTag(emit);
+              if (emotion !== undefined) lastEmotion = emotion;
+              consumeClean(cleanText);
+            }
           } else {
             // 'end'：flush 尾句后跳出（下方统一等出尽 + 收尾）。
             break;
           }
         }
         if (gen !== this.#gen) return; // 流结束时已被打断
+        // 收尾:对暂留的尾巴(此时含完整标签或残余)做最终剥离,把干净正文喂出、记最后情绪。
+        if (pendingText.length > 0) {
+          const { cleanText, emotion } = stripUserEmotionTag(pendingText);
+          if (emotion !== undefined) lastEmotion = emotion;
+          consumeClean(cleanText);
+          pendingText = '';
+        }
         const tail = splitter.flush();
         if (tail !== null) enqueueSpeak(tail);
         await speakChain; // 等所有句出尽(首句已触发 thinking→speaking)再收尾
+        // §7#5 prosody→PAD:把本轮解析出的语气情绪喂进情感内核(复用 prosodyToPadPull,经装配层钩子)。
+        // 缺省不注入 / 无标签(lastEmotion undefined) → 不调,omni 路逐字现状;失败吞错不中断回合(§3.2)。
+        await this.#feedProsody(gen, lastEmotion);
         this.#finishTurn(gen);
       } catch (err) {
         // 被打断回合(gen 已变)其 respondToAudio 多以 AbortError reject —— 属正常取消,静默忽略;
@@ -753,6 +799,23 @@ export class VoiceLoop {
         if (this.#currentAbort === ac) this.#currentAbort = null;
       }
     })();
+  }
+
+  /**
+   * 把 omni 回合解析出的语气情绪喂进 PAD（omni-prosody-to-pad，§7#5 prosody，§3.2 降级）：
+   * - 未注入 `#advanceProsody` 钩子 / 无情绪(undefined) → 不调,omni 路逐字现状(零回归)。
+   * - gen 失配(已被打断/换回合) → 不喂(协作式放弃)。
+   * - 钩子可同步/异步;抛错或 reject 被捕获并记 warn,**绝不中断回合**(收尾照常)。
+   */
+  async #feedProsody(gen: number, emotion: SttEmotionLike | undefined): Promise<void> {
+    if (gen !== this.#gen) return;
+    const hook = this.#advanceProsody;
+    if (hook === undefined || emotion === undefined) return;
+    try {
+      await hook(emotion);
+    } catch (err) {
+      console.warn('[VoiceLoop] omni prosody→PAD 钩子抛错(已捕获,不影响回合):', err);
+    }
   }
 
   /**

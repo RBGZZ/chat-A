@@ -6,6 +6,7 @@ export * from './frame-processor';
 export * from './audio-pacer';
 export * from './query-embed';
 export * from './voice-loop';
+export * from './user-emotion-tag';
 export * from './sentence-splitter';
 export * from './sentence-aggregator';
 export * from './classifier-processor';

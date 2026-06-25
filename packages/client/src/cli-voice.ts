@@ -178,6 +178,14 @@ export interface VoiceModeDeps {
    */
   readonly composeOmniInstructions?: () => string | Promise<string>;
   /**
+   * omni 路「情感→PAD」prosody 推进钩子(omni-prosody-to-pad,path B,**可选**、纯加法)。
+   * 仅 omni 路用到:omni 回合从模型回复尾部剥出 `[user_emotion:...]` 标签 → 映射成 SttEmotionLike → 经此钩子
+   * 喂进 PAD(复用 prosodyToPadPull → persona.advance,落地 §7「prosody 永不漏听」)。
+   * cli.ts/app 以 `(e) => convo.advanceProsody(e)` 注入(与文字链路同一 Conversation,同源 persona/PAD);
+   * 仅在提供时透传进 `loopDeps`(未提供 / 非 omni 路 → omni 路逐字现状,无 prosody→PAD)。STT 路不经过它。
+   */
+  readonly advanceProsody?: (emotion: SttEmotionLike) => void | Promise<void>;
+  /**
    * 语音 autonomy 装配钩子(companion-live-wiring,**默认关随 CHAT_A_AUTONOMY**):
    * 语音模式拿到 VoiceLoop 后回调它装配 autonomy 并注入 `voiceState`(is_speaking 真闸)+
    * `preempt`(真打断,受 §7 约束:用户 URGENT 最高、不凌驾用户)+ 真候选源;返回的句柄纳入语音 stop 收尾。
@@ -382,6 +390,8 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
             omni,
             voicePath: 'omni' as const,
             ...(deps.composeOmniInstructions ? { composeOmniInstructions: deps.composeOmniInstructions } : {}),
+            // omni-prosody-to-pad:把模型回复尾部情绪标签喂进 PAD(仅 omni 路且 cli 提供时;未提供 → 逐字现状)。
+            ...(deps.advanceProsody ? { advanceProsody: deps.advanceProsody } : {}),
           }
         : {}),
     },

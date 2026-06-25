@@ -210,6 +210,9 @@ async function main(): Promise<void> {
         // omni 直路系统提示组装(omni-persona-context):与文字链路同一 Conversation,同源 persona/记忆/语气。
         // 闭包读当前 convo(/reset 后换上下文也跟随);仅 omni 路用到,STT 路与现状逐字不变。
         composeOmniInstructions: () => convo.composeOmniInstructions(),
+        // omni-prosody-to-pad:omni 回合剥出的语气情绪经同一 convo 的内部 persona 并入 PAD(§7#5);
+        // 闭包读当前 convo(/reset 后跟随);仅 omni 路用到,STT 路不经过它。
+        advanceProsody: (emotion) => convo.advanceProsody(emotion),
         memory: mem.store,
         bus,
         sessionId,

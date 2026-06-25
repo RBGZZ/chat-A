@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { FakeLlm } from '@chat-a/providers';
 import { InMemoryMemoryStore } from '@chat-a/memory';
+import type { PersonaSnapshot, PersonaStore } from '@chat-a/persona';
 import { LightVoiceBus } from '../src/bus';
 import { Conversation } from '../src/conversation';
+import { OMNI_USER_EMOTION_DIRECTIVE, USER_EMOTION_LABELS } from '../src/user-emotion-tag';
 
 describe('runtime/Conversation(端到端回合,FakeLlm)', () => {
   it('流式回复 + 落历史 + 发 turn:start/turn:end', async () => {
@@ -53,5 +55,66 @@ describe('runtime/Conversation(端到端回合,FakeLlm)', () => {
     // 兜底:返回 persona 骨架(非空,含身份),不抛。
     expect(instructions.length).toBeGreaterThan(0);
     expect(instructions).toContain('小雪');
+  });
+
+  // ───────────── omni-prosody-to-pad(方案 A 显式标签) ─────────────
+
+  it('composeOmniInstructions:末尾含情绪标签门控指令(含 user_emotion + 7 类标签)', async () => {
+    const bus = new LightVoiceBus();
+    const convo = new Conversation({ bus, llm: new FakeLlm(), sessionId: 's1' });
+    const instructions = await convo.composeOmniInstructions();
+    expect(instructions).toContain('user_emotion');
+    for (const label of USER_EMOTION_LABELS) expect(instructions).toContain(label);
+    // 指令是末尾追加的整段(单一真相源)。
+    expect(instructions).toContain(OMNI_USER_EMOTION_DIRECTIVE);
+  });
+
+  it('omni-only 隔离:send 走的系统提示不含情绪标签指令(标签指令只给 omni 路)', async () => {
+    const bus = new LightVoiceBus();
+    // 捕获 send 喂给 LLM 的系统提示:send 走 FakeLlm.stream,首条消息是 system。
+    let capturedSystem = '';
+    const llm = new FakeLlm();
+    const origStream = llm.stream.bind(llm);
+    (llm as unknown as { stream: typeof origStream }).stream = (
+      req: Parameters<typeof origStream>[0],
+      signal?: AbortSignal,
+    ) => {
+      capturedSystem = req.system; // LlmRequest.system 是顶层系统提示字段
+      return origStream(req, signal);
+    };
+    const convo = new Conversation({ bus, llm, sessionId: 's1' });
+    await convo.send('你好', () => {});
+    expect(capturedSystem.length).toBeGreaterThan(0);
+    expect(capturedSystem).not.toContain('user_emotion'); // send 路系统提示绝不含 omni 标签指令
+  });
+
+  it('advanceProsody:经同一 persona 实例把 prosody 拉力并入 PAD(happy → pleasure 上升)', async () => {
+    const bus = new LightVoiceBus();
+    // 捕获型 PersonaStore:记录每次 save 的 snapshot,断言 advanceProsody 推进了 PAD。
+    let saved: PersonaSnapshot | null = null;
+    const store: PersonaStore = {
+      load: () => saved,
+      save: (s) => {
+        saved = s;
+      },
+    };
+    const convo = new Conversation({ bus, llm: new FakeLlm(), personaStore: store, sessionId: 's1' });
+    await convo.advanceProsody({ label: 'happy', confidence: 1 });
+    // advance 会 save 一次新快照;happy 的 PAD 拉力 pleasure>0 → 从中性基线起 pleasure 应 > 0。
+    expect(saved).not.toBeNull();
+    expect(saved!.pad.pleasure).toBeGreaterThan(0);
+  });
+
+  it('advanceProsody:钩子内部抛错被吞(不上抛)', async () => {
+    const bus = new LightVoiceBus();
+    const store: PersonaStore = {
+      load: () => null,
+      save: () => {
+        throw new Error('save 失败(模拟)');
+      },
+    };
+    const convo = new Conversation({ bus, llm: new FakeLlm(), personaStore: store, sessionId: 's1' });
+    // save 抛错经 persona.advance 冒泡到 advanceProsody 的 try/catch → 不上抛。
+    await expect(convo.advanceProsody({ label: 'sad', confidence: 0.8 })).resolves.toBeUndefined();
   });
 });
