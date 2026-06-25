@@ -1,4 +1,4 @@
-import type { Emotion, Pad, PersonaDials } from './types';
+import type { Emotion, EmotionThresholds, Pad, PersonaDials } from './types';
 import { padToEmotion } from './numeric';
 import { resolveNegativePosture, renderPostureLine } from './posture';
 
@@ -52,9 +52,18 @@ function closenessBand(closeness: number): CloseBand {
  * - **省略时逐字等于旧行为**(向后兼容,不追加任何关系行)。
  * - 提供时按 CLOSENESS 三档追加一行【关系】语气指令(高→更暖/愿分享、低→礼貌克制/少披露;
  *   适中档不追加)。closeness 单向影响表达,绝不反改 OCEAN/PAD。
+ *
+ * `thresholds`(行为即配置,§3.2,可选):PAD→离散情绪判别阈值,透传给 padToEmotion;
+ * **缺省回落 0.35/0.25(逐字现状)**。engine.tone 显式传 PersonaConfig.emotion,
+ * 使**喂 LLM 的「当前情绪」文案**与显示情绪用同一阈值(否则会出现 spec Scenario 4 的不一致)。
  */
-export function renderToneFragment(pad: Pad, dials: PersonaDials, closeness?: number): string {
-  const emotion = padToEmotion(pad);
+export function renderToneFragment(
+  pad: Pad,
+  dials: PersonaDials,
+  closeness?: number,
+  thresholds?: EmotionThresholds,
+): string {
+  const emotion = padToEmotion(pad, thresholds);
   const lines = [`【当前情绪】${MOOD_TEXT[emotion]}`];
   if (dials.baselineWarmth >= 0.66) lines.push('整体保持温暖亲近的基调。');
   else if (dials.baselineWarmth <= 0.34) lines.push('整体基调偏冷淡克制。');

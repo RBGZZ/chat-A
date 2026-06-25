@@ -91,4 +91,49 @@ describe('persona/numeric: PAD→离散情绪', () => {
     expect(padToEmotion({ pleasure: -0.6, arousal: -0.1, dominance: 0 })).toBe('down');
     expect(padToEmotion({ pleasure: -0.6, arousal: 0.4, dominance: 0 })).toBe('irritated');
   });
+
+  it('无阈值参 = 默认阈值(0.35/0.25)逐字回归', () => {
+    // 基线 0.34(< 0.35)无参 → neutral(回归现状)。
+    expect(padToEmotion({ pleasure: 0.34, arousal: 0.1, dominance: 0 })).toBe('neutral');
+    // 显式传 DEFAULT 阈值应与无参完全等价。
+    expect(padToEmotion({ pleasure: 0.34, arousal: 0.1, dominance: 0 }, DEFAULT_PERSONA_CONFIG.emotion)).toBe(
+      'neutral',
+    );
+  });
+
+  it('降低 pleasure 阈值 0.35→0.25 → 基线 0.34 由 neutral 升为 content', () => {
+    const pad: Pad = { pleasure: 0.34, arousal: 0.1, dominance: 0 };
+    // arousal 0.1 < 0.25 默认唤起阈值 → content(非 joyful)。
+    expect(padToEmotion(pad, { pleasureThreshold: 0.25, arousalThreshold: 0.25 })).toBe('content');
+    // 对称:负向 -0.34 在降阈后判为 down。
+    expect(
+      padToEmotion({ pleasure: -0.34, arousal: 0.1, dominance: 0 }, { pleasureThreshold: 0.25, arousalThreshold: 0.25 }),
+    ).toBe('down');
+  });
+
+  it('降低 arousal 阈值 → 同一 pad 从低唤起类升为高唤起类', () => {
+    const pad: Pad = { pleasure: 0.6, arousal: 0.1, dominance: 0 };
+    expect(padToEmotion(pad)).toBe('content'); // 默认 0.25:低唤起
+    expect(padToEmotion(pad, { pleasureThreshold: 0.35, arousalThreshold: 0.05 })).toBe('joyful'); // 降唤起阈→高唤起
+  });
+});
+
+describe('persona/numeric: 冷启动可配置(coldStartTurns=0 关压制)', () => {
+  const baseline: Pad = { pleasure: 0, arousal: 0, dominance: 0 };
+  const pull: Pad = { pleasure: 0.8, arousal: 0, dominance: 0 };
+
+  it('coldStartTurns=0 → 首轮不施冷启动幅度减半(与窗口外等幅)', () => {
+    const cfg0 = { ...DEFAULT_PERSONA_CONFIG, coldStartTurns: 0 };
+    const turn1 = stepPad({ pad: baseline, pull, baseline, dials: DEFAULT_DIALS, turn: 1, config: cfg0 });
+    const later = stepPad({ pad: baseline, pull, baseline, dials: DEFAULT_DIALS, turn: 9, config: cfg0 });
+    // 关冷启动后首轮反应不再被压制 → 与后续轮等幅。
+    expect(turn1.pleasure).toBeCloseTo(later.pleasure, 10);
+  });
+
+  it('默认 config 下首轮仍被冷启动压制(回归对照)', () => {
+    const turn1 = stepPad({ pad: baseline, pull, baseline, dials: DEFAULT_DIALS, turn: 1, config: DEFAULT_PERSONA_CONFIG });
+    const cfg0 = { ...DEFAULT_PERSONA_CONFIG, coldStartTurns: 0 };
+    const turn1NoCold = stepPad({ pad: baseline, pull, baseline, dials: DEFAULT_DIALS, turn: 1, config: cfg0 });
+    expect(turn1.pleasure).toBeLessThan(turn1NoCold.pleasure);
+  });
 });

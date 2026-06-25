@@ -28,6 +28,7 @@ import {
   createKvSelfNotionStore,
   type Appraiser,
   type OceanEvolver,
+  type PersonaConfig,
   type PersonaSeed,
   type PersonaStore,
   type SelfNotionEvolver,
@@ -51,6 +52,11 @@ export interface ConversationDeps {
   readonly appraiser?: Appraiser;
   /** 人格状态持久化(§6.1);默认进程内,配置可换 SQLite KV。 */
   readonly personaStore?: PersonaStore;
+  /**
+   * 人格内核可调参数(§3.2 行为即配置;承 persona-tunable-seams):冷启动窗口 + PAD→情绪阈值。
+   * **缺省 = DEFAULT_PERSONA_CONFIG = 现值 → 逐字零回归**;由编排层经 loadPersonaConfigFromEnv 装配后透传。
+   */
+  readonly personaConfig?: PersonaConfig;
   /** 记忆抽取接缝;提供则回合后用它抽取要点(替换 naive 存原话),默认不抽取。 */
   readonly memoryExtractor?: MemoryExtractor;
   /** 分歧检测接缝(§7#3);默认确定性 DefaultStanceDetector(话题命中)。 */
@@ -300,6 +306,8 @@ export class Conversation {
       ...(deps.appraiser ? { appraiser: deps.appraiser } : {}),
       ...(deps.personaStore ? { store: deps.personaStore } : {}),
       ...(deps.oceanEvolver ? { oceanEvolver: deps.oceanEvolver } : {}),
+      // 人格内核可调参数(冷启动 + 情绪阈值);缺省 → PersonaEngine 内回落 DEFAULT_PERSONA_CONFIG(现值)。
+      ...(deps.personaConfig ? { config: deps.personaConfig } : {}),
     });
     // 注入了抽取器 → 用抽取的要点;否则保持 naive "存用户原话"(默认行为不变)。
     const extractEnabled = deps.memoryExtractor !== undefined;

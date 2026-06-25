@@ -125,13 +125,15 @@ export class PersonaEngine {
    */
   tone(closeness?: number): ToneView {
     const dials = this.#seed.dials;
-    const closeArgs: [number] | [] = closeness !== undefined ? [closeness] : [];
+    const emotionThresholds = this.#config.emotion;
+    // closeness 仅在提供时透传(exactOptional 安全);阈值恒透传(缺省=DEFAULT_PERSONA_CONFIG.emotion=现值)。
+    // 三处都用同一 emotionThresholds(单一权威):显示情绪 / 系统提示情绪文案(renderToneFragment)/ 语音情绪指令一致。
     return {
-      emotion: padToEmotion(this.#snapshot.pad),
-      toneFragment: renderToneFragment(this.#snapshot.pad, dials, ...closeArgs),
+      emotion: padToEmotion(this.#snapshot.pad, emotionThresholds),
+      toneFragment: renderToneFragment(this.#snapshot.pad, dials, closeness, emotionThresholds),
       pad: this.#snapshot.pad,
       posture: resolveNegativePosture(this.#snapshot.pad, dials),
-      voiceInstruction: padToVoiceInstruction(this.#snapshot.pad, dials),
+      voiceInstruction: padToVoiceInstruction(this.#snapshot.pad, dials, emotionThresholds),
     };
   }
 

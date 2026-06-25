@@ -34,6 +34,7 @@ import { initTelemetry } from '@chat-a/observability';
 import { createMemoryStoreFromEnv, type MemoryStore } from '@chat-a/memory';
 import {
   loadPersonaFromEnv,
+  loadPersonaConfigFromEnv,
   seedPersonaMemories,
   createKvPersonaStore,
   PersonaEngine,
@@ -41,6 +42,7 @@ import {
   applyPersonaPatch,
   personaViewOf,
   type Appraiser,
+  type PersonaConfig,
   type PersonaSeed,
   type PersonaStore,
   type PersonaPatch,
@@ -195,9 +197,14 @@ export function assembleApp(opts: AssembleAppOptions = {}): AppHandle {
   // 种子化角色背景/用户画像(经去重幂等,重复启动不新建,§5.8)。
   seedPersonaMemories(mem.store, persona, env['CHAT_A_USER_PROFILE']);
 
+  // 人格内核可调参数(§3.2 行为即配置;承 persona-tunable-seams):冷启动窗口 + PAD→情绪阈值。
+  // 不设相关 env 时 = DEFAULT_PERSONA_CONFIG = 现值(逐字零回归)。三处 PersonaEngine 构造点共用之:
+  // 显示引擎(下行)、applyPersona 重建、makeConvo→Conversation 内部引擎,保证显示心情与回合心情阈值一致。
+  const personaConfig: PersonaConfig = loadPersonaConfigFromEnv(env);
+
   // 供 mood 摘要读取的 PersonaEngine(与 Conversation 内部 persona 独立实例,但同种子 + 同 store,
   // 状态一致)。desktop 状态栏 / cli persona 摘要读它的 tone()。applyPersona 时随新种子重建。
-  let personaEngine = new PersonaEngine({ seed, store: personaStore });
+  let personaEngine = new PersonaEngine({ seed, store: personaStore, config: personaConfig });
 
   // 朗读 TTS(本批次,§4.1):desktop 文字回合后据语种解耦合成 PCM 推渲染层。
   // createTts(loadTtsConfig(env)):有 key/服务 → 真合成;缺关键项自动降级 fake(kind==='fake' → 朗读不可用)。
@@ -221,6 +228,7 @@ export function assembleApp(opts: AssembleAppOptions = {}): AppHandle {
       memory: mem.store,
       personaSeed: seed,
       personaStore,
+      personaConfig,
       sessionId: sid,
       ...(appraiser ? { appraiser } : {}),
       ...(displayLang.length > 0 ? { outputLang: displayLang } : {}),
@@ -277,7 +285,8 @@ export function assembleApp(opts: AssembleAppOptions = {}): AppHandle {
       // 1) 据补丁产出新种子(纯,夹取 [0,1] / 空名回落);2) 重建引擎 + 会话以让新人格运行时生效。
       seed = applyPersonaPatch(seed, patch);
       // PersonaEngine 从 store 复载 PAD 快照(故情绪状态续接),但用新 seed 的 dials/name 渲染 tone。
-      personaEngine = new PersonaEngine({ seed, store: personaStore });
+      // 同样透传 personaConfig(冷启动 + 情绪阈值),与 makeConvo 内部引擎阈值保持一致。
+      personaEngine = new PersonaEngine({ seed, store: personaStore, config: personaConfig });
       // 重建 Conversation:沿用同一 sessionId(对话不断、记忆续接),让新 seed 进系统提示。
       convo = makeConvo(sessionId);
       return personaViewOf(seed);
