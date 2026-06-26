@@ -575,8 +575,9 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 
 - [x] ~~向量库具体选型~~ **已定(2026-06-23)**:**单轨 sqlite-vec**(端 + PC),不上 Qdrant/Chroma/pgvector(无多用户高并发需求,§5.6);记忆量逼近 ~10 万或弱 CPU 超延迟预算时**平替 LanceDB(IVF_PQ)**。
 - [x] ~~Redis 持久化策略~~ **已定(2026-06-23)**:单机项目**不引入 Redis**,工作层用 **SQLite 内存表/进程内**(真相仍在 SQLite,§5.2/§5.6);Redis 仅作未来横向扩展的可选项。
-- [ ] 巩固流水线触发节奏(会话结束 + 每日 + 每 N 轮)。
-- [ ] 大脑保活窗口 N 分钟取值;每日主动问候上限。
+- [x] ~~巩固流水线触发节奏(会话结束 + 每日 + 每 N 轮)~~ **已实现且可配(2026-06-26)**:`memory/config.ts` 默认 `everyNTurns:50` / `dailyIntervalDays:1`,会话结束/reset 触发 + 节奏驱动(cli driveConsolidationCadence);数值真机可再标定。
+- [x] ~~每日主动问候上限~~ **已实现(2026-06-26)**:`DecisionLlm` 决策闸,缺省 **3 次/天**(`CHAT_A_AUTONOMY_DAILY_CAP` 可配,0=不限),跨日重置、只计真 speak。
+- [ ] 大脑保活窗口 N 分钟取值(autonomy idle 弧/在场保活;tick 间隔已有 `CHAT_A_AUTONOMY_TICK_MS`,保活窗口时长待定)。
 - [ ] Gemma 4 license 商用核实。
 - [ ] 人格/边界的**用户配置项**设计(用户自定义人格、关系深度、是否启用最小危机底线)——体现"用户自治"。
 - [ ] **🆕 EOU 本地模型选型**(§4 动态 endpointing 的 mini ONNX:LiveKit turn-detector vs Pipecat Smart Turn v3 vs 自蒸馏)。
