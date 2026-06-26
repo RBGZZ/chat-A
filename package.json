@@ -15,6 +15,7 @@
     "dev:brain": "tsx packages/client/src/cli-brain.ts",
     "start": "tsx packages/client/src/cli.ts",
     "test:voice": "tsx scripts/voice-text-to-wav.ts",
+    "voice:harness": "tsx scripts/voice-harness.ts",
     "smoke:qwen": "tsx scripts/qwen-smoke.ts",
     "smoke:asr": "tsx scripts/asr-smoke.ts",
     "smoke:asr-rt": "tsx scripts/asr-realtime-smoke.ts",

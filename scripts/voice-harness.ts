@@ -1,0 +1,93 @@
+/**
+ * 语音管线开发 harness —— **不经 Electron、不经 naudiodon**,在纯 node 跑同一个 VoiceLoop。
+ *
+ * 动机(2026-06-27):桌面 Electron 把可恢复的 native 音频错误放大成段错误冻死、且日志块缓冲藏真因;
+ * CLI/node 下同一管线失败是干净可捕获的错误、trace 直出、tsx 改完即跑不用重建。
+ *
+ * 做什么:合成「语音能量段→静音」16k 帧喂 WAV 设备 → assembleApp + startVoiceMode(与桌面同一装配)
+ * → VAD→端点→STT→LLM→TTS 整条管线跑一遍 → `[vtrace]` 实时打印每步判定 → 回合结束自动退出 + 打印摘要。
+ *
+ * 跑法:
+ *   pnpm voice:harness                 # 合成帧 + fake STT + 真 LLM/TTS(.env.local),确定性、快
+ *   CHAT_A_STT_KIND=qwen-asr pnpm voice:harness --wav speech16k.wav   # 真 STT 跑真 16k 语音 WAV(集成)
+ *   CHAT_A_LLM_PROVIDER=fake CHAT_A_TTS_KIND=fake pnpm voice:harness   # 全 fake,离线/秒级
+ */
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import process, { argv, env, stdout } from 'node:process';
+import { assembleApp, startVoiceMode, type VoiceModeHandle } from '../packages/client/src/index';
+import { encodeWavBuffer } from '../packages/client/src/audio/wav';
+
+const SR = 16000;
+
+/** 合成「1.2s 220Hz 有声(过 VAD)→ 2s 静音(触发端点)」16k mono s16le,写临时 WAV,返回路径。 */
+function synthInputWav(): string {
+  const voiced = Math.floor(SR * 0.4);
+  const silence = Math.floor(SR * 2.0);
+  const samples = new Int16Array(voiced + silence);
+  for (let i = 0; i < voiced; i++) samples[i] = Math.round(Math.sin((2 * Math.PI * 220 * i) / SR) * 9000);
+  const wav = encodeWavBuffer(samples, SR, 1);
+  const path = join(tmpdir(), 'voice-harness-in.wav');
+  writeFileSync(path, wav);
+  return path;
+}
+
+async function main(): Promise<void> {
+  const wavArg = argv.includes('--wav') ? argv[argv.indexOf('--wav') + 1] : undefined;
+  const inWav = wavArg ?? synthInputWav();
+
+  // 开发友好的固定档(可被外部 env 覆盖):无 Electron/naudiodon、内存记忆、trace 直出。
+  env['CHAT_A_AUDIO_DEVICE'] = 'wav';
+  env['CHAT_A_AUDIO_IN_WAV'] = inWav;
+  env['CHAT_A_AUDIO_OUT_WAV'] = join(tmpdir(), 'voice-harness-out.wav');
+  env['CHAT_A_VOICE_TRACE'] ??= '1';
+  env['CHAT_A_VOICE_TRACE_DB'] = ''; // 只要 stdout [vtrace];不落库(避开 better-sqlite3 ABI125)
+  env['CHAT_A_SQLITE_BACKEND'] = ''; // 任何 sqlite 走 node:sqlite(node24 内建),不强制 better-sqlite3
+  env['CHAT_A_MEMORY_BACKEND'] = 'memory'; // 避开 better-sqlite3(Electron ABI125,node 加载不了)
+  env['CHAT_A_STT_KIND'] ??= 'fake'; // 合成帧无真语音 → 默认 fake STT(确定性);真 STT 须配 --wav 真 16k 语音
+  env['CHAT_A_TTS_KIND'] ??= 'fake'; // 默认 fake TTS:免 cosyvoice 复刻 voiceId/网络,自包含;要真 TTS 设 CHAT_A_TTS_KIND=cosyvoice
+  env['CHAT_A_VOICE_PATH'] ??= 'stt'; // 批式路:本地 VAD+端点驱动有限 WAV,确定性收尾
+
+  const handle = assembleApp(); // 读 .env.local(LLM/TTS 等真 provider),env 覆盖优先
+  stdout.write(
+    `[harness] llm=${handle.llm.id}/${handle.llm.model} stt=${env['CHAT_A_STT_KIND']} path=${env['CHAT_A_VOICE_PATH']} in=${inWav}\n`,
+  );
+
+  let reply = '';
+  const t0 = Date.now();
+  // 回合收尾信号:conversation.send 完成时 emit turn:end。
+  const done = new Promise<void>((resolve) => {
+    handle.bus.on('turn:end', (e) => {
+      stdout.write(`[harness] turn:end reason=${(e.data as { reason?: string }).reason} @${Date.now() - t0}ms\n`);
+      resolve();
+    });
+  });
+
+  let voice: VoiceModeHandle | undefined;
+  const timer = setTimeout(() => stdout.write(`[harness] ⏱ 40s 超时(回合未收尾)\n`), 40000);
+  try {
+    voice = await startVoiceMode({
+      send: (t, onToken, signal, prosody) => handle.convo.send(t, (tok) => { reply += tok; return onToken(tok); }, signal, prosody),
+      composeOmniInstructions: () => handle.convo.composeOmniInstructions(),
+      advanceProsody: (em) => handle.convo.advanceProsody(em),
+      memory: handle.memory,
+      bus: handle.bus,
+      sessionId: handle.sessionId,
+      env,
+    });
+    stdout.write(`[harness] 已启动 info=${JSON.stringify(voice.info)}\n`);
+    await done;
+    await new Promise((r) => setTimeout(r, 1500)); // 等 TTS 出尽
+    stdout.write(`[harness] ✅ 完整管线跑通 @${Date.now() - t0}ms  小雪回复="${reply.slice(0, 80)}"\n`);
+  } catch (err) {
+    stdout.write(`[harness] ❌ 抛错 @${Date.now() - t0}ms: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
+    process.exitCode = 1;
+  } finally {
+    clearTimeout(timer);
+    try { voice?.stop(); } catch { /* ignore */ }
+  }
+  process.exit(process.exitCode ?? 0);
+}
+
+void main();
