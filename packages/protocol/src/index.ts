@@ -6,3 +6,4 @@ export * from './bus-events';
 export * from './frames';
 export * from './audio-transport';
 export * from './errors';
+export * from './voice-trace';
