@@ -77,6 +77,11 @@ export interface OmniAudioOpts {
  * 吃 endpointing 攒好的 PCM 块流，yield transcript/text/end；signal 用于打断时真停底层流（§3.2）。
  */
 export interface OmniAudioPort {
+  /**
+   * 该 omni 模型要求的输入音频采样率（Hz；Qwen-Omni realtime = 16000）。**可选、纯加法**：
+   * 缺省（不声明）→ 消费者回落 16000（逐字现状）。装配层据此决定采集重采样目标率（与 STT 路 capabilities.sampleRate 同接缝）。
+   */
+  readonly inputSampleRate?: number;
   respondToAudio(
     audio: AsyncIterable<PcmChunk>,
     opts?: OmniAudioOpts,
