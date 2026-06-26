@@ -27,8 +27,9 @@ import type {
   TurnDetector,
   EchoGuardConfig,
   EchoGuardDecision,
+  SpeechGateConfig,
 } from '@chat-a/voice-detect';
-import { EchoGuardGate } from '@chat-a/voice-detect';
+import { EchoGuardGate, passesSpeechGate } from '@chat-a/voice-detect';
 import type { SttProvider, TtsProvider, PcmChunk, SttEmotion, TtsOptions } from '@chat-a/providers';
 import type { SttEmotionLike } from '@chat-a/persona';
 import type { MemoryStore } from '@chat-a/memory';
@@ -200,6 +201,14 @@ export interface VoiceLoopDeps {
    * **省略(缺省)→ synthesize 的 opts 仍为 undefined → 逐字现状**。同样由装配层据 voice 配置拼好后注入。
    */
   readonly ttsOptions?: TtsOptions;
+  /**
+   * 送 ASR 前段级语音门(防 ASR 静音幻觉 Layer 2,**可选**、纯加法)。
+   * **不注入(缺省)→ 不门控 → 逐字现状**(STT 路与现有 1600+ 测试零影响)。
+   * 注入后:STT 路在 `#transcribe` **之前**先过 `passesSpeechGate`——段过短/无足够有声内容(噪声尖峰/
+   * 纯静音)直接判伪段,**不送 ASR**、静默回 listening,杜绝 qwen-asr 把静音幻觉成「嗯/thank you」。
+   * 真 app 由装配层(cli-voice startVoiceMode)注入默认配置 → 真实用户得到保护。仅作用于 STT 路(omni 路自带 server VAD)。
+   */
+  readonly speechGate?: SpeechGateConfig;
 }
 
 /**
@@ -282,6 +291,11 @@ export class VoiceLoop {
    * 输出合成 opts(§4.1,可选);未注入 → undefined → `#speak` 传 synthesize 的 opts 仍为 undefined(逐字现状)。
    */
   readonly #ttsOptions: TtsOptions | undefined;
+  /**
+   * 送 ASR 前段级语音门配置(防 ASR 静音幻觉 Layer 2);未注入 → undefined → 不门控(逐字现状)。
+   * 注入后在 `#startThinking` 转写前过 `passesSpeechGate`,伪段(过短/无足够有声)不送 ASR、回 listening。
+   */
+  readonly #speechGate: SpeechGateConfig | undefined;
   /** 本次 speaking 回合用户开口的首帧时刻（ms），用于估算 sustainedMs 喂关注闸。 */
   #userSpeechStartAtMs: number | null = null;
 
@@ -333,6 +347,7 @@ export class VoiceLoop {
     this.#voicePath = deps.voicePath ?? 'stt';
     this.#sttLanguage = deps.sttLanguage;
     this.#ttsOptions = deps.ttsOptions;
+    this.#speechGate = deps.speechGate;
   }
 
   /** 当前状态（供测试断言）。 */
@@ -624,6 +639,13 @@ export class VoiceLoop {
     const gen = ++this.#gen; // 捕获本回合令牌
     const buf = this.#audioBuf;
     this.#audioBuf = [];
+
+    // 防 ASR 静音幻觉 Layer 2:注入了 speechGate 才门控(不注入=逐字现状)。
+    // 伪段(过短/无足够有声内容,如噪声尖峰/纯静音):不送 ASR,静默回 listening(与空转写同处理)。
+    if (this.#speechGate !== undefined && !passesSpeechGate(buf, this.#speechGate)) {
+      this.#resetToListening();
+      return;
+    }
 
     let text: string;
     let emotion: SttEmotion | undefined;

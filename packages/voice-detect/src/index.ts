@@ -18,3 +18,4 @@ export * from './smart-turn-eou';
 export * from './energy-vad';
 export * from './silence-eou';
 export * from './echo-guard';
+export * from './speech-gate';

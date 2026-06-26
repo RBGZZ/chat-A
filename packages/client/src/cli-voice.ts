@@ -36,6 +36,8 @@ import {
   EnergyVadDetector,
   SilenceTimeoutEouModel,
   DEFAULT_ECHO_GUARD_CONFIG,
+  DEFAULT_VAD_CONFIG,
+  DEFAULT_SPEECH_GATE_CONFIG,
   type VadDetector,
   type EchoGuardConfig,
 } from '@chat-a/voice-detect';
@@ -277,7 +279,9 @@ export async function createDetectors(env: NodeJS.ProcessEnv): Promise<Detectors
   if (mode === 'energy') {
     try {
       return {
-        vad: new EnergyVadDetector(),
+        // 防 ASR 静音幻觉 Layer 1:能量 VAD 抗噪——把起始去抖提到 25 帧(=250ms@10ms),
+        // 让噪声尖峰(1~2 帧)无法误触发 speech_start;Silero 档不动。逢低清零的去抖已在 VadGate(连续达标计数)。
+        vad: new EnergyVadDetector({ vadConfig: { ...DEFAULT_VAD_CONFIG, speechStartFrames: 25 } }),
         turnDetector: new TurnDetector(new SilenceTimeoutEouModel()),
         vadKind: 'energy',
         eouKind: 'silence-timeout',
@@ -506,6 +510,9 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
       send: deps.send,
       memory: deps.memory,
       sessionId: deps.sessionId,
+      // 防 ASR 静音幻觉 Layer 2:真 app 默认注入段级语音门——伪段(过短/无足够有声内容)不送 ASR,
+      // 杜绝 qwen-asr 把噪声尖峰/静音幻觉成「嗯/thank you」。CLI 与 desktop 共用此装配。
+      speechGate: DEFAULT_SPEECH_GATE_CONFIG,
       // EchoGuard:默认开(enabled:true);显式关时 echoGuard=undefined → 不带键 → VoiceLoop 逐字现状。
       ...(echoGuard ? { echoGuard } : {}),
       // §4.1:语音 I/O 语种解耦——仅在提供时透传(缺省不传 → STT 自动检测 + synthesize opts=undefined,逐字现状)。
