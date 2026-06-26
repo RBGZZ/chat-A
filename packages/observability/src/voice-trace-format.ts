@@ -43,7 +43,8 @@ export function formatVoiceTrace(ev: VoiceTraceEvent): string {
     }
     case 'turn': {
       const ttfa = ev.ttfaMs === undefined ? '' : ` ttfa=${ev.ttfaMs}ms`;
-      return `${PREFIX}turn outcome=${ev.outcome}${ttfa}`;
+      const reason = ev.reason === undefined ? '' : ` reason=${ev.reason}`;
+      return `${PREFIX}turn outcome=${ev.outcome}${ttfa}${reason}`;
     }
   }
 }

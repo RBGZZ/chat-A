@@ -20,13 +20,14 @@ function makeFakeWs() {
 describe('QwenAsrRealtimeStt', () => {
   const base = { id: 'qwen-asr-rt', model: 'qwen3-asr-flash-realtime', apiKey: 'k', baseURL: 'wss://x' };
 
-  it('open→发 session.update(server_vad,pcm,16k);收 speech_started/partial/final 触发 handlers', () => {
+  it('open→发 session.update(server_vad,pcm,16k);收 speech_started/stopped/partial/final 触发 handlers', () => {
     const f = makeFakeWs();
     const stt = new QwenAsrRealtimeStt({ ...base, wsFactory: () => f.ws as any });
     const events: string[] = [];
     let finalText = '', finalEmotion: any;
     const session = stt.openSession({
       onSpeechStarted: () => events.push('start'),
+      onSpeechStopped: () => events.push('stop'),
       onPartial: (t) => events.push('partial:' + t),
       onFinal: (t, e) => { finalText = t; finalEmotion = e; events.push('final'); },
       onError: () => events.push('error'),
@@ -40,18 +41,38 @@ describe('QwenAsrRealtimeStt', () => {
     expect(upd.session.turn_detection.type).toBe('server_vad');
     f.fireMsg({ type: 'input_audio_buffer.speech_started' });
     f.fireMsg({ type: 'conversation.item.input_audio_transcription.text', text: '你好', emotion: 'happy', language: 'zh' });
+    f.fireMsg({ type: 'input_audio_buffer.speech_stopped' });
     f.fireMsg({ type: 'conversation.item.input_audio_transcription.completed', transcript: '你好世界', emotion: 'happy', language: 'zh' });
     expect(events).toContain('start');
+    expect(events).toContain('stop');
+    // speech_stopped 早于 final(边界先到、定稿后到)
+    expect(events.indexOf('stop')).toBeLessThan(events.indexOf('final'));
     expect(events).toContain('partial:你好');
     expect(finalText).toBe('你好世界');
     expect(finalEmotion).toEqual({ label: 'happy' });
     session.close();
   });
 
+  it('vadThreshold 经 session.update.turn_detection.threshold 下发;不设则省略', () => {
+    const f = makeFakeWs();
+    const stt = new QwenAsrRealtimeStt({ ...base, wsFactory: () => f.ws as any, vadThreshold: 0.5 });
+    stt.openSession({ onSpeechStarted(){}, onSpeechStopped(){}, onPartial(){}, onFinal(){}, onError(){} });
+    f.fireOpen(); f.fireMsg({ type: 'session.created' });
+    const upd = f.sent.find((m) => m.type === 'session.update');
+    expect(upd.session.turn_detection.threshold).toBe(0.5);
+
+    const f2 = makeFakeWs();
+    const stt2 = new QwenAsrRealtimeStt({ ...base, wsFactory: () => f2.ws as any });
+    stt2.openSession({ onSpeechStarted(){}, onSpeechStopped(){}, onPartial(){}, onFinal(){}, onError(){} });
+    f2.fireOpen(); f2.fireMsg({ type: 'session.created' });
+    const upd2 = f2.sent.find((m) => m.type === 'session.update');
+    expect('threshold' in upd2.session.turn_detection).toBe(false);
+  });
+
   it('pushAudio 发 input_audio_buffer.append(base64)', () => {
     const f = makeFakeWs();
     const stt = new QwenAsrRealtimeStt({ ...base, wsFactory: () => f.ws as any });
-    const s = stt.openSession({ onSpeechStarted(){}, onPartial(){}, onFinal(){}, onError(){} });
+    const s = stt.openSession({ onSpeechStarted(){}, onSpeechStopped(){}, onPartial(){}, onFinal(){}, onError(){} });
     f.fireOpen(); f.fireMsg({ type: 'session.created' });
     s.pushAudio({ samples: new Int16Array([1, 2, 3, 4]), sampleRate: 16000, channels: 1 });
     const ap = f.sent.find((m) => m.type === 'input_audio_buffer.append');
@@ -64,7 +85,7 @@ describe('QwenAsrRealtimeStt', () => {
     const f = makeFakeWs();
     const stt = new QwenAsrRealtimeStt({ ...base, wsFactory: () => f.ws as any });
     let errd = false;
-    stt.openSession({ onSpeechStarted(){}, onPartial(){}, onFinal(){}, onError: () => { errd = true; } });
+    stt.openSession({ onSpeechStarted(){}, onSpeechStopped(){}, onPartial(){}, onFinal(){}, onError: () => { errd = true; } });
     f.fireOpen(); f.fireMsg({ type: 'session.created' });
     f.fireMsg({ type: 'error', error: { message: 'boom' } });
     expect(errd).toBe(true);

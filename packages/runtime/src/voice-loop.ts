@@ -30,9 +30,24 @@ import type {
   EchoGuardConfig,
   EchoGuardDecision,
   SpeechGateConfig,
+  FillerDenylist,
 } from '@chat-a/voice-detect';
-import { EchoGuardGate, passesSpeechGate } from '@chat-a/voice-detect';
-import type { SttProvider, TtsProvider, PcmChunk, SttEmotion, TtsOptions } from '@chat-a/providers';
+import {
+  EchoGuardGate,
+  passesSpeechGate,
+  meetsSpeechGate,
+  isDenylistedFiller,
+  DEFAULT_SPEECH_GATE_CONFIG,
+} from '@chat-a/voice-detect';
+import type {
+  SttProvider,
+  TtsProvider,
+  PcmChunk,
+  SttEmotion,
+  TtsOptions,
+  TtsStreamSession,
+} from '@chat-a/providers';
+import { supportsStreamingFeed } from '@chat-a/providers';
 import type { SttEmotionLike } from '@chat-a/persona';
 import type { MemoryStore } from '@chat-a/memory';
 import type { LightVoiceBus } from './bus';
@@ -117,8 +132,13 @@ export interface OmniAudioPort {
  * (回复仍走现有 LLM+TTS)。形态等价 omni 端口的「连续会话」变体;失败由消费者回落批式 stt。
  */
 export interface StreamingSttHandlers {
-  /** 服务端 VAD 检测到用户开口。 */
+  /** 服务端 VAD 检测到用户开口(每段都有 [started, stopped] 边界)。 */
   onSpeechStarted(): void;
+  /**
+   * 服务端 VAD 检测到一段语音结束(stopped 早于 final);纯边界回调、无负载。
+   * 流式 speech-gate 据此冻结段级能量快照(防 ASR 静音/噪声幻觉)。
+   */
+  onSpeechStopped(): void;
   /** 临时转写(流式吐字,可被后续覆盖);emotion/lang 若引擎给出。 */
   onPartial(text: string, emotion?: SttEmotion, lang?: string): void;
   /** 一句定稿 = 一个回合的用户文本;emotion 经现有 prosody 通道并入 PAD。 */
@@ -266,6 +286,22 @@ export interface VoiceLoopDeps {
    */
   readonly speechGate?: SpeechGateConfig;
   /**
+   * 流式路 ASR 幻觉「填充词黑名单」(防 ASR 静音/噪声幻觉的**补充**判别,**可选、纯加法**)。
+   * **不注入(缺省)→ 不查黑名单 → 逐字现状**(只剩空文本判伪)。
+   * 注入后:仅 `voicePath==='stt-stream'` 的 `onFinal` 联合判伪用——「精确命中填充词 ∧ 段低能量
+   * (segVoicedMs<minVoicedMs)」合取才丢(真说「嗯」有 voiced 能量 → 不丢)。**能量是第一判别,黑名单只补充**。
+   * 装配层(cli-voice)注入 `DEFAULT_FILLER_DENYLIST`(可经 env 关);仅作用于流式路(批式/omni 不经过)。
+   */
+  readonly fillerDenylist?: FillerDenylist;
+  /**
+   * 流式路「纯低能量门」开关(`#gateStreamFinal` ③,**可选、默认关**)。
+   * **默认关(缺省/false)**:本地段能量在某些麦(蓝牙 HFP 放音期/前后)极不可靠——真内容词(qwen 真转写出)
+   *   会因段快照 voicedMs=0 被纯能量门误杀。故纯能量门弊大于利(丢真话),默认不开。
+   * 注入 true(装配层经 `CHAT_A_STT_ENERGY_GATE=on` 显式开)→ 恢复纯能量门:`!meetsSpeechGate(段快照)` → 判伪
+   *   (opt-in 能力保留,供本地能量可靠的麦/场景)。仅作用于 stt-stream 路;需同时注入 `speechGate` 才有效。
+   */
+  readonly streamEnergyGate?: boolean;
+  /**
    * 语音管线可追溯观测回调(§8.1 可追溯性 / voice-traceability-design §4/§7，**可选**、纯加法)。
    * **不注入(缺省)→ 零开销**:各 emit 点经 `#emitTrace` 早退、`#traceOn` 为 false 跳过一切采样/汇总计算,
    *   VoiceLoop 行为与产出**逐字现状**(可观测性绝不打断/拖慢回合,§3.2)。
@@ -395,6 +431,28 @@ export class VoiceLoop {
    */
   readonly #speechGate: SpeechGateConfig | undefined;
   /**
+   * 流式路填充词黑名单(防 ASR 静音/噪声幻觉的补充判别);未注入 → undefined → 不查黑名单(逐字现状)。
+   * 仅 stt-stream 路 onFinal 联合判伪用(精确命中 ∧ 段低能量 才丢)。
+   */
+  readonly #fillerDenylist: FillerDenylist | undefined;
+  /**
+   * 流式路「纯低能量门」开关(`#gateStreamFinal` ③);**默认 false(关)**——本地能量在某些麦(蓝牙 HFP
+   * 放音期)不可靠会误杀真内容词,故纯能量门默认不开;显式 true 才恢复。黑名单(④)为默认主防御,不受此开关影响。
+   */
+  readonly #streamEnergyGate: boolean;
+  /**
+   * ── 流式段级被动能量累计(L1,**不丢帧、纯旁路观测**)──
+   * `onSpeechStarted` 重置(segTotalMs=0/segVoicedMs=0/inSegment=true);listening/thinking 期 `#onAudio`
+   * 推流照旧、若 inSegment 则旁路累计本帧时长与「有声帧」时长(复用批式同口径阈值);`onSpeechStopped`
+   * 冻结 `#segSnapshot` 快照、inSegment=false。`onFinal` 据快照做能量/黑名单联合判伪(主门)。
+   * 树莓派友好:只数两个标量,绝不 buffer 整段 PCM。
+   */
+  #segTotalMs = 0;
+  #segVoicedMs = 0;
+  #inSegment = false;
+  /** 最近一段(speech_stopped 时)冻结的能量快照;null = 无段证据(协议异常/无 speech_started)→ 降级保守放行。 */
+  #segSnapshot: { readonly segTotalMs: number; readonly segVoicedMs: number } | null = null;
+  /**
    * 语音管线可追溯观测回调(§8.1);未注入 → undefined → `#emitTrace` 早退、`#traceOn` false → 零开销逐字现状。
    * 注入后各 emit 点的 `VoiceTraceEvent` 经此抛给装配层 fan-out(实时日志 + SQLite sink)。
    */
@@ -425,6 +483,18 @@ export class VoiceLoop {
    * 每回合在 #startThinking 新建;无在途回合时为 null。
    */
   #currentAbort: AbortController | null = null;
+  /**
+   * 当前回合的 **warm TTS 会话**（CosyVoice 连接预热,承「砍首音建连+握手开销」）：
+   * 回合起点(STT/LLM 阶段)即 `synthesizeStream()` 开 WS + run-task 握手,逐句 `push`,回合末 `finish`;
+   * 打断/停止/抢占经 `#abortCurrent` → `#closeWarmSession` 干净 `abort`(幂等吞错,绝不泄漏 §3.2)。
+   * 仅在 TTS 支持 `synthesizeStream`(supportsStreamingFeed)且未降级时启用;否则 null = 逐句 synthesize(逐字现状)。
+   */
+  #warmTtsSession: TtsStreamSession | null = null;
+  /**
+   * 预热降级闩(§3.2 优雅降级):某回合 warm 会话异步失败(建连/握手抛错/超时)后置 true,
+   * 后续回合静默回落逐句 synthesize,不再尝试预热;`start()` 重置以给新一轮机会(对齐 `#streamDegraded`)。
+   */
+  #ttsStreamDegraded = false;
 
   constructor(deps: VoiceLoopDeps) {
     this.#transport = deps.transport;
@@ -455,6 +525,8 @@ export class VoiceLoop {
     this.#sttLanguage = deps.sttLanguage;
     this.#ttsOptions = deps.ttsOptions;
     this.#speechGate = deps.speechGate;
+    this.#fillerDenylist = deps.fillerDenylist;
+    this.#streamEnergyGate = deps.streamEnergyGate ?? false;
     this.#voiceObserver = deps.voiceObserver;
   }
 
@@ -591,6 +663,7 @@ export class VoiceLoop {
   start(): void {
     this.stop();
     this.#streamDegraded = false; // 新一轮:给流式路重新机会(上轮降级不延续)
+    this.#ttsStreamDegraded = false; // 同理:重置 TTS 预热降级闩,新一轮重新尝试预热
     this.#state = 'listening';
     this.#unsub = this.#transport.onAudio((frame) => this.#onAudio(frame));
     // 连续流式路:开机即开一条长连接会话,listening 期持续推流(§全程流式)。
@@ -605,6 +678,11 @@ export class VoiceLoop {
     if (this.#streamingStt === undefined || this.#streamSession !== null) return;
     const handlers: StreamingSttHandlers = {
       onSpeechStarted: () => {
+        // L1:新一段开始 → 重置段级能量累计器(开始旁路累计本段时长/有声时长);清旧快照(已被上段 onFinal 消费)。
+        this.#segTotalMs = 0;
+        this.#segVoicedMs = 0;
+        this.#inSegment = true;
+        this.#segSnapshot = null;
         // backchannel:记本轮用户开口时刻(独立于语音状态机,故在早退之前推进)。未启用则 no-op。
         if (this.#useBackchannel) this.#bcState = onSpeechStartedState(this.#bcState, this.#now());
         // listening:仅作在场/状态提示(回合由 onFinal 驱动,这里不改状态机);其余态忽略。
@@ -615,6 +693,21 @@ export class VoiceLoop {
           this.#bus.emit(makeBusEvent('vad:speech_start', { atMs: this.#now() }, corr));
         } catch (err) {
           console.warn('[VoiceLoop] 流式 speech_started emit 抛错(已捕获):', err);
+        }
+      },
+      onSpeechStopped: () => {
+        // L1:一段结束 → 冻结能量快照(供 onFinal 联合判伪),停止累计。stopped 早于 final,故快照在 onFinal 已就绪。
+        this.#segSnapshot = { segTotalMs: this.#segTotalMs, segVoicedMs: this.#segVoicedMs };
+        this.#inSegment = false;
+        // 可追溯:段级门判定预览(passed=会否通过能量门;无 speechGate 时按 DEFAULT 配置汇报,仅观测不改判)。
+        if (this.#traceOn) {
+          const cfg = this.#speechGate ?? DEFAULT_SPEECH_GATE_CONFIG;
+          this.#emitTrace({
+            kind: 'speech-gate',
+            passed: meetsSpeechGate({ totalMs: this.#segTotalMs, voicedMs: this.#segVoicedMs }, cfg),
+            totalMs: this.#segTotalMs,
+            voicedMs: this.#segVoicedMs,
+          });
         }
       },
       onPartial: () => {
@@ -634,6 +727,15 @@ export class VoiceLoop {
           ...(emotion !== undefined ? { emotion: emotion.label } : {}),
           ...(lang !== undefined ? { lang } : {}),
         });
+        // L2 联合判伪(主门,防 ASR 静音/噪声幻觉):空文本/段低能量/残差黑名单 → 不起回合、只记 gated。
+        // 判伪只**不起新回合**(不 reset/不 abort 在飞回合):listening 常态下保持 listening,绝不误伤真回合。
+        const gateReason = this.#gateStreamFinal(text);
+        if (gateReason !== null) {
+          this.#emitTrace({ kind: 'turn', outcome: 'gated', reason: gateReason });
+          this.#segSnapshot = null; // 快照已消费,清除以免影响下一句降级判定
+          return;
+        }
+        this.#segSnapshot = null; // 放行:快照已消费
         // 一句定稿 = 一个回合:走现有 #send+TTS 核心(emotion 经 prosody 并入 PAD)。
         this.#runStreamTurn(text, emotion);
       },
@@ -674,6 +776,11 @@ export class VoiceLoop {
     // backchannel:清门控 + 重置外置状态(幂等,start/stop 干净起步);clip 缓存保留(同音色跨轮复用)。
     this.#bcGateUntilMs = 0;
     this.#bcState = INITIAL_BACKCHANNEL_STATE;
+    // L1 流式段级能量累计器:清零(幂等,start/stop 干净起步)。
+    this.#segTotalMs = 0;
+    this.#segVoicedMs = 0;
+    this.#inSegment = false;
+    this.#segSnapshot = null;
     // 连续流式路:关会话(发 finish + 关连接);幂等。
     try {
       this.#streamSession?.close();
@@ -683,8 +790,10 @@ export class VoiceLoop {
     this.#streamSession = null;
   }
 
-  /** abort 当前回合的取消控制器（若有）并清空句柄；幂等、不抛（§3.2）。 */
+  /** abort 当前回合的取消控制器（若有）并清空句柄；同时干净关闭本回合 warm TTS 会话；幂等、不抛（§3.2）。 */
   #abortCurrent(): void {
+    // 先关 warm 会话(若有):打断/停止/抢占都经此单一收口,绑回合生命周期,绝不泄漏(发 abort 丢在途音频+关连接)。
+    this.#closeWarmSession();
     const ac = this.#currentAbort;
     this.#currentAbort = null;
     if (ac === null) return;
@@ -785,7 +894,23 @@ export class VoiceLoop {
         // backchannel 播放期(门控窗内 now < #bcGateUntilMs):暂停上行推流防自家附和音回灌 ASR;
         // 门控按时刻自动解除(不依赖播放回调,绝不卡死推流,§3.2)。未启用 backchannel 时门控恒为 0,逐字现状。
         const now = this.#now();
-        if (now >= this.#bcGateUntilMs) {
+        // L1 被动能量累计(**不丢帧、纯旁路**):段内(speech_started 后)每帧旁路累计本帧时长与「有声帧」时长,
+        // 复用批式 speech-gate 同口径阈值(无 speechGate 时回落 DEFAULT,仅用于累计判有声,绝不改推流)。
+        if (this.#inSegment) {
+          const cfg = this.#speechGate ?? DEFAULT_SPEECH_GATE_CONFIG;
+          const ms = (pcm.samples.length / pcm.sampleRate) * 1000;
+          this.#segTotalMs += ms;
+          if (normalizedRms(pcm.samples, cfg.fullScale) >= cfg.voicedRmsThreshold) {
+            this.#segVoicedMs += ms;
+          }
+        }
+        // EchoGuard Tier2 冷却窗抑制(承批式 listening 分支同款 `#echoGuardSuppresses`,复用不另写门控):
+        // 小雪刚说完 cooldownMs 窗内、该帧为低能量混响尾 → **不推流**(跳过该帧),防扬声器尾音回灌
+        // 云端 ASR 被转写成「用户输入」致小雪自言自语(机内麦+扬声器无 AEC 时尤甚)。窗内高能量真插话
+        // (过冷却高门槛)与冷却窗外帧照常推流;未注入/off EchoGuard → 恒不抑制,逐字现状(向后兼容)。
+        const echoSuppressed =
+          this.#echoGuard !== undefined && this.#echoGuardSuppresses(pcm.timestampMs);
+        if (now >= this.#bcGateUntilMs && !echoSuppressed) {
           try {
             this.#streamSession?.pushAudio(this.#toPcmChunk(pcm));
           } catch {
@@ -916,6 +1041,10 @@ export class VoiceLoop {
    * 双保险：omni 端口缺失（即便 voicePath=omni）也回落 STT，绝不空转。
    */
   #beginThinking(): void {
+    // 单回合守卫(single-flight)+ 关重入窗：endpointing→committing（瞬态忙）。
+    // 一旦迁入 committing,`#onAudio` 的 endpointing 分支不再累积/判 EOU → 转写在途期间不可能并发
+    // 起第二个回合（批式卡死竞态从源头消除）。仅在 endpointing 才合法,非 endpointing → go 返回 false → 拒绝起步。
+    if (!this.#go('eou')) return;
     if (this.#omni !== undefined && this.#voicePath === 'omni') {
       void this.#startThinkingOmni(this.#omni);
     } else {
@@ -982,17 +1111,20 @@ export class VoiceLoop {
       isFinal: true,
       ...(emotion !== undefined ? { emotion: emotion.label } : {}),
     });
-    if (gen !== this.#gen) return; // 转写期间被打断/换回合
+    // 转写期间被打断/换回合：**失配必恢复**——绝不裸 return 留卡死,统一收口回 listening(§3.2)。
+    if (gen !== this.#gen) {
+      this.#resetToListening();
+      return;
+    }
     if (text.trim().length === 0) {
-      // 空转写：降级回 listening（仍在 endpointing 态，用 vad:speech_end 合法迁移）
+      // 空转写：降级回 listening（此时处 committing 态，用 vad:speech_end 合法迁移）。
       this.#emitTrace({ kind: 'turn', outcome: 'empty' }); // 可追溯:空转写(§4 turn)
       this.#resetToListening();
       return;
     }
 
-    // 状态已变（如被打断),放弃本回合(批式路:仅在仍处 endpointing 时起回合)。
-    if (this.#state !== 'endpointing') return;
-    // 拿到 text/emotion 后的回合执行段统一走 #runTurn(批式路与连续流式路共用)。
+    // 拿到 text/emotion 后的回合执行段统一走 #runTurn(批式路与连续流式路共用)；
+    // 批式路此刻处 committing,#runTurn 据当前态合法迁移进 thinking,状态非预期则其内部 resetToListening 兜底。
     this.#runTurn(text, emotion, gen);
   }
 
@@ -1009,15 +1141,21 @@ export class VoiceLoop {
    * emotion 经 `#send` 第 4 参并入 PAD;`.finally` 清本回合控制器。**纯重构,行为与原 #startThinking 一致**。
    */
   #runTurn(text: string, emotion: SttEmotion | undefined, gen: number): void {
-    // 合法迁移进 thinking(连续流式路从 listening 需先补一步 vad:speech_start 到 endpointing)。
+    // 合法迁移进 thinking：
+    //   - 连续流式路从 listening 需先补一步 vad:speech_start 到 endpointing;
+    //   - 批式路此刻处 committing（#beginThinking 已迁入）;两者都经 stt:final → thinking。
     if (this.#state === 'listening') {
       if (!this.#go('vad:speech_start')) {
         this.#resetToListening();
         return;
       }
     }
-    // endpointing → thinking（emit stt:final 带真转写文本）
-    if (this.#state !== 'endpointing' || !this.#go('stt:final', { text })) {
+    // committing（批式）/ endpointing（流式补步后）→ thinking（emit stt:final 带真转写文本）。
+    // 状态非预期 / 迁移失败 → resetToListening 兜底(§3.2 永不卡死)。
+    if (
+      (this.#state !== 'committing' && this.#state !== 'endpointing') ||
+      !this.#go('stt:final', { text })
+    ) {
       this.#resetToListening();
       return;
     }
@@ -1028,13 +1166,29 @@ export class VoiceLoop {
     // 本回合取消控制器（§3.2 真打断）：打断/停止时 abort 之，使底层 LLM 流 + 在途 TTS 合成真停（不再后台跑到完）。
     const ac = new AbortController();
     this.#currentAbort = ac;
-    // 串行说话链:每句接在上一句之后,保证下行 tts:chunk 顺序与句序一致。
+
+    // ── CosyVoice 连接预热(承「砍首音建连+握手开销」)──
+    // 在 STT 已就绪、LLM 首 token 之前就开 WS + run-task 握手:`synthesizeStream()` 同步建连并(open 后)发 run-task,
+    // 文本经 `push` 后到(内部缓冲到 task-started),首句就绪即 continue-task → 首 chunk 不再含建连+握手。
+    // 与 `#send`(LLM)**并行**:开会话不 await,绝不阻塞首 token。仅 TTS 支持流式喂且未降级时启用;
+    // 同步抛(能力门 fail-fast)/不支持 → session=null → 回落逐句 synthesize(逐字现状,纯加法向后兼容)。
+    const session = this.#openWarmTtsSession(gen);
+    // session 非空 → 单条 warm 会话的 chunks 由 drain 统一消费(下行+首音迁移+gen 自检);否则空转。
+    const drain: Promise<void> = session !== null ? this.#drainTtsSession(session, gen, ac.signal) : Promise.resolve();
+
+    // 串行说话链:每句接在上一句之后,保证下行 tts:chunk 顺序与句序一致(仅逐句回落路用)。
     let speakChain: Promise<void> = Promise.resolve();
     // 透传本回合 ac.signal 到 #speak → tts.synthesize：打断/停止 abort() 后,在途 TTS 合成真停（§3.2）。
     // onToken 凑句与 send 完成后的尾句 flush 共用此闭包,故一处带上 signal 即覆盖全部喂句。
-    const enqueueSpeak = (sentence: string): void => {
-      speakChain = speakChain.then(() => this.#speak(sentence, gen, ac.signal));
-    };
+    // warm 会话路:逐句 `push`(同一 run-task 多 continue-task,消除句间重连);否则逐句 synthesize。
+    const enqueueSpeak =
+      session !== null
+        ? (sentence: string): void => {
+            session.push(sentence);
+          }
+        : (sentence: string): void => {
+            speakChain = speakChain.then(() => this.#speak(sentence, gen, ac.signal));
+          };
     const onToken = (tok: string): void => {
       if (gen !== this.#gen) return; // 作废：本回合已被打断/替换
       this.#replyAccum += tok;
@@ -1050,7 +1204,14 @@ export class VoiceLoop {
         if (full.length >= this.#replyAccum.length) this.#replyAccum = full;
         const tail = splitter.flush();
         if (tail !== null) enqueueSpeak(tail);
-        await speakChain; // 等所有句出尽(首句已触发 thinking→speaking)再收尾
+        // 等所有句出尽(首句已触发 thinking→speaking)再收尾:
+        // warm 会话路 → finish(发 finish-task) + await drain 把剩余音频放尽;逐句路 → await speakChain。
+        if (session !== null) {
+          session.finish();
+          await drain;
+        } else {
+          await speakChain;
+        }
         this.#finishTurn(gen);
       })
       .catch((err) => {
@@ -1064,8 +1225,24 @@ export class VoiceLoop {
       })
       .finally(() => {
         // 回合自然结束/出错收尾后清理本回合控制器(若仍是它);打断已在 #interrupt 里清。
-        if (this.#currentAbort === ac) this.#currentAbort = null;
+        if (this.#currentAbort === ac) {
+          this.#currentAbort = null;
+          return;
+        }
+        // 本回合已被超越/取消(currentAbort 已是别的回合或被清):若**管线无新主**(currentAbort===null)
+        // 却仍卡在瞬态忙(committing/thinking/endpointing),收口回 listening——绝不留卡死(回合并发竞态兜底)。
+        // 若已有新回合在跑(currentAbort 非 null 且非 ac),则**不**复位,避免误清新回合状态。
+        if (this.#currentAbort === null && this.#isTransientBusy()) {
+          this.#resetToListening();
+        }
       });
+  }
+
+  /** 当前是否卡在「瞬态忙」(非稳定 listening/speaking,无对应自然收尾事件触达)——供超越/失配后的兜底收口判定。 */
+  #isTransientBusy(): boolean {
+    return (
+      this.#state === 'committing' || this.#state === 'thinking' || this.#state === 'endpointing'
+    );
   }
 
   /**
@@ -1075,8 +1252,50 @@ export class VoiceLoop {
    */
   #runStreamTurn(text: string, emotion?: SttEmotion): void {
     if (text.trim().length === 0) return; // 空 final 忽略
-    const gen = ++this.#gen; // 抢占:作废在途回合(若有),本句成为当前回合
+    // **超越必取消**：起新回合前先真 abort 旧回合(LLM/TTS 底层流真停),不再直接覆盖 #currentAbort 让旧回合后台跑到完。
+    this.#abortCurrent();
+    // 收口旧回合残留态(thinking/speaking/...)→ 让新句能干净从 listening 起步,**绝不静默丢弃新句**
+    // (旧 runStreamTurn 在 thinking 态下新句会命中 #runTurn 兜底被 resetToListening 吞掉)。
+    this.#resetToListening();
+    const gen = ++this.#gen; // 抢占:本句成为当前回合(在 abort/复位之后自增,旧 onToken/TTS 据此作废)
     this.#runTurn(text, emotion, gen);
+  }
+
+  /**
+   * 流式 onFinal 联合判伪(L2 主门,防 ASR 静音/噪声幻觉)。返回判伪归因(丢弃)或 null(放行)。
+   *
+   * 判别顺序(黑名单为默认主防御、纯能量门可选):
+   *   ① 空文本 → 'empty'(逐字现状,无门也丢)。
+   *   ② **无段证据(无 speech_started/快照,协议异常)→ 降级保守放行**(只过空文本,不靠能量误杀;
+   *      黑名单的「低能量」合取也无从判定,故同样放行)。
+   *   ③ **纯低能量门(可选、默认关,`#streamEnergyGate===true` ∧ 注入 speechGate 才生效)**:
+   *      `!meetsSpeechGate(快照)` → 'low-energy'。**默认关原因**:本地段能量在某些麦(蓝牙 HFP 放音期/前后)
+   *      极不可靠——真内容词(qwen 真转写出,如「十点」「我觉得」)会因段快照 voicedMs=0 被误杀;纯能量门弊大于利
+   *      (丢真话),故默认不开,仅 opt-in 给本地能量可靠的麦。
+   *   ④ 残差黑名单(注入 fillerDenylist 时,**默认主防御**):精确命中已知填充词(「嗯/啊/thank you/谢谢观看」等)
+   *      ∧ 段 voiced < minVoicedMs → 'denylist'(真说「嗯」有 voiced 能量 → 合取不成立 → 放行;只作用于已知填充
+   *      短语,不会误杀内容词)。
+   * **纯查询、无副作用**(状态/快照清理在调用方),便于确定性测试。
+   */
+  #gateStreamFinal(text: string): 'empty' | 'low-energy' | 'denylist' | null {
+    if (text.trim().length === 0) return 'empty';
+    const snap = this.#segSnapshot;
+    if (snap === null) return null; // 降级:无段证据 → 保守放行(不靠能量误杀)
+    // ③ 纯低能量门(可选、默认关):仅 #streamEnergyGate 显式开 ∧ 注入 speechGate 时生效;段过短/无足够有声 → 判伪。
+    //    默认关:本地能量在蓝牙 HFP 放音期等不可靠,会误杀真内容词(voicedMs=0)——黑名单(④)才是默认主防御。
+    if (
+      this.#streamEnergyGate &&
+      this.#speechGate !== undefined &&
+      !meetsSpeechGate({ totalMs: snap.segTotalMs, voicedMs: snap.segVoicedMs }, this.#speechGate)
+    ) {
+      return 'low-energy';
+    }
+    // ④ 残差黑名单(仅注入 fillerDenylist 时):精确命中 ∧ 段低能量(voiced<minVoicedMs)才丢。
+    if (this.#fillerDenylist !== undefined && isDenylistedFiller(text, this.#fillerDenylist)) {
+      const minVoicedMs = (this.#speechGate ?? DEFAULT_SPEECH_GATE_CONFIG).minVoicedMs;
+      if (snap.segVoicedMs < minVoicedMs) return 'denylist';
+    }
+    return null;
   }
 
   // ───────────────────────────── backchannel 附和（全双工 v1）─────────────────────────────
@@ -1194,8 +1413,9 @@ export class VoiceLoop {
               sawTranscript = true;
               // 可追溯:omni 首条 transcript = 本轮用户话语(§4 stt-result);omni 无独立 emotion/lang 通道 → 省略。
               this.#emitTrace({ kind: 'stt-result', text, isFinal: true });
-              // endpointing → thinking（emit stt:final 带真转写文本，复用现有迁移）。
-              if (this.#state === 'endpointing') this.#go('stt:final', { text });
+              // committing → thinking（emit stt:final 带真转写文本，复用现有迁移）。
+              // omni 路经 #beginThinking 已迁入 committing(关重入窗);首条 transcript 才推进到 thinking。
+              if (this.#state === 'committing') this.#go('stt:final', { text });
               // 写记忆：本轮用户话语（等价 STT 文本，供记忆/召回）。
               try {
                 this.#memory.appendMessage({
@@ -1252,7 +1472,12 @@ export class VoiceLoop {
           this.#resetToListening();
         }
       } finally {
-        if (this.#currentAbort === ac) this.#currentAbort = null;
+        if (this.#currentAbort === ac) {
+          this.#currentAbort = null;
+        } else if (this.#currentAbort === null && this.#isTransientBusy()) {
+          // 与批式 #runTurn 一致:本回合被超越/取消且管线无新主却仍卡瞬态忙 → 收口回 listening(绝不卡死)。
+          this.#resetToListening();
+        }
       }
     })();
   }
@@ -1286,7 +1511,8 @@ export class VoiceLoop {
    */
   async #speakFailureNotice(gen: number, signal?: AbortSignal): Promise<void> {
     if (gen !== this.#gen) return; // 已被打断/换回合:不抢着播旧回合的提示
-    if (this.#state === 'endpointing') this.#state = 'thinking'; // 让 #speak 的 thinking→speaking 迁移成立
+    // 让 #speak 的 thinking→speaking 迁移成立:omni 失败常停在 committing(连接/鉴权在首 transcript 前抛)或 endpointing。
+    if (this.#state === 'endpointing' || this.#state === 'committing') this.#state = 'thinking';
     await this.#speak(VOICE_FAILURE_NOTICE, gen, signal);
   }
 
@@ -1382,6 +1608,64 @@ export class VoiceLoop {
       }
     } catch (err) {
       console.warn('[VoiceLoop] TTS 合成抛错(跳过本句):', err);
+    }
+  }
+
+  // ───────────────────────────── 说：warm 会话预热（砍首音建连+握手）─────────────────────────────
+
+  /**
+   * 回合起点开一条 **warm TTS 会话**(预热):`synthesizeStream()` 同步建连并(open 后)发 run-task 握手,
+   * 与 `#send`(LLM)并行进行——首句就绪时直接 `push`(continue-task),首 chunk 不再含建连+握手开销。
+   *
+   * 仅在 TTS 支持流式喂(`supportsStreamingFeed`)且未降级(`#ttsStreamDegraded`)时尝试;
+   * 同步抛(能力门 fail-fast / voiceId 缺失等)→ 吞错返回 null → 调用方回落逐句 synthesize(纯加法,逐字现状)。
+   * 成功则记入 `#warmTtsSession`(绑本回合,经 `#abortCurrent`→`#closeWarmSession` 收尾,绝不泄漏)。
+   */
+  #openWarmTtsSession(_gen: number): TtsStreamSession | null {
+    const tts = this.#tts;
+    if (this.#ttsStreamDegraded || !supportsStreamingFeed(tts)) return null;
+    try {
+      const session = tts.synthesizeStream(this.#ttsOptions);
+      this.#warmTtsSession = session;
+      return session;
+    } catch (err) {
+      // 预热同步失败(能力门/构造期 fail-fast):静默回落逐句 synthesize,绝不崩(§3.2)。
+      console.warn('[VoiceLoop] TTS 预热(synthesizeStream)同步抛,回落逐句合成:', err);
+      return null;
+    }
+  }
+
+  /**
+   * 消费 warm 会话的 `chunks`(单条会话覆盖本回合全部句):逐 chunk 自检 `gen===#gen`/`signal.aborted`,
+   * 首 chunk 触发 thinking→speaking(与 `#speak` 同语义),转 tts:chunk 帧下行。
+   * chunks 抛错(建连/握手/服务端失败)→ 吞错 + 置降级闩(后续回合回落逐句),绝不崩(§3.2);
+   * finally 若本会话仍是当前 warm 会话则清引用(被新回合超越时不误清,见 `#warmTtsSession === session` 守卫)。
+   */
+  async #drainTtsSession(session: TtsStreamSession, gen: number, signal: AbortSignal): Promise<void> {
+    try {
+      for await (const chunk of session.chunks) {
+        if (gen !== this.#gen || signal.aborted) return; // 打断/换回合:旧 gen 帧不再下行
+        if (this.#state === 'thinking') this.#go('tts:first_audio'); // 首音:thinking → speaking(幂等)
+        this.#transport.sendAudio(this.#toTtsFrame(chunk));
+      }
+    } catch (err) {
+      // 预热会话异步失败:降级闩 → 后续回合回落逐句 synthesize;本回合静默(与 #speak 吞错对齐,绝不崩 §3.2)。
+      console.warn('[VoiceLoop] TTS 预热会话合成抛错(降级后续回合回落逐句):', err);
+      this.#ttsStreamDegraded = true;
+    } finally {
+      if (this.#warmTtsSession === session) this.#warmTtsSession = null;
+    }
+  }
+
+  /** 干净关闭当前 warm 会话(打断/停止/抢占):直接 `abort` 丢弃在途音频、关连接;幂等吞错,绝不泄漏(§3.2)。 */
+  #closeWarmSession(): void {
+    const session = this.#warmTtsSession;
+    this.#warmTtsSession = null;
+    if (session === null) return;
+    try {
+      session.abort();
+    } catch (err) {
+      console.warn('[VoiceLoop] 关闭 warm TTS 会话抛错(已捕获):', err);
     }
   }
 
@@ -1580,8 +1864,9 @@ export class VoiceLoop {
   #resetToListening(): void {
     this.#echoGuard?.reset(); // 清自打断防护连续计数(降级回 listening)
     if (this.#state === 'listening') return;
-    // 优先走合法迁移以保持 BusEvent 可追溯
-    if (this.#state === 'endpointing') {
+    // 优先走合法迁移以保持 BusEvent / trace 可追溯。
+    // committing 与 endpointing 同样有合法的 vad:speech_end → listening（committing 为批式瞬态忙的收口）。
+    if (this.#state === 'endpointing' || this.#state === 'committing') {
       this.#audioBuf = [];
       this.#go('vad:speech_end');
       return;

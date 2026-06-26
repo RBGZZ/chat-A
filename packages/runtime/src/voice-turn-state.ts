@@ -11,22 +11,34 @@
  * - 非法迁移由调用方据 `nextState` 返回 `null` 记 warn 不抛（§3.2 优雅降级）。
  */
 
-/** 语音回合状态：四个稳定态 + 一个瞬态打断判定态。 */
+/**
+ * 语音回合状态：四个稳定态 + 两个瞬态判定态。
+ * - `committing`（瞬态忙，回合并发竞态修复）：批式路在 `await 转写` **之前**先迁入此态，
+ *   关死 endpointing 的重入窗——期间 `#onAudio` 不再累积音频/判 EOU，从源头消除并发起第二个回合
+ *   （单回合守卫 single-flight）。转写回来 `stt:final` 进 thinking；空/失败/超越则 `vad:speech_end` 回 listening。
+ *   语义上等同「endpointing 末尾的瞬态忙」，不破坏现有 4 稳定态语义（isSpeaking 等只认 speaking）。
+ */
 export type VoiceState =
   | 'listening'
   | 'endpointing'
+  | 'committing'
   | 'thinking'
   | 'speaking'
   | 'barge_in_pending';
 
-/** 驱动状态迁移的总线事件（§4.2.1 BusEvents 子集）。 */
+/**
+ * 驱动状态迁移的总线事件（§4.2.1 BusEvents 子集）。
+ * `eou`：内部「断句确认」事件（endpointing→committing），**不**桥接为对外 protocol BusEvent
+ * （committing 为内部瞬态忙，无外部消费者）；仅经状态机推进 + trace `state` 事件可见。
+ */
 export type VoiceBusEvent =
   | 'vad:speech_start'
   | 'vad:speech_end'
   | 'stt:final'
   | 'tts:first_audio'
   | 'turn:end'
-  | 'turn:interrupt';
+  | 'turn:interrupt'
+  | 'eou';
 
 /**
  * 合法迁移表（spec §2）。
@@ -43,8 +55,15 @@ export const VOICE_TRANSITIONS: Record<
   endpointing: {
     // EOU 判「说完」→ 取转写 → 触发「想」。转写来源有二，迁移语义相同（故复用同一事件，不新增态）：
     //   STT 路径=STT final 文本；omni audio-in 直路（path B）=omni 的 transcript 事件文本。
+    // 批式路（#startThinking/#startThinkingOmni）先经 `eou` 迁入 committing（关重入窗）再 `stt:final`；
+    // 连续流式路（#runStreamTurn→#runTurn）无本地转写 await，故仍直达 endpointing→thinking。
+    'eou': 'committing', // 断句确认 → 瞬态忙(批式 await 转写前先迁入,单回合守卫)
     'stt:final': 'thinking',
     'vad:speech_end': 'listening', // 长时静音/无语音放弃，丢弃累积
+  },
+  committing: {
+    'stt:final': 'thinking', // 转写定稿 → 起「想」
+    'vad:speech_end': 'listening', // 空转写/转写失败/被超越 → 干净回 listening
   },
   thinking: {
     'tts:first_audio': 'speaking', // 首句 TTS 音频就绪

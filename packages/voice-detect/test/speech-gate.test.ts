@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { SAMPLE_RATE_HZ, CHANNELS, SAMPLES_PER_FRAME, type PcmFrame } from '@chat-a/protocol';
-import { passesSpeechGate, DEFAULT_SPEECH_GATE_CONFIG } from '@chat-a/voice-detect';
+import { passesSpeechGate, meetsSpeechGate, DEFAULT_SPEECH_GATE_CONFIG } from '@chat-a/voice-detect';
 
 /** 一帧:160 样本(10ms@16k)填某固定振幅(便于控能量)。 */
 function frame(i: number, amp: number): PcmFrame {
@@ -42,5 +42,20 @@ describe('voice-detect/passesSpeechGate', () => {
 
   it('空数组 → false', () => {
     expect(passesSpeechGate([], DEFAULT_SPEECH_GATE_CONFIG)).toBe(false);
+  });
+});
+
+describe('voice-detect/meetsSpeechGate(标量谓词,单一真相源)', () => {
+  it('段够长 + 有声足够 → true', () => {
+    expect(meetsSpeechGate({ totalMs: 350, voicedMs: 150 }, DEFAULT_SPEECH_GATE_CONFIG)).toBe(true);
+  });
+  it('段过短(<minSpeechMs)→ false', () => {
+    expect(meetsSpeechGate({ totalMs: 100, voicedMs: 100 }, DEFAULT_SPEECH_GATE_CONFIG)).toBe(false);
+  });
+  it('有声不足(<minVoicedMs)→ false', () => {
+    expect(meetsSpeechGate({ totalMs: 400, voicedMs: 20 }, DEFAULT_SPEECH_GATE_CONFIG)).toBe(false);
+  });
+  it('边界值(恰好等于阈)→ true', () => {
+    expect(meetsSpeechGate({ totalMs: 300, voicedMs: 100 }, DEFAULT_SPEECH_GATE_CONFIG)).toBe(true);
   });
 });

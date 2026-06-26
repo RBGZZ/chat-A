@@ -43,6 +43,7 @@ import {
   DEFAULT_ECHO_GUARD_CONFIG,
   DEFAULT_VAD_CONFIG,
   DEFAULT_SPEECH_GATE_CONFIG,
+  DEFAULT_FILLER_DENYLIST,
   type VadDetector,
   type EchoGuardConfig,
 } from '@chat-a/voice-detect';
@@ -250,6 +251,35 @@ export function createOmniAudioPort(env: NodeJS.ProcessEnv): OmniAudioPort | und
 }
 
 /**
+ * 解析 server_vad threshold(`CHAT_A_STT_VAD_THRESHOLD`):缺省/非法/越界 → **0.5**(保守默认,真机立刻见效)。
+ * 合法范围 [0,1];0=最敏感、1=最不敏感(0.2 为服务端默认,过敏感易被噪声/静音误触发幻觉)。
+ */
+export function parseVadThreshold(raw: string | undefined): number {
+  if (raw === undefined || raw.trim().length === 0) return 0.5;
+  const v = Number(raw);
+  if (!Number.isFinite(v) || v < 0 || v > 1) return 0.5;
+  return v;
+}
+
+/** 流式填充词黑名单开关(`CHAT_A_STT_DENYLIST`):**默认开**;仅显式 0/false/off(忽略大小写)关闭。 */
+export function isDenylistEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = env['CHAT_A_STT_DENYLIST'];
+  if (raw === undefined) return true;
+  return !['0', 'false', 'off'].includes(raw.trim().toLowerCase());
+}
+
+/**
+ * 流式「纯低能量门」开关(`CHAT_A_STT_ENERGY_GATE`):**默认关**;仅显式 1/true/on(忽略大小写)开启。
+ * 默认关原因:本地段能量在某些麦(蓝牙 HFP 放音期/前后)不可靠,纯能量门会误杀真内容词(voiced=0);
+ * 黑名单(默认开)才是主防御。需本地能量可靠的麦/场景时,经此 env opt-in 恢复纯能量门。
+ */
+export function isStreamEnergyGateEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = env['CHAT_A_STT_ENERGY_GATE'];
+  if (raw === undefined) return false;
+  return ['1', 'true', 'on'].includes(raw.trim().toLowerCase());
+}
+
+/**
  * 按 env 构造连续流式 STT 端口(path stt-stream):直接构造 {@link QwenAsrRealtimeStt}
  * (realtime WS,服务端 VAD 连续分句),其 `openSession` 形态满足 `StreamingSttPort`,可直接注入 VoiceLoop。
  *   - key 读 `CHAT_A_DASHSCOPE_API_KEY`;缺失 → 打印明确中文提示,返回 undefined(回落批式 STT,绝不崩)。
@@ -266,12 +296,17 @@ export function createStreamingSttPort(env: NodeJS.ProcessEnv): StreamingSttPort
     );
     return undefined;
   }
+  // L0 防静音幻觉:server_vad threshold(0~1,越大越压噪声/静音误触发)。
+  // 经 CHAT_A_STT_VAD_THRESHOLD 可配;**缺省 0.5**(比服务端默认 0.2 保守,真机立刻见效)。
+  // 非法/越界(NaN 或不在 [0,1])→ 回落 0.5(绝不把坏值下发服务端)。
+  const vadThreshold = parseVadThreshold(env['CHAT_A_STT_VAD_THRESHOLD']);
   try {
     return new QwenAsrRealtimeStt({
       id: 'qwen-asr-rt',
       model: env['CHAT_A_STT_REALTIME_MODEL'] ?? DEFAULT_QWEN_ASR_REALTIME_MODEL,
       apiKey,
       baseURL: env['CHAT_A_STT_REALTIME_BASE_URL'] ?? QWEN_ASR_REALTIME_URL,
+      vadThreshold,
     });
   } catch (err) {
     stdout.write(
@@ -684,6 +719,12 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
             streamingStt,
             voicePath: 'stt-stream' as const,
             ...(backchannel ? { backchannel } : {}),
+            // 防 ASR 静音/噪声幻觉的**补充**判别:流式路默认注入填充词黑名单(能量是第一判别,黑名单只补充)。
+            // CHAT_A_STT_DENYLIST=0/false/off → 显式关 → 不带键 → 只剩段能量门 + 空文本判伪(逐字现状)。
+            ...(isDenylistEnabled(env) ? { fillerDenylist: DEFAULT_FILLER_DENYLIST } : {}),
+            // 纯低能量门(③):**默认关**——本地能量在蓝牙 HFP 放音期等不可靠会误杀真内容词(voiced=0);
+            // 黑名单为默认主防御。仅 CHAT_A_STT_ENERGY_GATE=1/true/on 显式 opt-in 才开。
+            ...(isStreamEnergyGateEnabled(env) ? { streamEnergyGate: true } : {}),
           }
         : {}),
       // 语音可追溯(§8.1):仅在 vt 有 observer 时透传(未开 env → 不带键 → emit 点 no-op,零开销)。

@@ -19,6 +19,7 @@ describe('StreamingSttPort 接缝', () => {
     let finalText = '';
     const s = port.openSession({
       onSpeechStarted() {},
+      onSpeechStopped() {},
       onPartial() {},
       onFinal(t) { finalText = t; },
       onError() {},

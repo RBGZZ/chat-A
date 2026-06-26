@@ -31,6 +31,11 @@ export interface QwenAsrRealtimeSttOptions {
   readonly wsFactory?: RealtimeWsFactory;
   /** server_vad 静音断句阈(ms);缺省 400(连续对话更跟手)。 */
   readonly silenceDurationMs?: number;
+  /**
+   * server_vad 触发灵敏度阈(0~1,越大越不敏感、越能压噪声/静音误触发;L0 防静音幻觉,**可选**)。
+   * 省略 → 不下发(用服务端默认 0.2=最敏感,逐字现状);装配层经 `CHAT_A_STT_VAD_THRESHOLD` 注入(缺省 0.5)。
+   */
+  readonly vadThreshold?: number;
 }
 
 const VALID_EMOTIONS: ReadonlySet<string> = new Set([
@@ -52,6 +57,8 @@ const defaultWsFactory: RealtimeWsFactory = (url, opts) => {
 
 interface Handlers {
   onSpeechStarted(): void;
+  /** 服务端 VAD 检测到一段语音结束(每段都有 [started, stopped] 边界,stopped 早于 final)。 */
+  onSpeechStopped(): void;
   onPartial(text: string, emotion?: SttEmotion, lang?: string): void;
   onFinal(text: string, emotion?: SttEmotion, lang?: string): void;
   onError(err: unknown): void;
@@ -63,6 +70,7 @@ export class QwenAsrRealtimeStt {
   readonly #baseURL: string;
   readonly #wsFactory: RealtimeWsFactory;
   readonly #silenceMs: number;
+  readonly #vadThreshold: number | undefined;
 
   constructor(opts: QwenAsrRealtimeSttOptions) {
     this.#model = opts.model;
@@ -71,6 +79,7 @@ export class QwenAsrRealtimeStt {
     this.#baseURL = opts.baseURL.replace(/\/+$/, '');
     this.#wsFactory = opts.wsFactory ?? defaultWsFactory;
     this.#silenceMs = opts.silenceDurationMs ?? 400;
+    this.#vadThreshold = opts.vadThreshold;
   }
 
   openSession(handlers: Handlers, opts?: { readonly language?: string }) {
@@ -103,11 +112,18 @@ export class QwenAsrRealtimeStt {
             input_audio_format: 'pcm',
             sample_rate: 16000,
             ...(opts?.language ? { input_audio_transcription: { language: opts.language } } : {}),
-            turn_detection: { type: 'server_vad', silence_duration_ms: this.#silenceMs },
+            turn_detection: {
+              type: 'server_vad',
+              silence_duration_ms: this.#silenceMs,
+              // L0 防静音幻觉:仅在注入时下发 threshold(越大越压噪声误触发);省略 → 服务端默认(逐字现状)。
+              ...(this.#vadThreshold !== undefined ? { threshold: this.#vadThreshold } : {}),
+            },
           },
         }));
       } else if (type === 'input_audio_buffer.speech_started') {
         handlers.onSpeechStarted();
+      } else if (type === 'input_audio_buffer.speech_stopped') {
+        handlers.onSpeechStopped();
       } else if (type === 'conversation.item.input_audio_transcription.text') {
         const text = String((msg['text'] ?? '') as string) + String((msg['stash'] ?? '') as string);
         if (text.length > 0) handlers.onPartial(text, toEmotion(msg['emotion']), msg['language'] as string | undefined);

@@ -32,10 +32,26 @@ export const DEFAULT_SPEECH_GATE_CONFIG: SpeechGateConfig = {
   fullScale: 32768,
 };
 
+/** 段级语音门的标量度量(段总时长 + 有声帧累计时长,ms)。批式/流式都收敛到这两个标量。 */
+export interface SpeechGateMeasure {
+  readonly totalMs: number;
+  readonly voicedMs: number;
+}
+
+/**
+ * 段级语音门的**标量谓词**——批式(passesSpeechGate)与流式(逐帧增量累计)共用的**单一真相源**。
+ * 段够长(totalMs ≥ minSpeechMs)**且**有声帧累计够长(voicedMs ≥ minVoicedMs)才放行(true)。
+ * 纯标量、无帧依赖:流式路据此「只数两个标量」而非 buffer 整段 PCM(树莓派友好)。
+ */
+export function meetsSpeechGate(m: SpeechGateMeasure, cfg: SpeechGateConfig): boolean {
+  return m.totalMs >= cfg.minSpeechMs && m.voicedMs >= cfg.minVoicedMs;
+}
+
 /**
  * 段级语音门:段够长 且 含足够「有声帧」才放行送 ASR。
  * 用「有声帧累计时长」而非段均RMS(后者被尾静音稀释)——噪声尖峰(1-2帧)/纯静音(0帧)必被拦,
  * 真语音(>100ms 有声)轻松通过。返回 true=放行。
+ * **等价重构**:汇总 `{totalMs,voicedMs}` 后喂标量谓词 `meetsSpeechGate`(与流式共用真相源,行为字面不变)。
  */
 export function passesSpeechGate(frames: readonly PcmFrame[], cfg: SpeechGateConfig): boolean {
   if (frames.length === 0) return false;
@@ -46,5 +62,5 @@ export function passesSpeechGate(frames: readonly PcmFrame[], cfg: SpeechGateCon
     totalMs += ms;
     if (normalizedRms(f.samples, cfg.fullScale) >= cfg.voicedRmsThreshold) voicedMs += ms;
   }
-  return totalMs >= cfg.minSpeechMs && voicedMs >= cfg.minVoicedMs;
+  return meetsSpeechGate({ totalMs, voicedMs }, cfg);
 }

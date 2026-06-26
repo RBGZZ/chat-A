@@ -63,11 +63,13 @@ export type VoiceTraceEvent =
       readonly lang?: string;
       readonly isFinal: boolean;
     })
-  /** 回合收尾摘要(结局 + 首音延迟)。 */
+  /** 回合收尾摘要(结局 + 首音延迟 + 可选归因)。 */
   | (VoiceTraceBase & {
       readonly kind: 'turn';
       readonly outcome: 'replied' | 'gated' | 'barge_in' | 'empty' | 'error';
       readonly ttfaMs?: number;
+      /** 结局归因(可选,主要供 gated 区分 empty/low-energy/denylist,便于真机调参)。 */
+      readonly reason?: string;
     });
 
 /** VoiceTraceEvent 的 kind 取值(供 sink/查询用)。 */
