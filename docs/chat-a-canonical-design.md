@@ -585,7 +585,9 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 - [ ] **🆕 OTel→SQLite 落地**(§8.1):自写 SpanProcessor/Exporter 把 span 落 SQLite 决策 trace 的实现 + 采样策略。
 - [x] ~~**🆕 向量库 ANN 索引**~~ **已定(2026-06-23)**:单用户记忆量级(几千~几万条)**sqlite-vec 暴力 KNN 即够**(1024-dim float 在 10k 量级实测 <75ms);初期不引 ANN,超 ~10 万再切 **LanceDB IVF_PQ**(§5.6/§5.9)。存储吃紧用 int8 量化(1/4,近无损)。
 - [ ] **🆕 MCP 能力进程清单**(§12):首批接哪些外部能力(本地工具 → MCP server),stdio vs HTTP 传输选择。
-- [ ] **🆕 全双工式编排层**(收敛上方 EOU 本地模型选型 / 附和打断分类 / 自打断防护 三项 + 新增 pVAD 目标说话人VAD、TurnController 决策核收口、(A)(B) 全双工区分与 `FullDuplexAudioSession` 接缝):初步方案见文档索引的 `2026-06-26-full-duplex-orchestration-layer-PRELIMINARY.md`(brainstorm 草稿,⚠️挂起,待语音 I/O 真机测试通过后正式立项)。
+- [~] **🆕 全双工式编排层(B 路,进行中)**:与流式 ASR 地基(`stt-stream` 云端 server-VAD)对齐后收敛。**v1 backchannel 已实现**(stt-stream 上说话停顿插「嗯/对」附和,不占回合+时刻门控防回声,绑 attention_mode;丝滑打断复用 EchoGuard;spec/plan `2026-06-26-full-duplex-v1-backchannel*`)。**v2 pVAD 真·边听边说 设计已定稿、挂起待真机**(SpeakerGate 接缝 + 主人显式注册 + pVAD 预门控 subsume v1 回声处理;`2026-06-26-full-duplex-v2-pvad-design.md`)。初步全景 `2026-06-26-full-duplex-orchestration-layer-PRELIMINARY.md`。**(A) 真模型级全双工**(MiniCPM-o/`FullDuplexAudioSession` 接缝)仍为独立后续。
+- [x] ~~**🆕 附和/打断分类无开源本地模型**~~ **v1 已解(2026-06-26)**:backchannel 用确定性启发式(min-speech+pause+cooldown,绑 attention_mode);打断用 EchoGuard 能量去抖。pVAD 说话人级升级见全双工 v2。
+- [x] ~~**🆕 OTel→SQLite 落地**~~ **已做**:`SqliteSpanSink`+`SqliteSpanProcessor`(otel_spans 表);另**语音管线可追溯性**补齐(`2026-06-26-voice-traceability-design.md`:VoiceTraceEvent+CHAT_A_VOICE_TRACE 实时日志+SqliteVoiceTraceSink)。
 
 ---
 
@@ -633,4 +635,9 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 - `memory-frameworks-findings-2026-06-22.md` — **记忆框架深读**(mem0/Letta/OpenMemory/Memoripy)对照 §5:打分归一/衰减/检索强化/写路径决策 + round-1 头条订正(file:line)。源码克隆于 `reference/github-projects/memory-frameworks/`。
 - `superpowers/specs/2026-06-18-embedded-adaptation-design.md` — 适配/接缝推导过程(已并入本文)。
 - `superpowers/specs/2026-06-26-full-duplex-orchestration-layer-PRELIMINARY.md` — **全双工式编排层 初步设计草稿(⚠️ brainstorm 产物,未定稿/挂起,待"音频设备选择+采样率解耦"切片真机测试通过后再正式立 spec+实现)**。承接本文 §3.2.2/§4/§4.2 已有的打断/延迟工程(抢先生成 / EOU 概率动态 endpointing / 先 pause 后定夺打断+resume / backchannel / 半句写回);增量为:TurnController 决策核收口、pVAD 目标说话人 VAD(填 §11 "附和/打断分类无本地模型"缺口)、turn-taking 绑 §6/§7 人格档、(A) 真模型级全双工 vs (B) 编排层 区分 + `FullDuplexAudioSession` 接缝预留 + MiniCPM-o 路线。参考源码克隆于 `reference/github-projects/full-duplex-refs/`(FireRedChat/LiveKit agents-js+python/pipecat/unmute)。
+- `superpowers/specs/2026-06-26-audio-device-selection-and-rate-decoupling-design.md` — **已实现**:音频设备按名选择 + 输入/输出 id 分离 + 抗混叠重采样 + 采样率能力驱动解耦 + omni 升 qwen3.5/semantic_vad。
+- `superpowers/specs/2026-06-26-streaming-asr-continuous-voice-design.md` — **已实现**:连续流式路 `voicePath=stt-stream`(点一次=全程流式),qwen3-asr-flash-realtime WS + StreamingSttPort 接缝 + VoiceLoop 连续路(云端 server-VAD 分句)。含 ASR 静音幻觉三层防御(speech-gate)。
+- `superpowers/specs/2026-06-26-full-duplex-v1-backchannel-design.md` — **已实现**:全双工 v1 backchannel(stt-stream 上说话停顿插附和,不占回合+防回声,绑 attention_mode)。
+- `superpowers/specs/2026-06-26-full-duplex-v2-pvad-design.md` — **设计定稿/挂起待真机**:全双工 v2 pVAD 真·边听边说(SpeakerGate 接缝 + 主人显式注册 + pVAD 预门控 subsume v1 回声处理)。
+- `superpowers/specs/2026-06-26-voice-traceability-design.md` — **已实现**:语音管线可追溯性(VoiceTraceEvent + voiceObserver + `CHAT_A_VOICE_TRACE` 实时 `[vtrace]` 日志 + SqliteVoiceTraceSink)。
 - `chat-a-final-design.md` / `real-time-agent-design.md` / `chat-a-architecture-design.md` — 历史/细节附录(被本文取代,保留备查)。
