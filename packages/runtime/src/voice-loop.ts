@@ -20,8 +20,9 @@
  *   generation 自检仍兜住「输出作废」，二者叠加：既不浪费尾部算力，也不污染状态。
  * - 全程容错：任一步抛错被 catch，回 listening，永不崩（§3.2）。
  */
-import type { AudioFrame, AudioTransport, Unsubscribe } from '@chat-a/protocol';
+import type { AudioFrame, AudioTransport, Unsubscribe, VoiceTraceEvent } from '@chat-a/protocol';
 import { makeBusEvent, makeDataFrame, type PcmFrame } from '@chat-a/protocol';
+import { normalizedRms } from '@chat-a/voice-detect';
 import type {
   VadDetector,
   VadFrameResult,
@@ -264,7 +265,26 @@ export interface VoiceLoopDeps {
    * 真 app 由装配层(cli-voice startVoiceMode)注入默认配置 → 真实用户得到保护。仅作用于 STT 路(omni 路自带 server VAD)。
    */
   readonly speechGate?: SpeechGateConfig;
+  /**
+   * 语音管线可追溯观测回调(§8.1 可追溯性 / voice-traceability-design §4/§7，**可选**、纯加法)。
+   * **不注入(缺省)→ 零开销**:各 emit 点经 `#emitTrace` 早退、`#traceOn` 为 false 跳过一切采样/汇总计算,
+   *   VoiceLoop 行为与产出**逐字现状**(可观测性绝不打断/拖慢回合,§3.2)。
+   * 注入后:VoiceLoop 在各决策/回合边界 emit `VoiceTraceEvent`(公共字段 atMs/sessionId/correlationId 由
+   *   `#emitTrace` 中心化补全),装配层(cli-voice)经此 fan-out 到实时结构日志 + `SqliteVoiceTraceSink`。
+   * 回调抛错被 `#emitTrace` 吞掉,**绝不打断回合**(§3.2)。
+   */
+  readonly voiceObserver?: (ev: VoiceTraceEvent) => void;
 }
+
+/**
+ * `#emitTrace` 入参：`VoiceTraceEvent` 去掉公共字段(atMs/correlationId/sessionId/turnId)后的 kind 专属载荷。
+ * 公共字段由 `#emitTrace` 中心化补全(分布式 Omit 保判别联合按 kind 收窄)。
+ */
+type VoiceTracePayload = VoiceTraceEvent extends infer T
+  ? T extends VoiceTraceEvent
+    ? Omit<T, 'atMs' | 'correlationId' | 'sessionId' | 'turnId'>
+    : never
+  : never;
 
 /**
  * VoiceLoop 对外只读「忙闲」视图(承 §7 单一 is_speaking 硬闸)。
@@ -374,6 +394,13 @@ export class VoiceLoop {
    * 注入后在 `#startThinking` 转写前过 `passesSpeechGate`,伪段(过短/无足够有声)不送 ASR、回 listening。
    */
   readonly #speechGate: SpeechGateConfig | undefined;
+  /**
+   * 语音管线可追溯观测回调(§8.1);未注入 → undefined → `#emitTrace` 早退、`#traceOn` false → 零开销逐字现状。
+   * 注入后各 emit 点的 `VoiceTraceEvent` 经此抛给装配层 fan-out(实时日志 + SQLite sink)。
+   */
+  readonly #voiceObserver: ((ev: VoiceTraceEvent) => void) | undefined;
+  /** mic-sample 节流计数器(每 ~50 帧/≈500ms 采样一次麦电平,避免逐帧刷屏/写库,§4)。 */
+  #micSampleCount = 0;
   /** 本次 speaking 回合用户开口的首帧时刻（ms），用于估算 sustainedMs 喂关注闸。 */
   #userSpeechStartAtMs: number | null = null;
 
@@ -428,6 +455,54 @@ export class VoiceLoop {
     this.#sttLanguage = deps.sttLanguage;
     this.#ttsOptions = deps.ttsOptions;
     this.#speechGate = deps.speechGate;
+    this.#voiceObserver = deps.voiceObserver;
+  }
+
+  /** 是否已注入语音可追溯观测;为 false 时各 emit 点跳过一切采样/汇总计算,零开销(§3.2/§8.1)。 */
+  get #traceOn(): boolean {
+    return this.#voiceObserver !== undefined;
+  }
+
+  /**
+   * 中心化 emit 语音 trace(§8.1):补全公共字段(atMs/sessionId/correlationId)后抛给注入的 `#voiceObserver`。
+   * - 未注入 → 早退(零开销);correlationId 取 bus 当前关联号(与 decision_traces/otel_spans 同键缝合),取不到则省略;
+   *   turnId 暂无稳定来源(语音回合无独立 turnId 字段)→ 省略(§4 公共字段可缺省)。
+   * - observer 抛错被吞,**绝不打断回合**(可观测性不致命,§3.2)。
+   */
+  #emitTrace(ev: VoiceTracePayload): void {
+    const observer = this.#voiceObserver;
+    if (observer === undefined) return; // 未注入:零开销 no-op
+    try {
+      const corr = this.#bus.currentCorrelationId();
+      const full = {
+        ...ev,
+        atMs: this.#now(),
+        sessionId: this.#sessionId,
+        ...(corr !== undefined ? { correlationId: corr } : {}),
+      } as VoiceTraceEvent;
+      observer(full);
+    } catch {
+      /* 可观测性绝不打断回合(§3.2):吞错(连诊断都不打,避免噪声/递归) */
+    }
+  }
+
+  /**
+   * 汇总一段 PCM 帧的时长 + 归一 RMS 能量(供 `stt-input` trace,§4)。仅在 `#traceOn` 时调用(零开销)。
+   * 与 EchoGuard/speech-gate 同口径(samples²均方根 / 满量程归一,clamp 到 1)。
+   */
+  #bufSummary(frames: readonly PcmFrame[]): { durationMs: number; rmsNorm: number } {
+    let durationMs = 0;
+    let sumSq = 0;
+    let n = 0;
+    for (const f of frames) {
+      durationMs += (f.samples.length / f.sampleRate) * 1000;
+      for (let i = 0; i < f.samples.length; i++) {
+        sumSq += f.samples[i]! * f.samples[i]!;
+        n += 1;
+      }
+    }
+    const rms = n > 0 ? Math.sqrt(sumSq / n) : 0;
+    return { durationMs, rmsNorm: Math.min(1, rms / VoiceLoop.#FULL_SCALE) };
   }
 
   /** 当前状态（供测试断言）。 */
@@ -546,9 +621,19 @@ export class VoiceLoop {
         // backchannel:刷新最近 partial 时刻(判停顿用);本切片 partial 仍不驱动回合。
         if (this.#useBackchannel) this.#bcState = onPartialState(this.#bcState, this.#now());
       },
-      onFinal: (text, emotion) => {
+      onFinal: (text, emotion, lang) => {
         // backchannel:一句定稿 → 清开口态(下句前不附和);保留冷却与 clip 索引。
         if (this.#useBackchannel) this.#bcState = onTurnDoneState(this.#bcState);
+        // 可追溯:流式路无本地攒 buf(逐帧已推流)→ stt-input 时长/能量近似省略为 0(§4 流式约定);
+        // stt-result 带服务端定稿文本/情绪/语种。
+        this.#emitTrace({ kind: 'stt-input', path: 'stt-stream', durationMs: 0, rmsNorm: 0 });
+        this.#emitTrace({
+          kind: 'stt-result',
+          text,
+          isFinal: true,
+          ...(emotion !== undefined ? { emotion: emotion.label } : {}),
+          ...(lang !== undefined ? { lang } : {}),
+        });
         // 一句定稿 = 一个回合:走现有 #send+TTS 核心(emotion 经 prosody 并入 PAD)。
         this.#runStreamTurn(text, emotion);
       },
@@ -638,6 +723,8 @@ export class VoiceLoop {
       // emit 失败不应打断回合推进（总线问题不致命,§3.2）
       console.warn('[VoiceLoop] emit BusEvent 抛错(已捕获):', err);
     }
+    // 可追溯:状态迁移成功后 emit `state` from→to(§4 state)。
+    this.#emitTrace({ kind: 'state', from, to });
     return true;
   }
 
@@ -676,8 +763,15 @@ export class VoiceLoop {
       const pcm = frame.payload.audio; // payload.audio 本就是 PcmFrame，直接喂 VAD
       this.#lastFrameSamples = pcm.samples; // 供 EchoGuard 算本帧能量
       this.#lastFrameAtMs = pcm.timestampMs; // 供 EchoGuard 冷却窗起点对齐帧时间轴(确定性)
+      // 可追溯:每 ~50 帧(≈500ms)采样一次麦电平(§4 mic-sample);`#traceOn` 短路 → 未注入观测时连计数都不做,零开销。
+      if (this.#traceOn && this.#micSampleCount++ % 50 === 0) {
+        this.#emitTrace({ kind: 'mic-sample', rmsNorm: this.#frameEnergy01() });
+      }
       const result = this.#vad.pushFrame(pcm);
       const evt = result.event;
+      // 可追溯:VAD 边沿(两路共用,在 stt-stream/批式分流前统一 emit,§4 vad)。
+      if (evt?.type === 'speech_start') this.#emitTrace({ kind: 'vad', event: 'speech_start' });
+      else if (evt?.type === 'speech_end') this.#emitTrace({ kind: 'vad', event: 'speech_end' });
 
       // 连续流式路（§全程流式）:listening/thinking 期持续把麦帧推给云端(服务端 VAD 分句);
       // speaking 期暂停推流(防自家 TTS 回声进 ASR)+ 复用既有 speaking 态打断逻辑(EchoGuard/能量 VAD)。
@@ -731,6 +825,7 @@ export class VoiceLoop {
         // 静音中：据帧时间戳算静音时长喂 TurnDetector（确定性，不读真实时间）
         const silenceMs = Math.max(0, pcm.timestampMs - this.#lastVoiceAtMs);
         if (this.#shouldEndpoint(silenceMs)) {
+          this.#emitTrace({ kind: 'endpoint', silenceMs }); // 可追溯:EOU 断句(§4 endpoint)
           this.#beginThinking(); // → thinking（STT + send）
         }
         return;
@@ -841,9 +936,31 @@ export class VoiceLoop {
 
     // 防 ASR 静音幻觉 Layer 2:注入了 speechGate 才门控(不注入=逐字现状)。
     // 伪段(过短/无足够有声内容,如噪声尖峰/纯静音):不送 ASR,静默回 listening(与空转写同处理)。
-    if (this.#speechGate !== undefined && !passesSpeechGate(buf, this.#speechGate)) {
-      this.#resetToListening();
-      return;
+    if (this.#speechGate !== undefined) {
+      const passed = passesSpeechGate(buf, this.#speechGate);
+      // 可追溯:段级门判定(§4 speech-gate);totalMs/voicedMs 复用 speech-gate 同口径汇总,仅注入观测时计算。
+      if (this.#traceOn) {
+        const cfg = this.#speechGate;
+        let totalMs = 0;
+        let voicedMs = 0;
+        for (const f of buf) {
+          const ms = (f.samples.length / f.sampleRate) * 1000;
+          totalMs += ms;
+          if (normalizedRms(f.samples, cfg.fullScale) >= cfg.voicedRmsThreshold) voicedMs += ms;
+        }
+        this.#emitTrace({ kind: 'speech-gate', passed, totalMs, voicedMs });
+      }
+      if (!passed) {
+        this.#emitTrace({ kind: 'turn', outcome: 'gated' }); // 可追溯:本回合被段级门拦下(§4 turn)
+        this.#resetToListening();
+        return;
+      }
+    }
+
+    // 可追溯:送 STT 前的音频摘要(§4 stt-input);仅注入观测时汇总(零开销)。
+    if (this.#traceOn) {
+      const { durationMs, rmsNorm } = this.#bufSummary(buf);
+      this.#emitTrace({ kind: 'stt-input', path: 'stt', durationMs, rmsNorm });
     }
 
     let text: string;
@@ -854,12 +971,21 @@ export class VoiceLoop {
       emotion = r.emotion; // §7#5:STT 读出的语气情绪(qwen-asr 填,其余 undefined),稍后透传给 #send。
     } catch (err) {
       console.warn('[VoiceLoop] STT 抛错(降级回 listening):', err);
+      this.#emitTrace({ kind: 'turn', outcome: 'error' }); // 可追溯:STT 失败(§4 turn)
       this.#resetToListening();
       return;
     }
+    // 可追溯:批式转写结果(§4 stt-result);emotion 仅取标签(trace 为 string),lang 批式不可得 → 省略。
+    this.#emitTrace({
+      kind: 'stt-result',
+      text,
+      isFinal: true,
+      ...(emotion !== undefined ? { emotion: emotion.label } : {}),
+    });
     if (gen !== this.#gen) return; // 转写期间被打断/换回合
     if (text.trim().length === 0) {
       // 空转写：降级回 listening（仍在 endpointing 态，用 vad:speech_end 合法迁移）
+      this.#emitTrace({ kind: 'turn', outcome: 'empty' }); // 可追溯:空转写(§4 turn)
       this.#resetToListening();
       return;
     }
@@ -932,6 +1058,7 @@ export class VoiceLoop {
         // 仅当仍是本回合(真错误)才 warn + 回 listening 兜底(§3.2)。
         if (gen === this.#gen) {
           console.warn('[VoiceLoop] send 抛错(回 listening):', err);
+          this.#emitTrace({ kind: 'turn', outcome: 'error' }); // 可追溯:send 真失败(§4 turn)
           this.#resetToListening();
         }
       })
@@ -969,7 +1096,10 @@ export class VoiceLoop {
       return;
     }
     this.#bcState = d.state;
-    if (d.fire && d.clipText !== undefined) void this.#playBackchannel(d.clipText);
+    if (d.fire && d.clipText !== undefined) {
+      this.#emitTrace({ kind: 'backchannel', fired: true, clipText: d.clipText }); // 可追溯:附和命中(§4 backchannel)
+      void this.#playBackchannel(d.clipText);
+    }
   }
 
   /**
@@ -1017,6 +1147,12 @@ export class VoiceLoop {
     const buf = this.#audioBuf;
     this.#audioBuf = [];
 
+    // 可追溯:送 omni 前的音频摘要(§4 stt-input,path='omni');仅注入观测时汇总(零开销)。
+    if (this.#traceOn) {
+      const { durationMs, rmsNorm } = this.#bufSummary(buf);
+      this.#emitTrace({ kind: 'stt-input', path: 'omni', durationMs, rmsNorm });
+    }
+
     this.#replyAccum = '';
     const splitter = new SentenceSplitter();
     // 本回合取消控制器（§3.2 真打断）：abort 之 → 传给 respondToAudio 的 signal aborted → 底层 WS 真停。
@@ -1056,6 +1192,8 @@ export class VoiceLoop {
             const text = ev.text.trim();
             if (text.length > 0 && !sawTranscript) {
               sawTranscript = true;
+              // 可追溯:omni 首条 transcript = 本轮用户话语(§4 stt-result);omni 无独立 emotion/lang 通道 → 省略。
+              this.#emitTrace({ kind: 'stt-result', text, isFinal: true });
               // endpointing → thinking（emit stt:final 带真转写文本，复用现有迁移）。
               if (this.#state === 'endpointing') this.#go('stt:final', { text });
               // 写记忆：本轮用户话语（等价 STT 文本，供记忆/召回）。
@@ -1108,6 +1246,7 @@ export class VoiceLoop {
         if (gen === this.#gen) {
           // 堆栈仅留 console(调试用),绝不泄露给用户。
           console.warn('[VoiceLoop] omni 直路失败(降级回 listening + 播报提示):', err);
+          this.#emitTrace({ kind: 'turn', outcome: 'error' }); // 可追溯:omni 直路失败(§4 turn)
           // §3.2 永不哑:用 TTS 说一句友好降级提示,让用户知道「没接上」而非伴侣静默哑火。
           await this.#speakFailureNotice(gen, ac.signal);
           this.#resetToListening();
@@ -1176,6 +1315,7 @@ export class VoiceLoop {
    */
   #finishTurn(gen: number): void {
     if (gen !== this.#gen) return;
+    this.#emitTrace({ kind: 'turn', outcome: 'replied' }); // 可追溯:回合正常收尾(§4 turn)
     // 仍在 speaking 才合法迁移 turn:end;若从未进 speaking(无音频)则直接回 listening
     if (this.#state === 'speaking') {
       this.#go('turn:end');
@@ -1339,6 +1479,14 @@ export class VoiceLoop {
         speakingFromVad: result.speaking || isSpeechStart,
         atMs: nowFrameMs, // 帧时刻喂 Gate 判冷却窗内/外(确定性,不读墙钟)
       });
+      // 可追溯:EchoGuard speaking 期去抖决策(§4 echo-guard;复用 decision 现成值,与 echoGuardObserver 同源)。
+      this.#emitTrace({
+        kind: 'echo-guard',
+        tier: decision.tier,
+        rmsNorm: decision.energy01,
+        run: decision.run,
+        passed: decision.pass,
+      });
       return decision.pass;
     } catch (err) {
       console.warn('[VoiceLoop] EchoGuard 判定抛错(兜底放行,不变打不断):', err);
@@ -1419,6 +1567,7 @@ export class VoiceLoop {
     this.#audioBuf = [];
     this.#userSpeechStartAtMs = null;
     this.#echoGuard?.reset(); // 清自打断防护连续计数(回合结束)
+    this.#emitTrace({ kind: 'turn', outcome: 'barge_in' }); // 可追溯:回合被打断/抢占(§4 turn)
     this.#go('turn:interrupt', { reason }); // barge_in_pending → listening(reason 透传可追溯)
   }
 
