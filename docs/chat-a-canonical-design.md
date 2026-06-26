@@ -184,6 +184,14 @@ packages/
 - **10ms 音频切片 + wall-clock 配速**(播放中途干净打断的物理前提,16k mono=320B/片);**TTS 打断 = 关流式 context 而非断连**(低延迟,无 word-timestamp 的服务才整连重连)。
 - **⚠️ 裸 WebSocket 缺口(LiveKit 靠 WebRTC/云推理白嫖,chat-A 必须自建)**:逐帧时间戳/采样率(EOU/打断时间对齐)、**AEC 或 agent 说话时门控 STT**(防自打断,树莓派关键)、客户端**播放游标回传**(打断后对齐"实际播到哪")、附和/打断分类**无开源本地模型**(初期用 VAD+min_words+min_duration+backchannel_boundary 启发式降级)。
 
+**🆕 真机硬化(2026-06-27 桌面真机连测;详见 memory「真机语音修复」「barge-in 缺AEC=pVAD正解」「Windows音频I/O」):**
+- **流式为默认(流式原则)**:`stt-stream` 连续流式设为**默认路**(凡能流式一律流式,低延迟伴侣地基);批式 `stt` 留作降级回退。
+- **回合并发竞态防护**:批式路转写(async STT)在途期状态仍 `endpointing`,再触发 endpoint 会**并发起第二个回合、gen 互顶致卡死 thinking**。修:`committing` 单回合守卫(中间态关重入窗)+ 超越必取消(起新回合先 `#abortCurrent` 旧的)+ 失配必恢复(gen 失配的裸 return 一律收口 `resetToListening`)。对标 pipecat 单回合锁 / livekit 单 currentSpeech / unmute 令牌必取消(业界无人靠"gen+裸return")。
+- **ASR 流式静音幻觉防御**:stt-stream **旁路了批式 speech-gate**(逐帧推流、无本地段),致噪声/静音被云端 server-VAD 切成句、转写成「嗯/thank you」起伪回合。修:靠 qwen `input_audio_buffer.speech_started/stopped` **括段被动累计 voiced 能量**(不丢帧、护持续监听/backchannel)+ onFinal 联合判伪(空文本 + 多语种填充词黑名单∧低能量;**纯能量门默认关**——本机蓝牙麦放音期能量不可靠会误杀真内容词)+ `turn_detection.threshold` 抗噪。下沉 `meetsSpeechGate` 标量谓词,批式/流式共用同一口径。
+- **TTS 链接预热**:`#runTurn` 起点与 LLM 并行预热 TTS WS+run-task 握手,一回合多句复用同一 warm 会话(消句间重连),打断经 `#abortCurrent` 干净关闭。
+- **🔴 自打断/AEC 真机现实(坐实上文「无条件打断」的前提缺口,见本节 🆕 裸 WS 缺口「AEC 或门控 STT」)**:**无 AEC 的真机做不到无条件打断**——EchoGuard 纯能量门控**先天分不清自家回声与用户真插话**(蓝牙 HFP 麦放音期被 Windows AEC 压成 0=无信号可判;机内麦无 AEC=小雪回声串入 ASR 自言自语)。**软件 AEC(渲染层 getUserMedia echoCancellation)在 Electron 实测失效**(electron#47043)。→ **真打断正解 = pVAD 目标说话人(§11 全双工 v2,身份门控非能量)**;已补 stt-stream 推流分支 EchoGuard cooldown 抑制止"自言自语"。
+- **音频 I/O 真机约束**:naudiodon **WASAPI 渲染(输出)流 `start()` 段错误**(PortAudio MMCSS revert bug,与设备无关、只开输出也崩;无 JS 抓手)→ 桌面输出走 **MME**;WASAPI **采集(输入)正常**。设备按全名+hostApi 精确选。**未来优化:桌面输出迁渲染层 Web Audio**(已有 `IPC.ttsAudio` 路,更稳/低延迟/绕开段错误/为软件 AEC 铺路;naudiodon 输出降级 CLI(MME)/树莓派(ALSA))。
+
 ### 4.1 语音 I/O 自定义:输入/输出语种**解绑**,均由用户配置
 **输入语种(听)与输出语种(说)是两件独立的事,不绑定。** 用户可用自己的语言说,Agent 按用户设定的语言答(可同可不同)。
 ```yaml
@@ -582,11 +590,11 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 - [ ] 人格/边界的**用户配置项**设计(用户自定义人格、关系深度、是否启用最小危机底线)——体现"用户自治"。
 - [ ] **🆕 EOU 本地模型选型**(§4 动态 endpointing 的 mini ONNX:LiveKit turn-detector vs Pipecat Smart Turn v3 vs 自蒸馏)。
 - [ ] **🆕 附和/打断分类无开源本地模型**(§4):初期启发式(VAD+min_words+min_duration+backchannel_boundary)降级,后续是否自建。
-- [ ] **🆕 自打断防护方案**(§4):AEC vs "agent 说话时门控 STT" 二选一/并用,树莓派可行性。
+- [~] **🆕 自打断防护方案**(§4,**2026-06-27 真机定向**):软件 AEC(渲染层 getUserMedia echoCancellation)在 **Electron 实测失效**(electron#47043);EchoGuard 纯能量门控**先天分不清自家回声与用户真插话**(已补 stt-stream 推流分支 cooldown 抑制止"自言自语",但真打断打不了)。→ **真打断定向走 pVAD 目标说话人(全双工 v2,身份门控非能量)**;树莓派/降级回落"agent 说话时门控 STT"。AEC 若将来要做须先 spike 验证 Electron 上是否真生效(或迁渲染层 Web Audio I/O)。
 - [ ] **🆕 OTel→SQLite 落地**(§8.1):自写 SpanProcessor/Exporter 把 span 落 SQLite 决策 trace 的实现 + 采样策略。
 - [x] ~~**🆕 向量库 ANN 索引**~~ **已定(2026-06-23)**:单用户记忆量级(几千~几万条)**sqlite-vec 暴力 KNN 即够**(1024-dim float 在 10k 量级实测 <75ms);初期不引 ANN,超 ~10 万再切 **LanceDB IVF_PQ**(§5.6/§5.9)。存储吃紧用 int8 量化(1/4,近无损)。
 - [ ] **🆕 MCP 能力进程清单**(§12):首批接哪些外部能力(本地工具 → MCP server),stdio vs HTTP 传输选择。
-- [~] **🆕 全双工式编排层(B 路,进行中)**:与流式 ASR 地基(`stt-stream` 云端 server-VAD)对齐后收敛。**v1 backchannel 已实现**(stt-stream 上说话停顿插「嗯/对」附和,不占回合+时刻门控防回声,绑 attention_mode;丝滑打断复用 EchoGuard;spec/plan `2026-06-26-full-duplex-v1-backchannel*`)。**v2 pVAD 真·边听边说 设计已定稿、挂起待真机**(SpeakerGate 接缝 + 主人显式注册 + pVAD 预门控 subsume v1 回声处理;`2026-06-26-full-duplex-v2-pvad-design.md`)。初步全景 `2026-06-26-full-duplex-orchestration-layer-PRELIMINARY.md`。**(A) 真模型级全双工**(MiniCPM-o/`FullDuplexAudioSession` 接缝)仍为独立后续。
+- [~] **🆕 全双工式编排层(B 路,进行中)**:与流式 ASR 地基(`stt-stream` 云端 server-VAD)对齐后收敛。**v1 backchannel 已实现**(stt-stream 上说话停顿插「嗯/对」附和,不占回合+时刻门控防回声,绑 attention_mode;丝滑打断复用 EchoGuard;spec/plan `2026-06-26-full-duplex-v1-backchannel*`)。**v2 pVAD 真·边听边说 设计已定稿、挂起待真机**(SpeakerGate 接缝 + 主人显式注册 + pVAD 预门控 subsume v1 回声处理;`2026-06-26-full-duplex-v2-pvad-design.md`)。初步全景 `2026-06-26-full-duplex-orchestration-layer-PRELIMINARY.md`。**(A) 真模型级全双工**(MiniCPM-o/`FullDuplexAudioSession` 接缝)仍为独立后续。**2026-06-27 真机**:语音 I/O 链路大体跑通(流式转写→不卡死→LLM→TTS→真出声),回合并发竞态(committing 单回合守卫)/ASR 流式幻觉防御(speech_stopped 括段)/回声 cooldown 均已硬化并提交(1731 测试绿);barge-in 真打断根因确认=**缺 AEC**(EchoGuard 能量门控分不清回声/真插话,软件 AEC 在 Electron 失效)→ **pVAD v2「挂起待真机」前置条件大体满足,转下一步正式实现**(身份门控是真打断正解)。
 - [x] ~~**🆕 附和/打断分类无开源本地模型**~~ **v1 已解(2026-06-26)**:backchannel 用确定性启发式(min-speech+pause+cooldown,绑 attention_mode);打断用 EchoGuard 能量去抖。pVAD 说话人级升级见全双工 v2。
 - [x] ~~**🆕 OTel→SQLite 落地**~~ **已做**:`SqliteSpanSink`+`SqliteSpanProcessor`(otel_spans 表);另**语音管线可追溯性**补齐(`2026-06-26-voice-traceability-design.md`:VoiceTraceEvent+CHAT_A_VOICE_TRACE 实时日志+SqliteVoiceTraceSink)。
 
@@ -637,8 +645,8 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 - `superpowers/specs/2026-06-18-embedded-adaptation-design.md` — 适配/接缝推导过程(已并入本文)。
 - `superpowers/specs/2026-06-26-full-duplex-orchestration-layer-PRELIMINARY.md` — **全双工式编排层 初步设计草稿(⚠️ brainstorm 产物,未定稿/挂起,待"音频设备选择+采样率解耦"切片真机测试通过后再正式立 spec+实现)**。承接本文 §3.2.2/§4/§4.2 已有的打断/延迟工程(抢先生成 / EOU 概率动态 endpointing / 先 pause 后定夺打断+resume / backchannel / 半句写回);增量为:TurnController 决策核收口、pVAD 目标说话人 VAD(填 §11 "附和/打断分类无本地模型"缺口)、turn-taking 绑 §6/§7 人格档、(A) 真模型级全双工 vs (B) 编排层 区分 + `FullDuplexAudioSession` 接缝预留 + MiniCPM-o 路线。参考源码克隆于 `reference/github-projects/full-duplex-refs/`(FireRedChat/LiveKit agents-js+python/pipecat/unmute)。
 - `superpowers/specs/2026-06-26-audio-device-selection-and-rate-decoupling-design.md` — **已实现**:音频设备按名选择 + 输入/输出 id 分离 + 抗混叠重采样 + 采样率能力驱动解耦 + omni 升 qwen3.5/semantic_vad。
-- `superpowers/specs/2026-06-26-streaming-asr-continuous-voice-design.md` — **已实现**:连续流式路 `voicePath=stt-stream`(点一次=全程流式),qwen3-asr-flash-realtime WS + StreamingSttPort 接缝 + VoiceLoop 连续路(云端 server-VAD 分句)。含 ASR 静音幻觉三层防御(speech-gate)。
+- `superpowers/specs/2026-06-26-streaming-asr-continuous-voice-design.md` — **已实现**:连续流式路 `voicePath=stt-stream`(点一次=全程流式),qwen3-asr-flash-realtime WS + StreamingSttPort 接缝 + VoiceLoop 连续路(云端 server-VAD 分句)。含 ASR 静音幻觉三层防御(speech-gate)。**2026-06-27 真机补**:流式路原旁路了批式 speech-gate→新增 `speech_started/stopped` 括段被动累计能量 + onFinal 联合判伪(空文本+多语种填充词黑名单∧低能量;纯能量门默认关防误杀)+ `turn_detection.threshold` 抗噪;下沉 `meetsSpeechGate` 标量谓词批式/流式共用。另:回合并发竞态 committing 守卫 + TTS 链接预热。
 - `superpowers/specs/2026-06-26-full-duplex-v1-backchannel-design.md` — **已实现**:全双工 v1 backchannel(stt-stream 上说话停顿插附和,不占回合+防回声,绑 attention_mode)。
-- `superpowers/specs/2026-06-26-full-duplex-v2-pvad-design.md` — **设计定稿/挂起待真机**:全双工 v2 pVAD 真·边听边说(SpeakerGate 接缝 + 主人显式注册 + pVAD 预门控 subsume v1 回声处理)。
+- `superpowers/specs/2026-06-26-full-duplex-v2-pvad-design.md` — **设计定稿;真机前置条件大体满足(2026-06-27),转下一步正式实现**:全双工 v2 pVAD 真·边听边说(SpeakerGate 接缝 + 主人显式注册 + pVAD 预门控 subsume v1 回声处理)。真机已确认这是 barge-in 真打断正解(缺 AEC、能量门控分不清回声/真插话;软件 AEC 在 Electron 失效)。
 - `superpowers/specs/2026-06-26-voice-traceability-design.md` — **已实现**:语音管线可追溯性(VoiceTraceEvent + voiceObserver + `CHAT_A_VOICE_TRACE` 实时 `[vtrace]` 日志 + SqliteVoiceTraceSink)。
 - `chat-a-final-design.md` / `real-time-agent-design.md` / `chat-a-architecture-design.md` — 历史/细节附录(被本文取代,保留备查)。
