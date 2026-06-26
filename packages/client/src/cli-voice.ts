@@ -44,7 +44,15 @@ import {
   type VadDetector,
   type EchoGuardConfig,
 } from '@chat-a/voice-detect';
-import type { LightVoiceBus, SpeakStateView, OmniAudioPort, VoicePath, StreamingSttPort } from '@chat-a/runtime';
+import { DEFAULT_BACKCHANNEL_CONFIG } from '@chat-a/runtime';
+import type {
+  LightVoiceBus,
+  SpeakStateView,
+  OmniAudioPort,
+  VoicePath,
+  StreamingSttPort,
+  BackchannelConfig,
+} from '@chat-a/runtime';
 import type { AudioDevice } from './audio/audio-device';
 import { FakeAudioDevice } from './audio/fake-audio-device';
 import { NodeAudioDevice } from './audio/node-audio-device';
@@ -116,6 +124,29 @@ export function loadEchoGuardConfig(env: NodeJS.ProcessEnv): EchoGuardConfig | u
   if (off) return undefined; // 显式关 → 不注入 → 逐字现状
   // 缺省/其它值 → 语音模式默认开启(enabled 翻 true)+ 真去抖(confirmFrames 提到 3),其余沿用安全默认。
   return { ...DEFAULT_ECHO_GUARD_CONFIG, enabled: true, confirmFrames: 3 };
+}
+
+/**
+ * 解析 backchannel(附和)装配档(全双工 v1,**可选、纯加法**,仅 stt-stream 路生效)。
+ *   - `CHAT_A_BACKCHANNEL=off` → 返回 undefined(显式关 → 不注入 → 逐字现状,不附和)。
+ *   - 否则按 `attention_mode` 映射 `cooldownMs`(密度旋钮):
+ *       - `focus`(用户让她专注)→ undefined(不附和);
+ *       - `companion`(黏人/高警觉)→ cooldown 4000(更频繁);
+ *       - `balanced` / 缺省 / 其它 → cooldown 7000(较克制)。
+ *   - 其余字段(`pauseMs`/`minSpeechMs`/`clipTexts`)沿用 {@link DEFAULT_BACKCHANNEL_CONFIG}
+ *     (v1 不加专属 env 旋钮,避免过度工程)。
+ *
+ * **env 键说明**:`attention_mode`(`interaction_dials`,§6)在本项目尚无「从 env 读取」的现状
+ * (runtime 侧 attention 闸的 mode 由装配钩子注入,client 未暴露 env 旋钮),故此处以
+ * `CHAT_A_ATTENTION_MODE` 作为**新键**接入(companion/balanced/focus)。后续若 attention_mode
+ * 统一从 env/voice 配置读,可改为复用同一来源(本函数仅消费已解析的档值)。
+ */
+export function loadBackchannelConfig(env: NodeJS.ProcessEnv): BackchannelConfig | undefined {
+  if ((env['CHAT_A_BACKCHANNEL'] ?? '').trim().toLowerCase() === 'off') return undefined;
+  const mode = (env['CHAT_A_ATTENTION_MODE'] ?? '').trim().toLowerCase();
+  if (mode === 'focus') return undefined; // 专注:不附和
+  const cooldownMs = mode === 'companion' ? 4000 : 7000; // companion 频繁;balanced/缺省较克制
+  return { ...DEFAULT_BACKCHANNEL_CONFIG, cooldownMs };
 }
 
 /**
@@ -548,6 +579,10 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
   // EchoGuard(§4 软件侧自打断防护):语音模式默认开;CHAT_A_ECHO_GUARD=off 显式关(回落逐字现状)。
   const echoGuard = loadEchoGuardConfig(env);
 
+  // backchannel(全双工 v1):按 attention_mode 映射 cooldown(off/focus → undefined → 不注入)。
+  // 调一次存变量(避免在 loopDeps 注入处重复调);仅 stt-stream 路实际生效。
+  const backchannel = loadBackchannelConfig(env);
+
   const handle = runVoiceLoop({
     device,
     bus: deps.bus,
@@ -580,7 +615,14 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
         : {}),
       // 连续流式路(§全程流式):注入流式 ASR 端口 + 路径开关。与 omni 注入**互斥**
       //(CHAT_A_VOICE_PATH 单值决定,omni 与 streamingStt 不会同时构造出)。未构造出 → 不带键 → 批式现状。
-      ...(streamingStt !== undefined ? { streamingStt, voicePath: 'stt-stream' as const } : {}),
+      // backchannel(全双工 v1):仅 stt-stream 路注入,按 attention_mode 映射 cooldown(off/focus → 不注入 → 逐字现状)。
+      ...(streamingStt !== undefined
+        ? {
+            streamingStt,
+            voicePath: 'stt-stream' as const,
+            ...(backchannel ? { backchannel } : {}),
+          }
+        : {}),
     },
   });
 
