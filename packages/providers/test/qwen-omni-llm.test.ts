@@ -270,3 +270,18 @@ describe('QwenOmniLlm / 错误降级', () => {
     await expect(run).rejects.toThrow(/qwen-omni WS 意外关闭/);
   });
 });
+
+// 注:QwenOmniLlm 已在文件顶部从 '../src/index' 导入,此处直接复用(不重复 import)。
+describe('QwenOmniLlm 采样率/回合模式解耦', () => {
+  const base = { id: 'qwen-omni', model: 'qwen3.5-omni-flash-realtime', apiKey: 'k', baseURL: 'wss://x' };
+  it('默认 inputSampleRate=16000', () => {
+    expect(new QwenOmniLlm(base).inputSampleRate).toBe(16000);
+  });
+  it('inputSampleRate 可经选项覆盖', () => {
+    expect(new QwenOmniLlm({ ...base, inputSampleRate: 24000 }).inputSampleRate).toBe(24000);
+  });
+  it('turnDetection 接受 semantic_vad（类型层）', () => {
+    const llm = new QwenOmniLlm({ ...base, turnDetection: 'semantic_vad' });
+    expect(llm).toBeTruthy();
+  });
+});

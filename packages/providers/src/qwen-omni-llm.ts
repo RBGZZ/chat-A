@@ -58,8 +58,9 @@ export type OmniWsFactory = (url: string, opts: { readonly headers: Record<strin
  *   VoiceLoop endpointing 已切好的**有限音频段**——确定性触发,不与服务端 VAD 双重判定、无额外静默延迟。
  * - `server_vad`:turn_detection={type:'server_vad'},由服务端 VAD 自动判端点触发(连续流场景);
  *   此模式**不发**手动 commit/response.create(否则与自动触发冲突)。
+ * - `semantic_vad`:服务端语义 VAD(qwen3.5-omni 官方推荐),按语义判端点;与 server_vad 一样不发手动 commit。
  */
-export type OmniTurnDetection = 'manual' | 'server_vad';
+export type OmniTurnDetection = 'manual' | 'server_vad' | 'semantic_vad';
 
 export interface QwenOmniLlmOptions {
   /** provider 标识(如 'qwen-omni')——仅供 trace/日志(§8.1)。 */
@@ -73,6 +74,8 @@ export interface QwenOmniLlmOptions {
   readonly instructions?: string;
   /** 回合切分模式默认值(缺省 'manual');每次 respondToAudio 可覆盖。 */
   readonly turnDetection?: OmniTurnDetection;
+  /** 模型要求的输入采样率(Hz);缺省 16000(Qwen-Omni realtime 约定)。供装配层解耦采集率。 */
+  readonly inputSampleRate?: number;
   /** WS 工厂(可注入;缺省用 `ws` 包,惰性 import 避免装配期触网)。 */
   readonly wsFactory?: OmniWsFactory;
 }
@@ -96,6 +99,8 @@ const defaultWsFactory: OmniWsFactory = (url, opts) => {
 export class QwenOmniLlm {
   readonly id: string;
   readonly model: string;
+  /** 模型要求的输入采样率(Hz);满足 OmniAudioPort.inputSampleRate。缺省 16000。 */
+  readonly inputSampleRate: number;
   readonly #apiKey: string;
   readonly #baseURL: string;
   readonly #instructions: string | undefined;
@@ -110,6 +115,7 @@ export class QwenOmniLlm {
     this.#baseURL = opts.baseURL.replace(/\/+$/, '');
     this.#instructions = opts.instructions;
     this.#turnDetection = opts.turnDetection ?? 'manual';
+    this.inputSampleRate = opts.inputSampleRate ?? 16000;
     this.#wsFactory = opts.wsFactory ?? defaultWsFactory;
   }
 
@@ -213,7 +219,9 @@ export class QwenOmniLlm {
   ): void {
     switch (msg.type) {
       case 'session.created': {
-        // 配置会话:只要文本输出 + PCM 输入;turn_detection 按模式(manual=null / server_vad=自动)。
+        // 配置会话:只要文本输出 + PCM 输入;turn_detection 按模式
+        // (manual=null / server_vad|semantic_vad=服务端自动端点)。
+        const serverManaged = payload.turnDetection === 'server_vad' || payload.turnDetection === 'semantic_vad';
         ws.send(
           JSON.stringify({
             type: 'session.update',
@@ -221,7 +229,7 @@ export class QwenOmniLlm {
               modalities: ['text'],
               input_audio_format: 'pcm',
               ...(payload.instructions !== undefined ? { instructions: payload.instructions } : {}),
-              turn_detection: payload.turnDetection === 'server_vad' ? { type: 'server_vad' } : null,
+              turn_detection: serverManaged ? { type: payload.turnDetection } : null,
             },
           }),
         );
@@ -258,7 +266,7 @@ export class QwenOmniLlm {
   /**
    * 流式把 PCM 块经 input_audio_buffer.append 送出。
    * manual 模式:送完发 commit + response.create 触发合成(适配有限音频段)。
-   * server_vad 模式:不发手动触发(服务端 VAD 自动判端点,避免重复/冲突响应)。
+   * server_vad / semantic_vad 模式:不发手动触发(服务端 VAD 自动判端点,避免重复/冲突响应)。
    */
   async #pumpAudio(
     audio: AsyncIterable<PcmChunk>,
@@ -266,12 +274,13 @@ export class QwenOmniLlm {
     queue: EventQueue<OmniEvent>,
     turnDetection: OmniTurnDetection,
   ): Promise<void> {
+    const serverManaged = turnDetection === 'server_vad' || turnDetection === 'semantic_vad';
     try {
       for await (const chunk of audio) {
         if (queue.ended) return;
         ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: pcmChunkToBase64(chunk) }));
       }
-      if (turnDetection === 'manual') {
+      if (!serverManaged) {
         ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
         ws.send(JSON.stringify({ type: 'response.create' }));
       }
