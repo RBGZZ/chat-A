@@ -406,6 +406,17 @@ $setOutputLang.addEventListener('change', () => {
 // —— 设置面板可写项:音频设备(麦克风/扬声器)—— 跟随语种下拉同款:启动拉清单填充,变更即写回 .env.local。
 const $audioInput = document.getElementById('audio-input-select') as HTMLSelectElement;
 const $audioOutput = document.getElementById('audio-output-select') as HTMLSelectElement;
+const $audioInputStatus = document.getElementById('audio-input-status') as HTMLElement | null;
+const $audioOutputStatus = document.getElementById('audio-output-status') as HTMLElement | null;
+
+/** 「系统默认」占位 option 的哨兵值(空串):未选过/保存的设备已拔出时用,change 时跳过提交。 */
+const AUDIO_DEFAULT_VALUE = '';
+
+/** 设备下拉变更状态反馈(对齐语种下拉的 $setOutputLangStatus 做法)。 */
+function setAudioStatus(kind: 'input' | 'output', text: string): void {
+  const el = kind === 'input' ? $audioInputStatus : $audioOutputStatus;
+  if (el !== null) el.textContent = text;
+}
 
 /** 用设备清单填充一个下拉框,按设备名回填当前已选项。 */
 function fillAudioSelect(
@@ -415,12 +426,25 @@ function fillAudioSelect(
 ): void {
   if (el === null) return;
   el.replaceChildren();
+  let matched = false;
   for (const o of opts) {
     const opt = document.createElement('option');
     opt.value = JSON.stringify({ name: o.name, hostApi: o.hostApi });
     opt.textContent = `${o.name}（${o.hostApi}，${o.sampleRate}Hz）`;
-    if (o.name === currentName) opt.selected = true;
+    if (o.name === currentName) {
+      opt.selected = true;
+      matched = true;
+    }
     el.appendChild(opt);
+  }
+  // 没有任何真实设备命中当前已选名(currentName 为空、或保存的设备已拔出):在最前插入「系统默认」
+  // 占位并选中,让 UI 如实显示"当前用系统默认",而非谎称选了第一个真实设备(保证 显示=实际生效)。
+  if (!matched) {
+    const ph = document.createElement('option');
+    ph.value = AUDIO_DEFAULT_VALUE; // 哨兵:空串=系统默认。
+    ph.textContent = '系统默认';
+    el.prepend(ph);
+    ph.selected = true;
   }
 }
 
@@ -435,8 +459,17 @@ async function initAudioDevicePanel(): Promise<void> {
 function wireAudioDeviceSelect(): void {
   const onChange = (kind: 'input' | 'output') => (e: Event): void => {
     const raw = (e.target as HTMLSelectElement).value;
+    // 选中「系统默认」占位:不提交真实设备(保持系统默认语义),只给一句反馈。
+    if (raw === AUDIO_DEFAULT_VALUE) {
+      setAudioStatus(kind, '已用系统默认');
+      return;
+    }
     const { name, hostApi } = JSON.parse(raw) as { name: string; hostApi: string };
-    void xiaoxue.audioSelectDevice({ kind, name, hostApi });
+    setAudioStatus(kind, '正在保存…');
+    void xiaoxue
+      .audioSelectDevice({ kind, name, hostApi })
+      .then((r) => setAudioStatus(kind, r.ok ? '已保存' : '保存失败'))
+      .catch(() => setAudioStatus(kind, '保存失败'));
   };
   $audioInput?.addEventListener('change', onChange('input'));
   $audioOutput?.addEventListener('change', onChange('output'));
