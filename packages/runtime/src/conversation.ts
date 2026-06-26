@@ -52,6 +52,14 @@ export interface ConversationDeps {
   readonly personaSeed?: PersonaSeed;
   /** 情绪评估接缝(§6.1);默认确定性实现。 */
   readonly appraiser?: Appraiser;
+  /**
+   * 情绪评估旁路开关(§3.2 非阻塞硬约束,**默认 false = 现状逐字不变**)。
+   * 开启后:回合收尾的 `persona.advance` 不再同步 await LLM 情绪评估——那次 ~0.5-0.9s 的网络调用 detach
+   * 到 PersonaEngine 内部后台串行链(有界超时、失败降级),就绪后再并入 PAD(情绪只影响下一轮、最终一致),
+   * 故 `finalizeTurn → send resolve` 关键路径不被它拖住。由装配层在 `CHAT_A_APPRAISER=llm` 时置 true。
+   * 确定性 default(关键词)评估极快、无需旁路,保持同步(false)。
+   */
+  readonly backgroundAppraisal?: boolean;
   /** 人格状态持久化(§6.1);默认进程内,配置可换 SQLite KV。 */
   readonly personaStore?: PersonaStore;
   /**
@@ -334,6 +342,8 @@ export class Conversation {
       ...(deps.oceanEvolver ? { oceanEvolver: deps.oceanEvolver } : {}),
       // 人格内核可调参数(冷启动 + 情绪阈值);缺省 → PersonaEngine 内回落 DEFAULT_PERSONA_CONFIG(现值)。
       ...(deps.personaConfig ? { config: deps.personaConfig } : {}),
+      // 情绪评估非阻塞旁路(§3.2):仅在装配层显式开启时 detach LLM 评估到后台;缺省 false = 现状同步。
+      ...(deps.backgroundAppraisal ? { backgroundAppraisal: true } : {}),
     });
     // 注入了抽取器 → 用抽取的要点;否则保持 naive "存用户原话"(默认行为不变)。
     const extractEnabled = deps.memoryExtractor !== undefined;

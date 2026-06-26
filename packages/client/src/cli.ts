@@ -139,7 +139,8 @@ async function main(): Promise<void> {
       sessionId: sid,
       // §4.1:输出语种非空时注入"用<目标语种>回复"(语种解耦不限语音,文字路同样生效);缺省不注入(逐字现状)。
       ...(voiceProfile.outputLang ? { outputLang: voiceProfile.outputLang } : {}),
-      ...(appraiser ? { appraiser } : {}),
+      // appraiser=llm:同时开非阻塞旁路,使 ~0.5-0.9s 的 LLM 情绪评估不挂在回合关键路径(§3.2 非阻塞硬约束)。
+      ...(appraiser ? { appraiser, backgroundAppraisal: true } : {}),
       ...(memoryExtractor ? { memoryExtractor } : {}),
       ...(stanceDetector ? { stanceDetector } : {}),
       ...(oceanEvolver ? { oceanEvolver } : {}),

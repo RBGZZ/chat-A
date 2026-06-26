@@ -71,6 +71,22 @@ export interface PersonaEngineOptions {
   readonly oceanEvolver?: OceanEvolver;
   /** 注入当前时钟(测试可控);默认 `() => new Date().toISOString()`,用于演化快照时间戳。 */
   readonly now?: () => string;
+  /**
+   * 情绪评估旁路开关(§3.2 优雅降级 / 非阻塞硬约束,**默认 false = 现状逐字不变**)。
+   *
+   * 缺省(false):`advance` 同步 `await` appraiser、并入 PAD 后才返回——确定性 DefaultAppraiser 极快、零代价。
+   * 开启(true,配 `CHAT_A_APPRAISER=llm`):LLM 评估那次 ~0.5-0.9s 的网络调用**绝不**挂在回合关键路径
+   * (`finalizeTurn → send resolve`)上。`advance` 只同步推进确定性骨架(turn / OCEAN 演化 / 持久化),
+   * 把 LLM 评估**detach 到后台串行链**(有界超时、失败/超时吞掉降级);评估就绪后再并入 PAD——情绪只影响
+   * **下一轮**、最终一致(镜像写侧 embedding 与向量召回的非阻塞旁路范式)。
+   */
+  readonly backgroundAppraisal?: boolean;
+  /**
+   * 后台情绪评估的有界等待预算(ms;仅 `backgroundAppraisal=true` 时生效)。默认 4000;
+   * 超时即丢弃本轮评估(不并入 PAD、不抛),避免单次卡死的 LLM 调用让后台链无限堆积(§3.2)。
+   * 设 <=0 = 不设超时(纯靠 appraiser 内部容错)。
+   */
+  readonly appraisalBudgetMs?: number;
 }
 
 /**
@@ -84,6 +100,13 @@ export class PersonaEngine {
   readonly #store: PersonaStore;
   readonly #oceanEvolver: OceanEvolver | undefined;
   readonly #now: () => string;
+  readonly #backgroundAppraisal: boolean;
+  readonly #appraisalBudgetMs: number;
+  /**
+   * 后台情绪评估串行链(§3.2 非阻塞旁路):每次 detach 的 LLM 评估接在链尾,确保**串行**应用——
+   * 多轮快速连续时按序并入 PAD、读最新快照,杜绝乱序覆盖 / 丢更新。失败/超时在链内吞掉,链恒不 reject。
+   */
+  #appraisalChain: Promise<void> = Promise.resolve();
   /** 本演化周期累积的用户输入(进程内窗口;触发演化后清空,不持久化)。 */
   #recentUserTexts: string[] = [];
   #snapshot: PersonaSnapshot;
@@ -95,6 +118,8 @@ export class PersonaEngine {
     this.#store = opts.store ?? new InMemoryPersonaStore();
     this.#oceanEvolver = opts.oceanEvolver;
     this.#now = opts.now ?? (() => new Date().toISOString());
+    this.#backgroundAppraisal = opts.backgroundAppraisal ?? false;
+    this.#appraisalBudgetMs = opts.appraisalBudgetMs ?? 4000;
     const loaded = this.#store.load();
     this.#snapshot = loaded ?? {
       ocean: opts.seed.ocean,
@@ -168,6 +193,24 @@ export class PersonaEngine {
 
     // 快变量:即时 PAD 弹簧步进(基线用(可能已演化的)OCEAN)。
     const baseline = oceanToPadBaseline(ocean, dials);
+
+    // 非阻塞旁路(§3.2,backgroundAppraisal=true,配 CHAT_A_APPRAISER=llm):
+    // 确定性骨架(turn / OCEAN 演化 / 持久化)**同步落定**——杜绝竞态/丢更新;
+    // 把 ~0.5-0.9s 的 LLM 评估 detach 到后台串行链(有界超时、失败吞掉降级),就绪后再并入 PAD
+    // (情绪只影响下一轮、最终一致)。advance 立即返回 → 回合关键路径不被 LLM 拖住。
+    if (this.#backgroundAppraisal) {
+      this.#snapshot = {
+        ocean,
+        pad: this.#snapshot.pad, // PAD 暂不动,待后台评估就绪再并入
+        turn,
+        ...(history !== undefined ? { history } : {}),
+      };
+      this.#store.save(this.#snapshot);
+      this.#scheduleAppraisal(userText, baseline, turn, opts?.prosodyEmotion);
+      return;
+    }
+
+    // 默认(blocking):同步 await 评估并入 PAD,与现状逐字一致(确定性 appraiser 极快)。
     const textPull = await this.#appraiser.appraise({ userText, pad: this.#snapshot.pad, turn });
     // §7#5:若有语音 prosody 情绪,把它的 PAD 拉力按权重并入文本拉力(合并为单一 pull,单次步进);
     // 无 / undefined / neutral / 未知 → mergeProsodyPull 返回 textPull 原物,与现状逐字一致(纯加法)。
@@ -181,6 +224,67 @@ export class PersonaEngine {
       ...(history !== undefined ? { history } : {}),
     };
     this.#store.save(this.#snapshot);
+  }
+
+  /**
+   * 等待所有已 detach 的后台情绪评估结算(主要供测试 / 优雅关停)。链本身恒不 reject(失败/超时已内吞),
+   * 故此方法绝不抛。注意:只覆盖**调用时刻已入链**的评估,之后新 advance 的评估不在等待范围内。
+   */
+  async whenIdle(): Promise<void> {
+    await this.#appraisalChain;
+  }
+
+  /**
+   * 把一次 LLM 情绪评估接到后台串行链尾(§3.2 非阻塞旁路)。串行保证:多轮快速连续时按序并入、
+   * 每次读**最新**快照,避免乱序覆盖。任何失败/超时在 `#applyBackgroundAppraisal` 内吞掉,
+   * 这里再兜一层 `.catch` 使链永不变 rejected(不污染后续 / 不产生 unhandled rejection)。
+   */
+  #scheduleAppraisal(userText: string, baseline: Pad, turn: number, prosodyEmotion?: SttEmotionLike): void {
+    this.#appraisalChain = this.#appraisalChain
+      .then(() => this.#applyBackgroundAppraisal(userText, baseline, turn, prosodyEmotion))
+      .catch(() => {
+        /* 兜底:绝不让后台链 reject(降级 §3.2) */
+      });
+  }
+
+  /**
+   * 后台评估并入 PAD(§3.2):有界超时跑一次 appraise → 并入语音 prosody → 单次 stepPad → 写回最新快照。
+   * 读写 `this.#snapshot.pad` 取**当前**值(串行链内无并发),故对多轮累积安全;turn/baseline 用评估所属
+   * 那一轮的捕获值(语义归属正确)。超时/异常一律 return(不并入、不抛、不打断,情绪本轮不更新)。
+   */
+  async #applyBackgroundAppraisal(userText: string, baseline: Pad, turn: number, prosodyEmotion?: SttEmotionLike): Promise<void> {
+    let textPull: PadPull;
+    try {
+      textPull = await this.#appraiseWithBudget({ userText, pad: this.#snapshot.pad, turn });
+    } catch {
+      return; // 超时/失败 → 跳过本轮并入(降级),回合早已继续。
+    }
+    const pull = mergeProsodyPull(textPull, prosodyEmotion);
+    const pad = stepPad({ pad: this.#snapshot.pad, pull, baseline, dials: this.#seed.dials, turn, config: this.#config });
+    this.#snapshot = { ...this.#snapshot, pad };
+    this.#store.save(this.#snapshot);
+  }
+
+  /**
+   * 有界超时跑一次 appraise(镜像 QueryEmbedder 的超时预算范式)。预算 <=0 = 不设超时。
+   * appraise 接缝无 AbortSignal,无法真取消,故对底层 promise 挂 noop catch 防其晚到的 rejection 变 unhandled;
+   * 超时即让本次 race 以 reject 收场,交由调用方降级。
+   */
+  async #appraiseWithBudget(ctx: { userText: string; pad: Pad; turn: number }): Promise<PadPull> {
+    const p = this.#appraiser.appraise(ctx);
+    if (this.#appraisalBudgetMs <= 0) return p;
+    p.catch(() => {
+      /* 防晚到的 rejection 成 unhandled(超时分支已不再 await 它) */
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('appraisal timeout')), this.#appraisalBudgetMs);
+    });
+    try {
+      return await Promise.race([p, timeout]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   /**

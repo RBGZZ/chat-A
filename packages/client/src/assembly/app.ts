@@ -248,7 +248,8 @@ export function assembleApp(opts: AssembleAppOptions = {}): AppHandle {
       personaStore,
       personaConfig,
       sessionId: sid,
-      ...(appraiser ? { appraiser } : {}),
+      // appraiser=llm:同时开非阻塞旁路,使 ~0.5-0.9s 的 LLM 情绪评估不挂在回合关键路径(§3.2 非阻塞硬约束)。
+      ...(appraiser ? { appraiser, backgroundAppraisal: true } : {}),
       // §4.1:回复语种。音频优先态=合成语种(回复直接喂 TTS、免译阻塞);否则=显示语种(逐字现状)。
       ...(replyLang.length > 0 ? { outputLang: replyLang } : {}),
     });
