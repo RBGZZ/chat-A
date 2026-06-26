@@ -23,6 +23,9 @@ import {
   loadTtsConfig,
   QwenOmniLlm,
   QWEN_DASHSCOPE_REALTIME_URL,
+  QwenAsrRealtimeStt,
+  QWEN_ASR_REALTIME_URL,
+  DEFAULT_QWEN_ASR_REALTIME_MODEL,
 } from '@chat-a/providers';
 import type { TtsOptions } from '@chat-a/providers';
 import type { MemoryStore } from '@chat-a/memory';
@@ -41,7 +44,7 @@ import {
   type VadDetector,
   type EchoGuardConfig,
 } from '@chat-a/voice-detect';
-import type { LightVoiceBus, SpeakStateView, OmniAudioPort, VoicePath } from '@chat-a/runtime';
+import type { LightVoiceBus, SpeakStateView, OmniAudioPort, VoicePath, StreamingSttPort } from '@chat-a/runtime';
 import type { AudioDevice } from './audio/audio-device';
 import { FakeAudioDevice } from './audio/fake-audio-device';
 import { NodeAudioDevice } from './audio/node-audio-device';
@@ -75,13 +78,19 @@ export function loadTransportKind(env: NodeJS.ProcessEnv): TransportKind {
 export const DEFAULT_OMNI_MODEL = 'qwen3.5-omni-flash-realtime';
 
 /**
- * 解析语音路径档(§4 双路径,行为即配置):`CHAT_A_VOICE_PATH=stt|omni`,**缺省 `stt`**(逐字不变)。
- *   - `stt`(缺省/空/其它):现有 VAD→EOU→STT→LLM→TTS 路径。
+ * 解析语音路径档(§4 多路径,行为即配置):`CHAT_A_VOICE_PATH=stt|omni|stt-stream`,**缺省 `stt`**(逐字不变)。
+ *   - `stt`(缺省/空/其它):现有 VAD→EOU→STT→LLM→TTS 批式路径。
  *   - `omni`:audio-in 直路(path B,§7#5 prosody)——尝试构造 omni 端口注入 VoiceLoop;
  *     构造/key 缺失失败则回落 STT(见 {@link createOmniAudioPort})。
+ *   - `stt-stream`:连续流式 STT 路(全程流式)——尝试构造流式 ASR 端口注入 VoiceLoop;
+ *     构造/key 缺失失败则回落 STT(见 {@link createStreamingSttPort})。
+ * 三者互斥(单值决定);omni 与 stt-stream 不会同时生效。
  */
 export function loadVoicePath(env: NodeJS.ProcessEnv): VoicePath {
-  return (env['CHAT_A_VOICE_PATH'] ?? '').toLowerCase() === 'omni' ? 'omni' : 'stt';
+  const v = (env['CHAT_A_VOICE_PATH'] ?? '').toLowerCase();
+  if (v === 'omni') return 'omni';
+  if (v === 'stt-stream') return 'stt-stream';
+  return 'stt';
 }
 
 /**
@@ -144,6 +153,38 @@ export function createOmniAudioPort(env: NodeJS.ProcessEnv): OmniAudioPort | und
   } catch (err) {
     stdout.write(
       `[语音] omni audio-in 端口构造失败,已回落 STT 路径:${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return undefined;
+  }
+}
+
+/**
+ * 按 env 构造连续流式 STT 端口(path stt-stream):直接构造 {@link QwenAsrRealtimeStt}
+ * (realtime WS,服务端 VAD 连续分句),其 `openSession` 形态满足 `StreamingSttPort`,可直接注入 VoiceLoop。
+ *   - key 读 `CHAT_A_DASHSCOPE_API_KEY`;缺失 → 打印明确中文提示,返回 undefined(回落批式 STT,绝不崩)。
+ *   - model 读 `CHAT_A_STT_REALTIME_MODEL`(缺省 {@link DEFAULT_QWEN_ASR_REALTIME_MODEL});
+ *     baseURL 读 `CHAT_A_STT_REALTIME_BASE_URL`(缺省 {@link QWEN_ASR_REALTIME_URL})。
+ *   - 构造抛错 → catch、打印中文提示、返回 undefined(回落批式 STT)。
+ * 惰性连接:构造不触网(首次 openSession 才建 WS),装配安全。范式对齐 {@link createOmniAudioPort}。
+ */
+export function createStreamingSttPort(env: NodeJS.ProcessEnv): StreamingSttPort | undefined {
+  const apiKey = env['CHAT_A_DASHSCOPE_API_KEY'];
+  if (apiKey === undefined || apiKey.length === 0) {
+    stdout.write(
+      '[语音] CHAT_A_VOICE_PATH=stt-stream 但缺 CHAT_A_DASHSCOPE_API_KEY,已回落批式 STT 路径(请设置后重试)\n',
+    );
+    return undefined;
+  }
+  try {
+    return new QwenAsrRealtimeStt({
+      id: 'qwen-asr-rt',
+      model: env['CHAT_A_STT_REALTIME_MODEL'] ?? DEFAULT_QWEN_ASR_REALTIME_MODEL,
+      apiKey,
+      baseURL: env['CHAT_A_STT_REALTIME_BASE_URL'] ?? QWEN_ASR_REALTIME_URL,
+    });
+  } catch (err) {
+    stdout.write(
+      `[语音] 流式 ASR 端口构造失败,已回落批式 STT:${err instanceof Error ? err.message : String(err)}\n`,
     );
     return undefined;
   }
@@ -472,13 +513,21 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
   // 端口构造/key 缺失失败 → createOmniAudioPort 返回 undefined(已打印提示),此时即便选 omni
   // 也回落 STT(VoiceLoop 内部双保险:omni 端口为空则不走直路)。
   // 须在 createAudioDevice 前算好(能力驱动采集率要据生效路径读 stt/omni 的声明采样率)。
-  const wantOmni = loadVoicePath(env) === 'omni';
+  const voicePath = loadVoicePath(env);
+  const wantOmni = voicePath === 'omni';
   const omni = wantOmni ? createOmniAudioPort(env) : undefined;
-  // 实际生效路径:仅当 omni 端口真构造出才标 omni,否则 stt(供状态行如实反映回落)。
-  const effectivePath: VoicePath = omni !== undefined ? 'omni' : 'stt';
+  // 连续流式路(§全程流式):与 omni 互斥——CHAT_A_VOICE_PATH 单值决定,二者不会同时构造。
+  // 端口构造/key 缺失失败 → createStreamingSttPort 返回 undefined(已打印提示),回落批式 STT。
+  const wantStream = voicePath === 'stt-stream';
+  const streamingStt = wantStream ? createStreamingSttPort(env) : undefined;
+  // 实际生效路径:omni 端口真构造出 → 'omni';流式端口真构造出 → 'stt-stream';否则回落 'stt'
+  //(供状态行如实反映回落)。omni 与 streamingStt 互斥,故顺序判定无歧义。
+  const effectivePath: VoicePath =
+    omni !== undefined ? 'omni' : streamingStt !== undefined ? 'stt-stream' : 'stt';
 
   // 能力驱动采集率:据生效路径读 STT capabilities.sampleRate / omni inputSampleRate(缺省 16000)。
-  const requiredInputRate = resolveRequiredInputRate(stt, omni, effectivePath);
+  // stt-stream 走 STT 分支(QwenAsrRealtimeStt 固定 16k,与批式 STT 同口径)。
+  const requiredInputRate = resolveRequiredInputRate(stt, omni, effectivePath === 'omni' ? 'omni' : 'stt');
 
   // 设备:真设备装不上则回落 Fake(明确提示)。能力驱动采集率 + 可选选择壳经 deps.audioSelect 注入。
   let device: AudioDevice;
@@ -529,6 +578,9 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
             ...(deps.advanceProsody ? { advanceProsody: deps.advanceProsody } : {}),
           }
         : {}),
+      // 连续流式路(§全程流式):注入流式 ASR 端口 + 路径开关。与 omni 注入**互斥**
+      //(CHAT_A_VOICE_PATH 单值决定,omni 与 streamingStt 不会同时构造出)。未构造出 → 不带键 → 批式现状。
+      ...(streamingStt !== undefined ? { streamingStt, voicePath: 'stt-stream' as const } : {}),
     },
   });
 
