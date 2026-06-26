@@ -10,6 +10,9 @@ desktop.ini
 *.swo
 *~
 
+# CodeGraph 本地索引(不提交,indexing 为本地决策)
+.codegraph/
+
 # Node / build output
 node_modules/
 dist/
