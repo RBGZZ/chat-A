@@ -63,7 +63,7 @@ export function loadTransportKind(env: NodeJS.ProcessEnv): TransportKind {
 }
 
 /** omni audio-in 直路默认 model id(承 provider design §0:目录可用 realtime id,无 .5,可经 env 覆盖)。 */
-export const DEFAULT_OMNI_MODEL = 'qwen3-omni-flash-realtime';
+export const DEFAULT_OMNI_MODEL = 'qwen3.5-omni-flash-realtime';
 
 /**
  * 解析语音路径档(§4 双路径,行为即配置):`CHAT_A_VOICE_PATH=stt|omni`,**缺省 `stt`**(逐字不变)。
@@ -119,11 +119,18 @@ export function createOmniAudioPort(env: NodeJS.ProcessEnv): OmniAudioPort | und
     return undefined;
   }
   try {
+    const rawRate = (env['CHAT_A_OMNI_SAMPLE_RATE'] ?? '').trim();
+    const inputSampleRate = rawRate.length > 0 && Number.isFinite(Number(rawRate)) ? Number(rawRate) : undefined;
+    const td = (env['CHAT_A_OMNI_TURN_DETECTION'] ?? '').trim().toLowerCase();
+    const turnDetection =
+      td === 'manual' || td === 'server_vad' || td === 'semantic_vad' ? (td as 'manual' | 'server_vad' | 'semantic_vad') : 'semantic_vad';
     return new QwenOmniLlm({
       id: 'qwen-omni',
       model: env['CHAT_A_OMNI_MODEL'] ?? DEFAULT_OMNI_MODEL,
       apiKey,
       baseURL: env['CHAT_A_OMNI_BASE_URL'] ?? QWEN_DASHSCOPE_REALTIME_URL,
+      turnDetection,
+      ...(inputSampleRate !== undefined ? { inputSampleRate } : {}),
     });
   } catch (err) {
     stdout.write(
