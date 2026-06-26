@@ -24,6 +24,7 @@ import type { AudioFrame, AudioTransport, Unsubscribe } from '@chat-a/protocol';
 import { makeBusEvent, makeDataFrame, type PcmFrame } from '@chat-a/protocol';
 import type {
   VadDetector,
+  VadFrameResult,
   TurnDetector,
   EchoGuardConfig,
   EchoGuardDecision,
@@ -196,6 +197,13 @@ export interface VoiceLoopDeps {
    */
   readonly omni?: OmniAudioPort;
   /**
+   * 连续流式 STT 端口（path stt-stream，**可选、纯加法**）。不注入(缺省)→ 不走连续路,逐字现状。
+   * 注入 **且** `voicePath==='stt-stream'` → 开机开一条长连接会话,listening 期麦帧持续 pushAudio,
+   * 服务端 VAD 分句:onFinal → 走现有 #send+TTS 回合(emotion 经 prosody 并入 PAD);speaking 期暂停推流,
+   * 本地 EchoGuard/能量 VAD 仍管打断。WS 失败 → onError 降级回落批式 stt,绝不崩(§3.2)。
+   */
+  readonly streamingStt?: StreamingSttPort;
+  /**
    * omni 直路系统提示组装接缝（path B，§5.4 / §6 人格，**可选**、纯加法）。
    * 不注入（缺省）→ omni 路以**空 opts** 调 `respondToAudio`，与本切片前**逐字一致**（无人设/记忆/语气）。
    * 注入后 → omni 回合在调 `respondToAudio` 前先 `await` 它取得组装好的系统提示（persona 身份 + 记忆 +
@@ -304,6 +312,15 @@ export class VoiceLoop {
    */
   readonly #omni: OmniAudioPort | undefined;
   /**
+   * 连续流式 STT 端口（path stt-stream）；未注入 → undefined → 不走连续路（§全程流式）。
+   * 仅在 `#voicePath==='stt-stream'` 且本字段非空且未降级时,`start()` 开会话、`#onAudio` 持续推流。
+   */
+  readonly #streamingStt: StreamingSttPort | undefined;
+  /** 当前流式会话（开机后开,stop/降级时关）；null = 未开/已关。 */
+  #streamSession: StreamingSttSession | null = null;
+  /** onError 后置 true:本轮退回批式 stt(本地 VAD+endpointing);`start()` 重置以给新一轮机会。 */
+  #streamDegraded = false;
+  /**
    * omni 直路系统提示组装接缝（path B，§5.4/§6）；未注入 → undefined → omni 路以空 opts(逐字现状)。
    * 注入后在 `#startThinkingOmni` 调 `respondToAudio` 前 `await` 它得 instructions(失败/空→退回空 opts)。
    */
@@ -374,6 +391,7 @@ export class VoiceLoop {
           })
         : undefined;
     this.#omni = deps.omni;
+    this.#streamingStt = deps.streamingStt;
     this.#composeOmniInstructions = deps.composeOmniInstructions;
     this.#advanceProsody = deps.advanceProsody;
     this.#voicePath = deps.voicePath ?? 'stt';
@@ -448,11 +466,69 @@ export class VoiceLoop {
     }
   }
 
+  /**
+   * 是否走连续流式路（path stt-stream）：选了 stt-stream + 注入了端口 + 本轮未降级。
+   * 任一不满足 → false → `#onAudio` 走现有批式 STT 路径(逐字现状)。
+   */
+  get #useStream(): boolean {
+    return this.#voicePath === 'stt-stream' && this.#streamingStt !== undefined && !this.#streamDegraded;
+  }
+
   /** 启动：订阅上行音频，进入 listening。重复 start 幂等（先退订旧的）。 */
   start(): void {
     this.stop();
+    this.#streamDegraded = false; // 新一轮:给流式路重新机会(上轮降级不延续)
     this.#state = 'listening';
     this.#unsub = this.#transport.onAudio((frame) => this.#onAudio(frame));
+    // 连续流式路:开机即开一条长连接会话,listening 期持续推流(§全程流式)。
+    if (this.#useStream) this.#openStream();
+  }
+
+  /**
+   * 开一条连续流式 STT 会话（§全程流式）：注册 handlers——onFinal 驱动现有回合、onError 降级回批式。
+   * 幂等:已有会话或未注入端口直接返回;openSession 抛错 → 降级(置 #streamDegraded),绝不崩(§3.2)。
+   */
+  #openStream(): void {
+    if (this.#streamingStt === undefined || this.#streamSession !== null) return;
+    const handlers: StreamingSttHandlers = {
+      onSpeechStarted: () => {
+        // listening:仅作在场/状态提示(回合由 onFinal 驱动,这里不改状态机);其余态忽略。
+        // emit 形态与 #emit 的 'vad:speech_start' 分支逐字一致(直接 emit,不经 #go 以免误迁移)。
+        if (this.#state !== 'listening') return;
+        try {
+          const corr = this.#bus.currentCorrelationId() ?? `${this.#sessionId}/voice/${this.#gen}`;
+          this.#bus.emit(makeBusEvent('vad:speech_start', { atMs: this.#now() }, corr));
+        } catch (err) {
+          console.warn('[VoiceLoop] 流式 speech_started emit 抛错(已捕获):', err);
+        }
+      },
+      onPartial: () => {
+        /* 可选:UI/状态;本切片不强用(partial 不驱动回合)。 */
+      },
+      onFinal: (text, emotion) => {
+        // 一句定稿 = 一个回合:走现有 #send+TTS 核心(emotion 经 prosody 并入 PAD)。
+        this.#runStreamTurn(text, emotion);
+      },
+      onError: (err) => {
+        // 连接/协议错误:降级回批式 stt(本地 VAD+endpointing),关会话、干净回 listening(§3.2)。
+        console.warn('[VoiceLoop] 流式 ASR onError,降级回批式 stt:', err);
+        this.#streamDegraded = true;
+        try {
+          this.#streamSession?.close();
+        } catch {
+          /* ignore */
+        }
+        this.#streamSession = null;
+        this.#resetToListening();
+      },
+    };
+    const opts = this.#sttLanguage !== undefined ? { language: this.#sttLanguage } : undefined;
+    try {
+      this.#streamSession = this.#streamingStt.openSession(handlers, opts);
+    } catch (err) {
+      console.warn('[VoiceLoop] 流式 ASR openSession 失败,降级批式 stt:', err);
+      this.#streamDegraded = true;
+    }
   }
 
   /** 停止：退订上行 + 作废当前回合（gen 作废 onToken/TTS + abort 真停底层 LLM 流，§3.2）。 */
@@ -467,6 +543,13 @@ export class VoiceLoop {
     this.#audioBuf = [];
     this.#userSpeechStartAtMs = null;
     this.#echoGuard?.resetTiers(); // 全量重置 EchoGuard 档位(清说话/冷却,start/stop 干净起步)
+    // 连续流式路:关会话(发 finish + 关连接);幂等。
+    try {
+      this.#streamSession?.close();
+    } catch {
+      /* ignore */
+    }
+    this.#streamSession = null;
   }
 
   /** abort 当前回合的取消控制器（若有）并清空句柄；幂等、不抛（§3.2）。 */
@@ -550,6 +633,23 @@ export class VoiceLoop {
       const result = this.#vad.pushFrame(pcm);
       const evt = result.event;
 
+      // 连续流式路（§全程流式）:listening/thinking 期持续把麦帧推给云端(服务端 VAD 分句);
+      // speaking 期暂停推流(防自家 TTS 回声进 ASR)+ 复用既有 speaking 态打断逻辑(EchoGuard/能量 VAD)。
+      // 注:前面已更新 #lastFrameSamples/#lastFrameAtMs(供 EchoGuard),且 result/evt 已算出供打断判定。
+      if (this.#useStream) {
+        if (this.#state === 'speaking') {
+          this.#handleSpeakingBargeIn(pcm, result, evt); // 不推流,只判打断
+          return;
+        }
+        // listening / thinking / endpointing 等非 speaking 态:持续推流(云端归入下一句,简单稳妥)。
+        try {
+          this.#streamSession?.pushAudio(this.#toPcmChunk(pcm));
+        } catch {
+          /* 推流失败不崩(§3.2) */
+        }
+        return;
+      }
+
       // listening：检出语音起点 → endpointing，开始累积。
       // EchoGuard Tier2 冷却窗(§3.1):agent 刚说完 cooldownMs 内,用更高 RMS 门槛吸收混响衰减尾巴——
       // 低能量的混响尾被挡(不开启虚假回合),高能量真语音放行(允许用户立刻回话)。
@@ -587,39 +687,7 @@ export class VoiceLoop {
       // EchoGuard（§4 软件侧自打断防护）若注入,则在进入打断判定**之前**做连续 N 帧高置信去抖,
       // 压制自家 TTS 回声引起的误打断（真人连续 N 帧仍能可靠打断）。危机/硬打断豁免去抖。
       if (this.#state === 'speaking') {
-        if (this.#echoGuard !== undefined) {
-          // 危机/硬打断豁免:经 attention 的 buildSignal 取信号,若标 crisis/hardInterrupt 则绕过 N 帧去抖。
-          if (!this.#echoGuardConfirms(result, pcm.timestampMs, evt?.type === 'speech_start')) {
-            return; // 未确认(回声毛刺/连续帧不足)→ 保持 speaking,只感知不打断
-          }
-          // 已确认(连续 N 帧 / 危机豁免):落到下方既有打断判定(未注入 attention→即时;注入→按 mode)。
-        }
-
-        if (this.#attention === undefined) {
-          // 未注入关注闸（autonomy 默认关）：逐字保持现状——检出语音起点即进 barge_in_pending 即时打断。
-          // 注:EchoGuard 注入时,确认由 #echoGuardConfirms 决定(上方已 return 拦截未确认帧),
-          //     故此处确认后无论本帧是否 speech_start 事件都应打断（连续第 N 帧可能非 start 事件）。
-          if (evt?.type === 'speech_start' || this.#echoGuard !== undefined) {
-            if (this.#go('vad:speech_start')) {
-              this.#interrupt(); // barge_in_pending → listening
-            }
-          }
-          return;
-        }
-        // 注入关注闸（§7 软反转）：
-        // - 首次检出语音起点：记用户开口起点，立即按 attention_mode 判一次（companion/balanced 即打断；
-        //   focus 未达坚持门槛则仅感知不打断，保持 speaking）。
-        // - 用户持续出声（result.speaking 且已记起点）：随 sustainedMs 增长重判（focus 坚持够即打断）。
-        if (evt?.type === 'speech_start') {
-          this.#userSpeechStartAtMs = pcm.timestampMs;
-          this.#applyAttention(pcm.timestampMs);
-        } else if ((result.speaking || this.#echoGuard !== undefined) && this.#userSpeechStartAtMs !== null) {
-          this.#applyAttention(pcm.timestampMs);
-        } else if (this.#echoGuard !== undefined && this.#userSpeechStartAtMs === null) {
-          // EchoGuard 确认但尚未记起点(连续帧确认在 start 事件之外):补记起点并判一次。
-          this.#userSpeechStartAtMs = pcm.timestampMs;
-          this.#applyAttention(pcm.timestampMs);
-        }
+        this.#handleSpeakingBargeIn(pcm, result, evt);
         return;
       }
 
@@ -628,6 +696,52 @@ export class VoiceLoop {
       // 上行处理任何异常都不应崩；回 listening 兜底
       console.warn('[VoiceLoop] onAudio 抛错(已捕获,回 listening):', err);
       this.#resetToListening();
+    }
+  }
+
+  /**
+   * speaking 态打断判定（§4 barge-in，纯重构自 `#onAudio` 原 speaking 分支,**行为逐字不变**）：
+   * EchoGuard 注入则先连续 N 帧高置信去抖(压自家 TTS 回声误打断;危机/硬打断豁免);
+   * 未注入 attention → 检出语音即时打断;注入 attention → 据 attention_mode 判真打断(§7 软反转)。
+   * 批式 STT 路(原 `#onAudio`)与连续流式路(`#useStream` 分支)都复用本方法。
+   */
+  #handleSpeakingBargeIn(
+    pcm: PcmFrame,
+    result: VadFrameResult,
+    evt: VadFrameResult['event'],
+  ): void {
+    if (this.#echoGuard !== undefined) {
+      // 危机/硬打断豁免:经 attention 的 buildSignal 取信号,若标 crisis/hardInterrupt 则绕过 N 帧去抖。
+      if (!this.#echoGuardConfirms(result, pcm.timestampMs, evt?.type === 'speech_start')) {
+        return; // 未确认(回声毛刺/连续帧不足)→ 保持 speaking,只感知不打断
+      }
+      // 已确认(连续 N 帧 / 危机豁免):落到下方既有打断判定(未注入 attention→即时;注入→按 mode)。
+    }
+
+    if (this.#attention === undefined) {
+      // 未注入关注闸（autonomy 默认关）：逐字保持现状——检出语音起点即进 barge_in_pending 即时打断。
+      // 注:EchoGuard 注入时,确认由 #echoGuardConfirms 决定(上方已 return 拦截未确认帧),
+      //     故此处确认后无论本帧是否 speech_start 事件都应打断（连续第 N 帧可能非 start 事件）。
+      if (evt?.type === 'speech_start' || this.#echoGuard !== undefined) {
+        if (this.#go('vad:speech_start')) {
+          this.#interrupt(); // barge_in_pending → listening
+        }
+      }
+      return;
+    }
+    // 注入关注闸（§7 软反转）：
+    // - 首次检出语音起点：记用户开口起点，立即按 attention_mode 判一次（companion/balanced 即打断；
+    //   focus 未达坚持门槛则仅感知不打断，保持 speaking）。
+    // - 用户持续出声（result.speaking 且已记起点）：随 sustainedMs 增长重判（focus 坚持够即打断）。
+    if (evt?.type === 'speech_start') {
+      this.#userSpeechStartAtMs = pcm.timestampMs;
+      this.#applyAttention(pcm.timestampMs);
+    } else if ((result.speaking || this.#echoGuard !== undefined) && this.#userSpeechStartAtMs !== null) {
+      this.#applyAttention(pcm.timestampMs);
+    } else if (this.#echoGuard !== undefined && this.#userSpeechStartAtMs === null) {
+      // EchoGuard 确认但尚未记起点(连续帧确认在 start 事件之外):补记起点并判一次。
+      this.#userSpeechStartAtMs = pcm.timestampMs;
+      this.#applyAttention(pcm.timestampMs);
     }
   }
 
@@ -697,12 +811,34 @@ export class VoiceLoop {
       return;
     }
 
-    // endpointing → thinking（emit stt:final 带真转写文本）
-    if (this.#state !== 'endpointing') {
-      // 状态已变（如被打断),放弃本回合
-      return;
+    // 状态已变（如被打断),放弃本回合(批式路:仅在仍处 endpointing 时起回合)。
+    if (this.#state !== 'endpointing') return;
+    // 拿到 text/emotion 后的回合执行段统一走 #runTurn(批式路与连续流式路共用)。
+    this.#runTurn(text, emotion, gen);
+  }
+
+  /**
+   * 回合执行核心（从「拿到 text/emotion」到 send+speak 收尾，批式 STT 路与连续流式路**共用**）。
+   *
+   * **前置**:调用方已确保当前态可经合法迁移进 thinking。本方法据当前态合法迁移:
+   *   - `endpointing`（批式路 #startThinking）→ `stt:final` → thinking;
+   *   - `listening`（连续流式路 #runStreamTurn，迁移表无 listening→thinking 直达）→ 先补
+   *     `vad:speech_start`(→endpointing) 再 `stt:final`(→thinking) 两步;
+   *   - 其余态 / 任一迁移失败 → `#resetToListening` 兜底(§3.2 永不崩)。
+   *
+   * 迁移成功后:onToken 凑句串行喂 `#speak`(保句序)、透传本回合 `ac.signal`(打断真停底层 LLM/TTS)、
+   * emotion 经 `#send` 第 4 参并入 PAD;`.finally` 清本回合控制器。**纯重构,行为与原 #startThinking 一致**。
+   */
+  #runTurn(text: string, emotion: SttEmotion | undefined, gen: number): void {
+    // 合法迁移进 thinking(连续流式路从 listening 需先补一步 vad:speech_start 到 endpointing)。
+    if (this.#state === 'listening') {
+      if (!this.#go('vad:speech_start')) {
+        this.#resetToListening();
+        return;
+      }
     }
-    if (!this.#go('stt:final', { text })) {
+    // endpointing → thinking（emit stt:final 带真转写文本）
+    if (this.#state !== 'endpointing' || !this.#go('stt:final', { text })) {
       this.#resetToListening();
       return;
     }
@@ -750,6 +886,17 @@ export class VoiceLoop {
         // 回合自然结束/出错收尾后清理本回合控制器(若仍是它);打断已在 #interrupt 里清。
         if (this.#currentAbort === ac) this.#currentAbort = null;
       });
+  }
+
+  /**
+   * 连续流式路：一句 final 起一个回合（§全程流式）。空文本忽略;`gen=++#gen` 抢占;
+   * 经 `#runTurn` 据当前态(常为 listening)合法迁移进 thinking。迁移失败 → `#runTurn` 内已 resetToListening。
+   * emotion 经 `#runTurn` 的 `#send` 第 4 参并入 PAD(与批式路同一通道)。
+   */
+  #runStreamTurn(text: string, emotion?: SttEmotion): void {
+    if (text.trim().length === 0) return; // 空 final 忽略
+    const gen = ++this.#gen; // 抢占:作废在途回合(若有),本句成为当前回合
+    this.#runTurn(text, emotion, gen);
   }
 
   // ───────────────────────────── 想：omni audio-in 直路（path B）─────────────────────────────
