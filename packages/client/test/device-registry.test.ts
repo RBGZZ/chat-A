@@ -42,4 +42,27 @@ describe('device-registry', () => {
     expect(listInputDevices({})).toEqual([]);
     expect(listInputDevices(null)).toEqual([]);
   });
+
+  it('defaultSampleRate 为 null 时回落 16000（num 不被 Number(null)=0 吞默认）', () => {
+    const modNullRate = {
+      getDevices: () => [
+        { id: 1, name: '虚拟麦', hostAPIName: 'WASAPI', maxInputChannels: 2, maxOutputChannels: 0, defaultSampleRate: null },
+      ],
+    };
+    const ins = listInputDevices(modNullRate);
+    expect(ins).toHaveLength(1);
+    expect(ins[0]!.defaultSampleRate).toBe(16000);
+  });
+
+  it('getDevices 落在 .default 上也能枚举（esm interop）', () => {
+    const esmMod = {
+      default: {
+        getDevices: () => [
+          { id: 5, name: '麦克风 (X)', hostAPIName: 'MME', maxInputChannels: 2, maxOutputChannels: 0, defaultSampleRate: 48000 },
+        ],
+      },
+    };
+    const ins = listInputDevices(esmMod);
+    expect(ins.map((d) => d.id)).toEqual([5]);
+  });
 });

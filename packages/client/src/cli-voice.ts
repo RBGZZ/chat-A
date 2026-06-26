@@ -14,6 +14,7 @@
  * 文字模式默认不变;`--voice` 或 `CHAT_A_VOICE=1` 才进本模式(见 cli.ts 分发)。
  */
 import { stdout, env as procEnv } from 'node:process';
+import { SAMPLE_RATE_HZ } from '@chat-a/protocol';
 import { connectClientTransport } from '@chat-a/gateway';
 import {
   createStt,
@@ -372,10 +373,18 @@ export async function createAudioDevice(
   if (mode === 'node' || mode === 'naudiodon' || mode === 'real') {
     const nativeModule = env['CHAT_A_AUDIO_MODULE'];
     // 目标采集率(能力驱动):STT/omni 路各自声明,缺省 16000(VAD/EOU 硬约束)。
-    const requiredRate = opts?.requiredInputRate ?? 16000;
+    const requiredRate = opts?.requiredInputRate ?? SAMPLE_RATE_HZ;
     // 采样率校验(fail-fast):目标率必须 > 0。
     if (!(requiredRate > 0)) {
       throw new Error(`无效的所需输入采样率:${requiredRate}`);
+    }
+    // fail-fast 守住 VAD/EOU 恒 16k:本切片 VAD/EOU 物理锁 16kHz,且未实现「≠16k 时分叉第二条采集流」,
+    // 故采集目标率必须 = SAMPLE_RATE_HZ(16000)。若 STT/omni 声明的输入率非 16k → 明确抛错而非静默跑错。
+    if (requiredRate !== SAMPLE_RATE_HZ) {
+      throw new Error(
+        `VAD/EOU 恒需 ${SAMPLE_RATE_HZ}Hz,当前 STT/omni 要求输入率=${requiredRate}Hz 的分叉未实现;` +
+          `请用 16k STT 或勿设 CHAT_A_STT_SAMPLE_RATE 为非16k`,
+      );
     }
 
     // 枚举设备(经 deps 注入,缺省动态 import naudiodon;失败→空,降级到 env/默认)。

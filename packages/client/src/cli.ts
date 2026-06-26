@@ -223,6 +223,9 @@ async function main(): Promise<void> {
         // 非交互/非法输入回退系统默认(§3.2)。question 用 readline/promises 一次性问答。
         audioSelect: makeCliAudioSelect({
           question: async (q) => {
+            // 非交互(管道/重定向,无 TTY):不创建 readline、不阻塞,直接返回空串
+            // → 下游 promptSelect 落 null → 回退系统默认设备(§3.2,绝不挂起)。
+            if (!stdin.isTTY) return '';
             const rl = createRl({ input: stdin, output: stdout });
             try {
               return await rl.question(q);

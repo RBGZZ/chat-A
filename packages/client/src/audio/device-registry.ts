@@ -18,6 +18,9 @@ export interface AudioDeviceInfo {
 }
 
 function num(v: unknown, dflt = 0): number {
+  // null/undefined/空串先回落默认:否则 Number(null)/Number('') === 0 会吞掉默认值
+  // (如 defaultSampleRate 缺失被算成 0,而非回落 16000)。
+  if (v === null || v === undefined || v === '') return dflt;
   const n = Number(v);
   return Number.isFinite(n) ? n : dflt;
 }
@@ -25,7 +28,10 @@ function num(v: unknown, dflt = 0): number {
 /** 从注入模块取原始设备数组（鸭子类型，缺失/异常一律空数组，降级不崩）。 */
 function rawDevices(mod: unknown): Array<Record<string, unknown>> {
   if (mod === null || typeof mod !== 'object') return [];
-  const fn = (mod as { getDevices?: unknown }).getDevices;
+  const m = mod as { getDevices?: unknown; default?: { getDevices?: unknown } };
+  // esm interop:naudiodon 经 ESM import CJS 时 getDevices 可能落在 .default
+  // (对齐同目录 node-audio-device.ts pickAudioIoFactory 的处理);先试顶层,再回落 .default。
+  const fn = typeof m.getDevices === 'function' ? m.getDevices : m.default?.getDevices;
   if (typeof fn !== 'function') return [];
   try {
     const list = (fn as () => unknown)();
@@ -67,6 +73,13 @@ export function resolveDeviceByName(
   if (hostApi !== undefined && hostApi.length > 0) {
     const exact = byName.find((d) => d.hostApi === hostApi);
     if (exact) return exact;
+  }
+  // 仍歧义(同名多条 / 指定 hostApi 未精确命中)→ 取第一个并 warn(对齐 design §4)。
+  if (byName.length > 1) {
+    console.warn(
+      `[设备] 同名设备「${name}」有 ${byName.length} 条${hostApi ? `(指定 hostApi=${hostApi} 未精确命中)` : ''},` +
+        `取第一个(hostApi=${byName[0]!.hostApi});如需指定请设 *_DEVICE_HOST 消歧。`,
+    );
   }
   return byName[0]!;
 }

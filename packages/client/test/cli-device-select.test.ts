@@ -26,4 +26,14 @@ describe('CLI 设备选择壳', () => {
     const sel = makeCliAudioSelect({ question: async () => 'zzz', write: () => {}, envPath: '/tmp/x.env' });
     expect(await sel.promptSelect!('input', devs)).toBeNull();
   });
+
+  it('promptSelect 空回车返回 null（回退默认，绝不误选 0 号）', async () => {
+    const sel = makeCliAudioSelect({ question: async () => '', write: () => {}, envPath: '/tmp/x.env' });
+    expect(await sel.promptSelect!('input', devs)).toBeNull();
+  });
+
+  it("promptSelect 非整数 '1.5' 返回 null（严格只接受纯数字）", async () => {
+    const sel = makeCliAudioSelect({ question: async () => '1.5', write: () => {}, envPath: '/tmp/x.env' });
+    expect(await sel.promptSelect!('input', devs)).toBeNull();
+  });
 });

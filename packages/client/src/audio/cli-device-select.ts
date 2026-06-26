@@ -23,6 +23,16 @@ export function makeCliAudioSelect(io: {
   return {
     promptSelect: async (kind, devices) => {
       const ans = (await io.question(formatDeviceMenu(kind, devices))).trim();
+      // 空回车(非交互空串 / 用户直接回车):明确回退系统默认,绝不误选 0 号设备。
+      if (ans.length === 0) {
+        io.write('（未选择，回退系统默认设备）\n');
+        return null;
+      }
+      // 严格只接受纯数字序号(拒绝 '1.5' / '  ' / 'zzz' 等):避免 Number('1.5')=1.5 等被 floor/误判。
+      if (!/^\d+$/.test(ans)) {
+        io.write('(输入无效,已回退系统默认设备)\n');
+        return null;
+      }
       const idx = Number(ans);
       if (!Number.isInteger(idx) || idx < 0 || idx >= devices.length) {
         io.write('(输入无效,已回退系统默认设备)\n');
