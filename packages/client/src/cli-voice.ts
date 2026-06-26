@@ -42,6 +42,12 @@ import type { LightVoiceBus, SpeakStateView, OmniAudioPort, VoicePath } from '@c
 import type { AudioDevice } from './audio/audio-device';
 import { FakeAudioDevice } from './audio/fake-audio-device';
 import { NodeAudioDevice } from './audio/node-audio-device';
+import {
+  listInputDevices,
+  listOutputDevices,
+  resolveDeviceByName,
+  type AudioDeviceInfo,
+} from './audio/device-registry';
 import { WavFileAudioDevice } from './audio/wav-file-audio-device';
 import { createSherpaVadSession, createSherpaEouSession } from './audio/sherpa-vad-session';
 import { runVoiceLoop, runTerminalBridge } from './audio/voice-runner';
@@ -212,6 +218,8 @@ export interface VoiceModeDeps {
    * 拼好后注入 VoiceLoop。省略(缺省)→ synthesize 的 opts 仍为 undefined → 逐字现状。
    */
   readonly ttsOptions?: TtsOptions;
+  /** 设备选择/持久化注入(CLI 传文字菜单壳;desktop 用 IPC,不经此)。缺省=非交互回退默认。 */
+  readonly audioSelect?: CreateAudioDeviceDeps;
 }
 
 /** 语音模式运行句柄:停 = 收尾(停采集/loop/设备)。 */
@@ -300,26 +308,117 @@ export async function createDetectors(env: NodeJS.ProcessEnv): Promise<Detectors
 }
 
 /**
- * 按 env 选设备:`node` → NodeAudioDevice(先 init 动态加载原生库;失败抛错由调用方决定是否回落);
- * 其它 → FakeAudioDevice。返回设备 + 是否真实设备(供状态行/回落判断)。
+ * 解析「当前路径所需输入采样率」(能力驱动解耦):omni 路读端口 inputSampleRate,
+ * STT 路读 capabilities.sampleRate;缺省一律回落 16000(VAD/EOU 硬约束 + 既有现状)。
+ */
+export function resolveRequiredInputRate(
+  stt?: { readonly capabilities: { readonly sampleRate: number } },
+  omni?: { readonly inputSampleRate?: number },
+  path: 'stt' | 'omni' = 'stt',
+): number {
+  if (path === 'omni') return omni?.inputSampleRate ?? 16000;
+  return stt?.capabilities.sampleRate ?? 16000;
+}
+
+/** 解析数字 env(空/非数字→undefined)。 */
+function parseIdEnv(raw: string | undefined): number | undefined {
+  const s = (raw ?? '').trim();
+  return s.length > 0 && Number.isFinite(Number(s)) ? Number(s) : undefined;
+}
+
+/** 惰性加载 naudiodon(装配层枚举用;失败返回 {} 触发降级,绝不崩)。 */
+async function loadNaudiodon(moduleName?: string): Promise<unknown> {
+  try {
+    return await import(/* @vite-ignore */ moduleName ?? 'naudiodon');
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * `createAudioDevice` 注入面(纯逻辑接缝,可单测):能力驱动采集率 + 枚举模块注入 +
+ * 解析未命中时的设备选择/持久化回调(CLI/desktop 各自实现壳;缺省非交互→回退系统默认)。
+ */
+export interface CreateAudioDeviceDeps {
+  /** 当前路径所需输入采样率(目标重采样率;由 {@link resolveRequiredInputRate} 算出)。缺省 16000。 */
+  readonly requiredInputRate?: number;
+  /** 注入枚举用的原生模块(缺省动态 import naudiodon;失败→{} 触发降级)。 */
+  readonly loadNativeModule?: () => Promise<unknown>;
+  /** 解析未命中时的选择回调(CLI/desktop 各自实现);返回 null=用户取消→回退默认。 */
+  readonly promptSelect?: (
+    kind: 'input' | 'output',
+    devices: readonly AudioDeviceInfo[],
+  ) => Promise<AudioDeviceInfo | null>;
+  /** 选定后持久化(写 .env.local 设备名)。 */
+  readonly persistSelection?: (kind: 'input' | 'output', dev: AudioDeviceInfo) => void;
+}
+
+/**
+ * 按 env 选设备:`node` → NodeAudioDevice(先按名解析输入/输出设备 + 能力驱动采集率,再 init
+ * 动态加载原生库;失败抛错由调用方决定是否回落);其它 → FakeAudioDevice。返回设备 + 是否真实设备
+ * (供状态行/回落判断)。
+ *
+ * node 分支解析优先级(§3.2 优雅降级,缺设备/非交互绝不崩):
+ *   - 输入/输出 deviceId:显式 id env 覆盖 > 按设备名解析 > 选择回调 > 系统默认 -1。
+ *   - 采集率:显式 CHAT_A_AUDIO_CAPTURE_RATE > 解析到的设备 defaultSampleRate(=设备原生率,免配)。
+ *   - 目标重采样率 requiredInputRate 由能力声明驱动(STT capabilities.sampleRate / omni inputSampleRate);
+ *     fail-fast 校验须 > 0。
  */
 export async function createAudioDevice(
   env: NodeJS.ProcessEnv,
+  opts?: CreateAudioDeviceDeps,
 ): Promise<{ device: AudioDevice; real: boolean }> {
   const mode = (env['CHAT_A_AUDIO_DEVICE'] ?? 'fake').toLowerCase();
   if (mode === 'node' || mode === 'naudiodon' || mode === 'real') {
     const nativeModule = env['CHAT_A_AUDIO_MODULE'];
-    // 输入设备号(PortAudio deviceId):缺省 -1=系统默认设备。⚠️ 真机若默认设备是「立体声混音/环回」
-    // 会把扬声器输出采回当输入(输出转录被当输入),且真麦近静音 → 用此 env 选真麦克风 id(见 init 枚举日志)。
-    const rawDevId = (env['CHAT_A_AUDIO_INPUT_DEVICE_ID'] ?? '').trim();
-    const deviceId = rawDevId.length > 0 && Number.isFinite(Number(rawDevId)) ? Number(rawDevId) : undefined;
-    // 设备开流采样率(Hz):某些设备(ToDesk 虚拟麦/WASAPI)只支持原生率(44100/48000),强开 16k 会报错或返回
-    // 循环缓冲。设为设备原生率 → 按原生率开流 + 本地重采样到 16k 喂下游(STT/VAD 恒见 16k)。缺省不设=16k 现状。
-    const rawRate = (env['CHAT_A_AUDIO_CAPTURE_RATE'] ?? '').trim();
-    const deviceCaptureRate = rawRate.length > 0 && Number.isFinite(Number(rawRate)) ? Number(rawRate) : undefined;
+    // 目标采集率(能力驱动):STT/omni 路各自声明,缺省 16000(VAD/EOU 硬约束)。
+    const requiredRate = opts?.requiredInputRate ?? 16000;
+    // 采样率校验(fail-fast):目标率必须 > 0。
+    if (!(requiredRate > 0)) {
+      throw new Error(`无效的所需输入采样率:${requiredRate}`);
+    }
+
+    // 枚举设备(经 deps 注入,缺省动态 import naudiodon;失败→空,降级到 env/默认)。
+    const mod = await (opts?.loadNativeModule?.() ?? loadNaudiodon(nativeModule));
+    const inputs = listInputDevices(mod);
+    const outputs = listOutputDevices(mod);
+
+    // 输入:显式 id 覆盖 > 按名解析 > (无名/未命中)选择回调 > 系统默认 -1。
+    let deviceId = parseIdEnv(env['CHAT_A_AUDIO_INPUT_DEVICE_ID']);
+    // 设备开流采样率(Hz):缺省取解析到设备的 defaultSampleRate(免配),显式 env 优先。
+    let deviceCaptureRate = parseIdEnv(env['CHAT_A_AUDIO_CAPTURE_RATE']);
+    if (deviceId === undefined) {
+      const name = (env['CHAT_A_AUDIO_INPUT_DEVICE_NAME'] ?? '').trim();
+      const host = (env['CHAT_A_AUDIO_INPUT_DEVICE_HOST'] ?? '').trim() || undefined;
+      let chosen = name.length > 0 ? resolveDeviceByName(inputs, name, host) : null;
+      if (chosen === null && opts?.promptSelect && inputs.length > 0) {
+        chosen = await opts.promptSelect('input', inputs);
+        if (chosen) opts.persistSelection?.('input', chosen);
+      }
+      if (chosen) {
+        deviceId = chosen.id;
+        if (deviceCaptureRate === undefined) deviceCaptureRate = chosen.defaultSampleRate;
+      }
+    }
+
+    // 输出:显式 id 覆盖 > 按名解析 > 选择回调 > -1(与输入分离,绝不套用输入 id,修 bug1)。
+    let outputDeviceId = parseIdEnv(env['CHAT_A_AUDIO_OUTPUT_DEVICE_ID']);
+    if (outputDeviceId === undefined) {
+      const oname = (env['CHAT_A_AUDIO_OUTPUT_DEVICE_NAME'] ?? '').trim();
+      const ohost = (env['CHAT_A_AUDIO_OUTPUT_DEVICE_HOST'] ?? '').trim() || undefined;
+      let ochosen = oname.length > 0 ? resolveDeviceByName(outputs, oname, ohost) : null;
+      if (ochosen === null && opts?.promptSelect && outputs.length > 0) {
+        ochosen = await opts.promptSelect('output', outputs);
+        if (ochosen) opts.persistSelection?.('output', ochosen);
+      }
+      if (ochosen) outputDeviceId = ochosen.id;
+    }
+
     const device = new NodeAudioDevice({
       ...(nativeModule ? { nativeModule } : {}),
       ...(deviceId !== undefined ? { deviceId } : {}),
+      ...(outputDeviceId !== undefined ? { outputDeviceId } : {}),
+      captureSampleRate: requiredRate,
       ...(deviceCaptureRate !== undefined ? { deviceCaptureRate } : {}),
     });
     await device.init(); // 装不上 → 抛明确报错(调用方 catch 后回落 Fake)
@@ -357,11 +456,23 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
   const stt = createStt(sttCfg);
   const tts = createTts(ttsCfg);
 
-  // 设备:真设备装不上则回落 Fake(明确提示)。
+  // 语音路径(§4 双路径):缺省 stt(逐字不变);omni 档尝试构造 audio-in 端口。
+  // 端口构造/key 缺失失败 → createOmniAudioPort 返回 undefined(已打印提示),此时即便选 omni
+  // 也回落 STT(VoiceLoop 内部双保险:omni 端口为空则不走直路)。
+  // 须在 createAudioDevice 前算好(能力驱动采集率要据生效路径读 stt/omni 的声明采样率)。
+  const wantOmni = loadVoicePath(env) === 'omni';
+  const omni = wantOmni ? createOmniAudioPort(env) : undefined;
+  // 实际生效路径:仅当 omni 端口真构造出才标 omni,否则 stt(供状态行如实反映回落)。
+  const effectivePath: VoicePath = omni !== undefined ? 'omni' : 'stt';
+
+  // 能力驱动采集率:据生效路径读 STT capabilities.sampleRate / omni inputSampleRate(缺省 16000)。
+  const requiredInputRate = resolveRequiredInputRate(stt, omni, effectivePath);
+
+  // 设备:真设备装不上则回落 Fake(明确提示)。能力驱动采集率 + 可选选择壳经 deps.audioSelect 注入。
   let device: AudioDevice;
   let real: boolean;
   try {
-    const made = await createAudioDevice(env);
+    const made = await createAudioDevice(env, { requiredInputRate, ...(deps.audioSelect ?? {}) });
     device = made.device;
     real = made.real;
   } catch (err) {
@@ -372,14 +483,6 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
 
   // VAD / TurnDetector:按 CHAT_A_VAD 选真/桩;真路径加载/构造失败回落桩(明确提示,绝不崩)。
   const detectors = await createDetectors(env);
-
-  // 语音路径(§4 双路径):缺省 stt(逐字不变);omni 档尝试构造 audio-in 端口。
-  // 端口构造/key 缺失失败 → createOmniAudioPort 返回 undefined(已打印提示),此时即便选 omni
-  // 也回落 STT(VoiceLoop 内部双保险:omni 端口为空则不走直路)。
-  const wantOmni = loadVoicePath(env) === 'omni';
-  const omni = wantOmni ? createOmniAudioPort(env) : undefined;
-  // 实际生效路径:仅当 omni 端口真构造出才标 omni,否则 stt(供状态行如实反映回落)。
-  const effectivePath: VoicePath = omni !== undefined ? 'omni' : 'stt';
 
   // EchoGuard(§4 软件侧自打断防护):语音模式默认开;CHAT_A_ECHO_GUARD=off 显式关(回落逐字现状)。
   const echoGuard = loadEchoGuardConfig(env);

@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import { LightVoiceBus } from '@chat-a/runtime';
-import { startVoiceMode, createDetectors, createAudioDevice } from '../src/cli-voice';
+import {
+  startVoiceMode,
+  createDetectors,
+  createAudioDevice,
+  resolveRequiredInputRate,
+} from '../src/cli-voice';
 
 const baseDeps = () => ({
   send: async (_t: string, onToken: (s: string) => void) => {
@@ -50,5 +55,20 @@ describe('client/startVoiceMode — wav 设备 + energy VAD 装配不崩', () =>
     expect(handle.info.vad).toBe('energy');
     expect(handle.info.eou).toBe('silence-timeout');
     handle.stop();
+  });
+});
+
+describe('resolveRequiredInputRate（能力驱动采集率）', () => {
+  it('STT 路读 capabilities.sampleRate', () => {
+    expect(resolveRequiredInputRate({ capabilities: { sampleRate: 16000 } }, undefined, 'stt')).toBe(16000);
+  });
+  it('omni 路读 inputSampleRate', () => {
+    expect(resolveRequiredInputRate(undefined, { inputSampleRate: 24000 }, 'omni')).toBe(24000);
+  });
+  it('omni 未声明回落 16000', () => {
+    expect(resolveRequiredInputRate(undefined, {}, 'omni')).toBe(16000);
+  });
+  it('全缺回落 16000（缺省安全）', () => {
+    expect(resolveRequiredInputRate(undefined, undefined, 'stt')).toBe(16000);
   });
 });
