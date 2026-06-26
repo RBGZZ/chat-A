@@ -9,6 +9,8 @@ export { startVoiceMode } from './cli-voice';
 export type { VoiceModeHandle, VoiceModeDeps } from './cli-voice';
 export { NodeAudioDevice } from './audio/node-audio-device';
 export type { NodeAudioDeviceOptions } from './audio/node-audio-device';
+// —— 音频设备枚举/按名解析(desktop main 接 IPC handler 时跨包复用)——
+export * from './audio/device-registry';
 
 // —— 主动陪伴(代理B):autonomy 主动消息通道装配 + 真候选源(persona/memory) ——
 export {

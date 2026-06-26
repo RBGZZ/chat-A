@@ -20,6 +20,9 @@ import {
   type MemoryItem, // 代理D
   type LangForm, // 三语种 + 朗读
   type TtsAudioChunk, // 朗读 PCM 块
+  // —— 音频设备列举/选择(设置面板下拉框)——
+  type AudioDeviceLists,
+  type AudioSelectInput,
 } from './ipc-contract';
 
 /** 包装一个主→渲染推送订阅,返回退订函数(不泄漏 ipcRenderer / event 对象)。 */
@@ -73,6 +76,11 @@ export interface XiaoxueApi {
   onTtsAudio(cb: (chunk: TtsAudioChunk) => void): () => void;
   /** 订阅停播信号(回合结束/被打断):立即停并清队列。返回退订函数。 */
   onTtsAudioStop(cb: () => void): () => void;
+  // —— 音频设备列举/选择(设置面板下拉框)——
+  /** 枚举可用输入/输出音频设备(含当前已选名,设置面板下拉初值)。 */
+  audioListDevices(): Promise<AudioDeviceLists>;
+  /** 提交一次设备选择(写回 .env.local 设备名 + host);resolve 是否成功。 */
+  audioSelectDevice(sel: AudioSelectInput): Promise<{ ok: boolean }>;
 }
 
 const api: XiaoxueApi = {
@@ -105,6 +113,9 @@ const api: XiaoxueApi = {
   setLang: (form) => ipcRenderer.invoke(IPC.langSet, form),
   onTtsAudio: (cb) => subscribe<TtsAudioChunk>(IPC.ttsAudio, cb),
   onTtsAudioStop: (cb) => subscribe<void>(IPC.ttsAudioStop, () => cb()),
+  // —— 音频设备列举/选择(设置面板下拉框)——
+  audioListDevices: () => ipcRenderer.invoke(IPC.audioListDevices),
+  audioSelectDevice: (sel) => ipcRenderer.invoke(IPC.audioSelectDevice, sel),
 };
 
 contextBridge.exposeInMainWorld('xiaoxue', api);

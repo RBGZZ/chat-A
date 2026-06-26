@@ -22,6 +22,9 @@ import {
   createCompanionCandidateSource,
   createPresencePort,
   type ProactiveBridgeHandle,
+  // —— 音频设备枚举(设置面板下拉框列举)——
+  listInputDevices,
+  listOutputDevices,
 } from '@chat-a/client';
 import {
   createVoice,
@@ -42,12 +45,16 @@ import {
   probeVoice,
   runCloneVoice,
   upsertEnvLocal,
+  persistAudioSelectionText,
   CLONE_NO_KEY_REASON,
   VOICE_UNAVAILABLE_REASON,
   sanitizePersonaForm,
   type AppInfo,
   type VoiceCloneInput,
   type VoiceCloneStatus,
+  // —— 音频设备列举/选择(设置面板下拉框)——
+  type AudioDeviceLists,
+  type AudioSelectInput,
   // —— 代理B:主动消息归一/开关(纯逻辑) ——
   toProactiveMessage,
   isProactiveEnabled,
@@ -80,6 +87,11 @@ let proactiveHandle: ProactiveBridgeHandle | undefined;
 /** 向渲染层推一条 IPC(窗口已关则静默丢弃)。 */
 function emit(channel: string, payload?: unknown): void {
   mainWindow?.webContents.send(channel, payload);
+}
+
+/** 定位项目根 .env.local(与 persistOutputLang/persistVoiceId/复刻区同一逻辑;集中一处复用)。 */
+function resolveEnvLocalPath(): string {
+  return join(process.cwd(), '.env.local');
 }
 
 // —— 朗读(本批次):同一时刻只朗读一条 + 可干净打断;abort 时发 ttsAudioStop 清渲染层队列。
@@ -811,6 +823,56 @@ function registerIpc(handle: AppHandle): void {
       handle.env['CHAT_A_VOICE_OUTPUT_LANG'] = lang;
     }
     return lang;
+  });
+
+  // —— 音频设备列举/选择(设置面板下拉框) ——
+  // 渲染→主:枚举可用输入/输出音频设备(naudiodon 不可用 → 空列表,降级不崩,§3.2)。
+  ipcMain.handle(IPC.audioListDevices, async (): Promise<AudioDeviceLists> => {
+    let mod: unknown = {};
+    try {
+      mod = await import('naudiodon');
+    } catch {
+      mod = {};
+    }
+    const toOpt = (d: { id: number; name: string; hostApi: string; defaultSampleRate: number }) => ({
+      id: d.id,
+      name: d.name,
+      hostApi: d.hostApi,
+      sampleRate: d.defaultSampleRate,
+    });
+    return {
+      inputs: listInputDevices(mod).map(toOpt),
+      outputs: listOutputDevices(mod).map(toOpt),
+      current: {
+        inputName: handle.env['CHAT_A_AUDIO_INPUT_DEVICE_NAME'] ?? '',
+        outputName: handle.env['CHAT_A_AUDIO_OUTPUT_DEVICE_NAME'] ?? '',
+      },
+    };
+  });
+
+  // 渲染→主:提交设备选择 → 写回 .env.local 设备名 + host,并即时同步进程 env(下次 voiceStart 解析即用)。
+  // 写盘失败 → 返回 { ok: false },不崩(§3.2)。
+  ipcMain.handle(IPC.audioSelectDevice, (_e, sel: AudioSelectInput): { ok: boolean } => {
+    try {
+      const path = resolveEnvLocalPath();
+      let text = '';
+      try {
+        text = readFileSync(path, 'utf8');
+      } catch {
+        text = '';
+      }
+      writeFileSync(path, persistAudioSelectionText(text, sel), 'utf8');
+      // 运行时即时生效:同步进程内 env(下次 voiceStart 解析时用)。
+      const nameKey =
+        sel.kind === 'input' ? 'CHAT_A_AUDIO_INPUT_DEVICE_NAME' : 'CHAT_A_AUDIO_OUTPUT_DEVICE_NAME';
+      const hostKey =
+        sel.kind === 'input' ? 'CHAT_A_AUDIO_INPUT_DEVICE_HOST' : 'CHAT_A_AUDIO_OUTPUT_DEVICE_HOST';
+      handle.env[nameKey] = sel.name;
+      handle.env[hostKey] = sel.hostApi;
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
   });
 
   // 一键复刻:据引擎(qwen/cosyvoice)读文件/字节 → 创建音色(cosyvoice 含临时上传+异步轮询)→
