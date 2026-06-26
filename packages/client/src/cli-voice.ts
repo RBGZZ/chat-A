@@ -15,6 +15,8 @@
  */
 import { stdout, env as procEnv } from 'node:process';
 import { SAMPLE_RATE_HZ } from '@chat-a/protocol';
+import type { VoiceTraceEvent } from '@chat-a/protocol';
+import { formatVoiceTrace, SqliteVoiceTraceSink } from '@chat-a/observability';
 import { connectClientTransport } from '@chat-a/gateway';
 import {
   createStt,
@@ -147,6 +149,64 @@ export function loadBackchannelConfig(env: NodeJS.ProcessEnv): BackchannelConfig
   if (mode === 'focus') return undefined; // 专注:不附和
   const cooldownMs = mode === 'companion' ? 4000 : 7000; // companion 频繁;balanced/缺省较克制
   return { ...DEFAULT_BACKCHANNEL_CONFIG, cooldownMs };
+}
+
+/** {@link loadVoiceTrace} 返回的语音可追溯装配:observer(fan-out 到实时日志/SQLite)+ 收尾。 */
+export interface VoiceTraceSetup {
+  /** 注入 `VoiceLoopDeps.voiceObserver` 的 fan-out;两呈现都未启用时本结构整体为 undefined(不注入)。 */
+  readonly observer?: (ev: VoiceTraceEvent) => void;
+  /** stop 收尾:关 SQLite sink(若有);幂等。无落库时省略。 */
+  readonly close?: () => void;
+}
+
+/**
+ * 解析语音可追溯装配(spec §6/§7/§8,行为即配置、纯加法、默认零开销):
+ *   - **实时日志**:`CHAT_A_VOICE_TRACE ∈ {1,on,true}` → observer 把 `formatVoiceTrace(ev)` 写 stdout。
+ *   - **SQLite 落库**:`CHAT_A_VOICE_TRACE_DB`(显式)优先;否则若 `CHAT_A_DECISION_TRACE` 开则
+ *     **复用决策 trace 同库** `CHAT_A_DECISION_TRACE_DB ?? 'chat-a-trace.db'`(同库不同表,便于同
+ *     correlationId join);二者皆无 → 不落库。
+ *   - **二者皆无(非 live 且无库)** → 返回 undefined → startVoiceMode 不注入 voiceObserver(零开销,
+ *     VoiceLoop emit 点 no-op,逐字现状)。
+ *   - 有 dbPath 时 try 构造 {@link SqliteVoiceTraceSink};失败仅打印中文告警、不崩(§3.2,可观测绝不打断对话),
+ *     observer 退化为「仅实时日志(若 live)」。observer fan-out:`if(live) stdout;sink?.record(ev)`。
+ *   - close 关 sink(幂等;sink 内部 `#closed` 守卫)。本特性不涉及 key,不打印任何密钥。
+ */
+export function loadVoiceTrace(env: NodeJS.ProcessEnv): VoiceTraceSetup | undefined {
+  const liveRaw = (env['CHAT_A_VOICE_TRACE'] ?? '').trim().toLowerCase();
+  const live = liveRaw === '1' || liveRaw === 'on' || liveRaw === 'true';
+
+  // 库路径:显式 CHAT_A_VOICE_TRACE_DB 优先;否则若决策 trace 开则复用其库(同库便于 join)。
+  const explicitDb = (env['CHAT_A_VOICE_TRACE_DB'] ?? '').trim();
+  const decisionRaw = (env['CHAT_A_DECISION_TRACE'] ?? '').trim().toLowerCase();
+  const decisionOn = decisionRaw === '1' || decisionRaw === 'on' || decisionRaw === 'true';
+  const dbPath =
+    explicitDb.length > 0
+      ? explicitDb
+      : decisionOn
+        ? (env['CHAT_A_DECISION_TRACE_DB'] ?? 'chat-a-trace.db')
+        : undefined;
+
+  // 非 live 且无库 → 不注入,零开销(VoiceLoop emit 点 no-op,逐字现状)。
+  if (!live && dbPath === undefined) return undefined;
+
+  // 落库 sink(可选):构造失败仅告警、不崩(§3.2);失败后 observer 退化为仅实时日志(若 live)。
+  let sink: SqliteVoiceTraceSink | undefined;
+  if (dbPath !== undefined) {
+    try {
+      sink = new SqliteVoiceTraceSink({ path: dbPath });
+    } catch (err) {
+      stdout.write(
+        `[语音] voice trace SQLite sink 构造失败(已跳过落库,不影响对话):${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
+
+  const s = sink; // 闭包捕获(便于 exactOptionalPropertyTypes 下条件展开 close)。
+  const observer = (ev: VoiceTraceEvent): void => {
+    if (live) stdout.write(formatVoiceTrace(ev) + '\n');
+    s?.record(ev);
+  };
+  return { observer, ...(s ? { close: () => s.close() } : {}) };
 }
 
 /**
@@ -583,6 +643,9 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
   // 调一次存变量(避免在 loopDeps 注入处重复调);仅 stt-stream 路实际生效。
   const backchannel = loadBackchannelConfig(env);
 
+  // 语音可追溯(§8.1):实时日志 + SQLite 双呈现(默认全关 → undefined → 不注入 voiceObserver,零开销)。
+  const vt = loadVoiceTrace(env);
+
   const handle = runVoiceLoop({
     device,
     bus: deps.bus,
@@ -623,6 +686,8 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
             ...(backchannel ? { backchannel } : {}),
           }
         : {}),
+      // 语音可追溯(§8.1):仅在 vt 有 observer 时透传(未开 env → 不带键 → emit 点 no-op,零开销)。
+      ...(vt?.observer ? { voiceObserver: vt.observer } : {}),
     },
   });
 
@@ -658,6 +723,12 @@ export async function startVoiceMode(deps: VoiceModeDeps): Promise<VoiceModeHand
         /* ignore */
       }
       handle.stop();
+      // 关 voice trace SQLite sink(若有);幂等、吞错(与现有 sink 收尾一致)。
+      try {
+        vt?.close?.();
+      } catch {
+        /* ignore */
+      }
     },
   };
 }
