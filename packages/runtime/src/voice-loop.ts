@@ -44,6 +44,15 @@ import {
   type AttentionMode,
   type UserVoiceSignal,
 } from './attention';
+import {
+  type BackchannelConfig,
+  type BackchannelState,
+  INITIAL_BACKCHANNEL_STATE,
+  decideBackchannel,
+  onSpeechStartedState,
+  onPartialState,
+  onTurnDoneState,
+} from './backchannel-controller';
 
 /** 被打断半句写回记忆时拼接的尾标（承 OLV：小雪记得在哪被打断）。 */
 const INTERRUPT_MARK = '[被用户打断]';
@@ -204,6 +213,12 @@ export interface VoiceLoopDeps {
    */
   readonly streamingStt?: StreamingSttPort;
   /**
+   * backchannel 附和配置(全双工 v1,**可选、纯加法**)。仅 `voicePath==='stt-stream'` 且注入时生效:
+   * 用户说话中停顿时插一句缓存 clip「嗯/对」附和——**不占回合、不调 LLM、不进状态机**;播放期按时刻门控上行防回声。
+   * 不注入(缺省)→ 不附和,逐字现状。
+   */
+  readonly backchannel?: BackchannelConfig;
+  /**
    * omni 直路系统提示组装接缝（path B，§5.4 / §6 人格，**可选**、纯加法）。
    * 不注入（缺省）→ omni 路以**空 opts** 调 `respondToAudio`，与本切片前**逐字一致**（无人设/记忆/语气）。
    * 注入后 → omni 回合在调 `respondToAudio` 前先 `await` 它取得组装好的系统提示（persona 身份 + 记忆 +
@@ -321,6 +336,20 @@ export class VoiceLoop {
   /** onError 后置 true:本轮退回批式 stt(本地 VAD+endpointing);`start()` 重置以给新一轮机会。 */
   #streamDegraded = false;
   /**
+   * backchannel 附和配置(全双工 v1)；未注入 → undefined → 不附和(逐字现状)。
+   * 仅 stt-stream 路用:stt-stream handlers 推进 `#bcState`,`#onAudio` 连续分支每帧 consult。
+   */
+  readonly #backchannel: BackchannelConfig | undefined;
+  /** backchannel 外置状态(由本 loop 持有,由 stt-stream handlers + 每帧决策推进)。 */
+  #bcState: BackchannelState = INITIAL_BACKCHANNEL_STATE;
+  /**
+   * 上行门控截止时刻(ms)：附和播放期内 `> now` 暂停上行推流(防自家附和音回灌 ASR);
+   * `< now` 即不门控。**按时刻自动解除**(不依赖播放回调,绝不卡死推流,§3.2)。
+   */
+  #bcGateUntilMs = 0;
+  /** 附和 clip 懒合成缓存(clipText → 合成好的 PcmChunk 序列;轮换复用,避免重复合成)。 */
+  readonly #bcClipCache = new Map<string, PcmChunk[]>();
+  /**
    * omni 直路系统提示组装接缝（path B，§5.4/§6）；未注入 → undefined → omni 路以空 opts(逐字现状)。
    * 注入后在 `#startThinkingOmni` 调 `respondToAudio` 前 `await` 它得 instructions(失败/空→退回空 opts)。
    */
@@ -392,6 +421,7 @@ export class VoiceLoop {
         : undefined;
     this.#omni = deps.omni;
     this.#streamingStt = deps.streamingStt;
+    this.#backchannel = deps.backchannel;
     this.#composeOmniInstructions = deps.composeOmniInstructions;
     this.#advanceProsody = deps.advanceProsody;
     this.#voicePath = deps.voicePath ?? 'stt';
@@ -474,6 +504,14 @@ export class VoiceLoop {
     return this.#voicePath === 'stt-stream' && this.#streamingStt !== undefined && !this.#streamDegraded;
   }
 
+  /**
+   * 是否启用 backchannel 附和：走连续流式路(`#useStream`) **且**注入了 `backchannel` 配置。
+   * 仅 stt-stream 路才有连续 partial 流可判「说话中停顿」;未注入/非 stt-stream → false → 逐字现状。
+   */
+  get #useBackchannel(): boolean {
+    return this.#useStream && this.#backchannel !== undefined;
+  }
+
   /** 启动：订阅上行音频，进入 listening。重复 start 幂等（先退订旧的）。 */
   start(): void {
     this.stop();
@@ -492,6 +530,8 @@ export class VoiceLoop {
     if (this.#streamingStt === undefined || this.#streamSession !== null) return;
     const handlers: StreamingSttHandlers = {
       onSpeechStarted: () => {
+        // backchannel:记本轮用户开口时刻(独立于语音状态机,故在早退之前推进)。未启用则 no-op。
+        if (this.#useBackchannel) this.#bcState = onSpeechStartedState(this.#bcState, this.#now());
         // listening:仅作在场/状态提示(回合由 onFinal 驱动,这里不改状态机);其余态忽略。
         // emit 形态与 #emit 的 'vad:speech_start' 分支逐字一致(直接 emit,不经 #go 以免误迁移)。
         if (this.#state !== 'listening') return;
@@ -503,9 +543,12 @@ export class VoiceLoop {
         }
       },
       onPartial: () => {
-        /* 可选:UI/状态;本切片不强用(partial 不驱动回合)。 */
+        // backchannel:刷新最近 partial 时刻(判停顿用);本切片 partial 仍不驱动回合。
+        if (this.#useBackchannel) this.#bcState = onPartialState(this.#bcState, this.#now());
       },
       onFinal: (text, emotion) => {
+        // backchannel:一句定稿 → 清开口态(下句前不附和);保留冷却与 clip 索引。
+        if (this.#useBackchannel) this.#bcState = onTurnDoneState(this.#bcState);
         // 一句定稿 = 一个回合:走现有 #send+TTS 核心(emotion 经 prosody 并入 PAD)。
         this.#runStreamTurn(text, emotion);
       },
@@ -543,6 +586,9 @@ export class VoiceLoop {
     this.#audioBuf = [];
     this.#userSpeechStartAtMs = null;
     this.#echoGuard?.resetTiers(); // 全量重置 EchoGuard 档位(清说话/冷却,start/stop 干净起步)
+    // backchannel:清门控 + 重置外置状态(幂等,start/stop 干净起步);clip 缓存保留(同音色跨轮复用)。
+    this.#bcGateUntilMs = 0;
+    this.#bcState = INITIAL_BACKCHANNEL_STATE;
     // 连续流式路:关会话(发 finish + 关连接);幂等。
     try {
       this.#streamSession?.close();
@@ -642,11 +688,18 @@ export class VoiceLoop {
           return;
         }
         // listening / thinking / endpointing 等非 speaking 态:持续推流(云端归入下一句,简单稳妥)。
-        try {
-          this.#streamSession?.pushAudio(this.#toPcmChunk(pcm));
-        } catch {
-          /* 推流失败不崩(§3.2) */
+        // backchannel 播放期(门控窗内 now < #bcGateUntilMs):暂停上行推流防自家附和音回灌 ASR;
+        // 门控按时刻自动解除(不依赖播放回调,绝不卡死推流,§3.2)。未启用 backchannel 时门控恒为 0,逐字现状。
+        const now = this.#now();
+        if (now >= this.#bcGateUntilMs) {
+          try {
+            this.#streamSession?.pushAudio(this.#toPcmChunk(pcm));
+          } catch {
+            /* 推流失败不崩(§3.2) */
+          }
         }
+        // 每帧 consult 附和决策(命中则播缓存 clip,不占回合、不进状态机);未启用则 no-op。
+        if (this.#useBackchannel) this.#maybeBackchannel(now);
         return;
       }
 
@@ -897,6 +950,51 @@ export class VoiceLoop {
     if (text.trim().length === 0) return; // 空 final 忽略
     const gen = ++this.#gen; // 抢占:作废在途回合(若有),本句成为当前回合
     this.#runTurn(text, emotion, gen);
+  }
+
+  // ───────────────────────────── backchannel 附和（全双工 v1）─────────────────────────────
+
+  /**
+   * 每帧 consult backchannel 决策核(仅 stt-stream 路、注入了 backchannel 时调用)：
+   * 据外置 `#bcState` 与注入配置判是否到附和点;命中则懒合成/缓存 clip 并下行播放(`#playBackchannel`)。
+   * **不占回合、不进 thinking/speaking 状态机、不调 `#send`/LLM**。决策抛错静默跳过(§3.2)。
+   */
+  #maybeBackchannel(nowMs: number): void {
+    if (this.#backchannel === undefined) return;
+    let d: ReturnType<typeof decideBackchannel>;
+    try {
+      d = decideBackchannel(this.#bcState, nowMs, this.#backchannel);
+    } catch (err) {
+      console.warn('[VoiceLoop] backchannel 决策抛错(已捕获,跳过):', err);
+      return;
+    }
+    this.#bcState = d.state;
+    if (d.fire && d.clipText !== undefined) void this.#playBackchannel(d.clipText);
+  }
+
+  /**
+   * 播一句附和 clip(懒合成+缓存);**绝不占回合、不改状态机、不调 `#send`**(承全双工 v1 关键约束)。
+   * 缓存命中则直接复用;首次以 `#tts.synthesize(clipText, #ttsOptions)` 合成并缓存(与 `#speak` 同通道)。
+   * 按 clip 时长 + 余量设上行门控截止 `#bcGateUntilMs`——**按时刻自动解除**(不依赖播放回调,绝不卡死推流);
+   * 经 `#transport.sendAudio(#toTtsFrame(...))` 下行播放,不经状态机/不触发 tts:first_audio。
+   * 任何失败(合成/下行)静默跳过(§3.2),绝不拖累主对话。
+   */
+  async #playBackchannel(clipText: string): Promise<void> {
+    try {
+      let chunks = this.#bcClipCache.get(clipText);
+      if (chunks === undefined) {
+        chunks = [];
+        for await (const c of this.#tts.synthesize(clipText, this.#ttsOptions)) chunks.push(c);
+        this.#bcClipCache.set(clipText, chunks);
+      }
+      // 门控上行 = clip 总时长 + 余量(按时刻自动解除,绝不卡死推流,§3.2)。
+      const durMs = chunks.reduce((a, c) => a + (c.samples.length / c.sampleRate) * 1000, 0);
+      this.#bcGateUntilMs = this.#now() + durMs + 200;
+      // 下行播放:不改状态机(不进 speaking、不 emit tts:first_audio),附和不占回合。
+      for (const c of chunks) this.#transport.sendAudio(this.#toTtsFrame(c));
+    } catch (err) {
+      console.warn('[VoiceLoop] backchannel 跳过(不影响对话):', err);
+    }
   }
 
   // ───────────────────────────── 想：omni audio-in 直路（path B）─────────────────────────────
