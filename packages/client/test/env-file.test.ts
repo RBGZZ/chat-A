@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseDotEnv, applyDotEnv } from '../src/env-file';
+import { parseDotEnv, applyDotEnv, upsertEnvLocal } from '../src/env-file';
 
 /**
  * .env.local 解析/应用纯逻辑测试(对齐 start.bat 语义:eol=#、tokens=1,*、真实 env 优先)。
@@ -60,5 +60,17 @@ describe('client/applyDotEnv', () => {
     const env: NodeJS.ProcessEnv = { A: '' };
     applyDotEnv({ A: 'fromfile' }, env);
     expect(env['A']).toBe('fromfile');
+  });
+});
+
+describe('upsertEnvLocal', () => {
+  it('新增键追加到末尾', () => {
+    expect(upsertEnvLocal('A=1\n', 'B', '2')).toBe('A=1\nB=2\n');
+  });
+  it('同键覆盖、不重复', () => {
+    expect(upsertEnvLocal('A=1\nB=2\n', 'B', '9')).toBe('A=1\nB=9\n');
+  });
+  it('空文本直接写一行', () => {
+    expect(upsertEnvLocal('', 'A', '1')).toBe('A=1\n');
   });
 });

@@ -53,3 +53,25 @@ export function applyDotEnv(parsed: Record<string, string>, env: NodeJS.ProcessE
     }
   }
 }
+
+/** 在 .env.local 文本里 upsert 一个键(同键覆盖、否则末尾追加;保证结尾换行)。纯函数。 */
+export function upsertEnvLocal(text: string, key: string, value: string): string {
+  const line = `${key}=${value}`;
+  const lines = text.split('\n');
+  let found = false;
+  const out = lines.map((l) => {
+    const eq = l.indexOf('=');
+    if (eq > 0 && l.slice(0, eq).trim() === key) {
+      found = true;
+      return line;
+    }
+    return l;
+  });
+  let result = out.join('\n');
+  if (!found) {
+    if (result.length > 0 && !result.endsWith('\n')) result += '\n';
+    result += line;
+  }
+  if (!result.endsWith('\n')) result += '\n';
+  return result;
+}

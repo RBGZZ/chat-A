@@ -1,4 +1,5 @@
 import { createInterface } from 'node:readline';
+import { createInterface as createRl } from 'node:readline/promises';
 import { randomUUID } from 'node:crypto';
 import process, { stdin, stdout, env, argv } from 'node:process';
 import { Conversation, ToolCallingStrategy, type LightVoiceBus } from '@chat-a/runtime';
@@ -17,6 +18,7 @@ import { assembleAutonomy, type AutonomyHandle } from './assembly/autonomy';
 import { assembleConsolidation, type ConsolidationHandle } from './assembly/consolidation';
 import { createPresencePort, createCompanionCandidateSource } from './assembly/memory-autonomy-ports';
 import { parseCommand, renderHelp, renderPersona, renderBanner } from './commands';
+import { makeCliAudioSelect } from './audio/cli-device-select';
 
 /**
  * chat-A 文字版 MVP REPL —— 面向用户的交互式终端前端(瘦客户端的文字形态,承 §9)。
@@ -217,6 +219,20 @@ async function main(): Promise<void> {
         bus,
         sessionId,
         env,
+        // 设备选择文字菜单壳:解析未命中设备时列举供用户选,选定写回 .env.local 设备名;
+        // 非交互/非法输入回退系统默认(§3.2)。question 用 readline/promises 一次性问答。
+        audioSelect: makeCliAudioSelect({
+          question: async (q) => {
+            const rl = createRl({ input: stdin, output: stdout });
+            try {
+              return await rl.question(q);
+            } finally {
+              rl.close();
+            }
+          },
+          write: (s) => stdout.write(s),
+          envPath: '.env.local',
+        }),
         // §4.1:语音 I/O 语种解耦——input_lang→STT、output_lang/voice_id/clone_ref→TTS;缺省全空时不透传(逐字现状)。
         ...(voiceProfile.inputLang ? { sttLanguage: voiceProfile.inputLang } : {}),
         ...(voiceTtsOptions ? { ttsOptions: voiceTtsOptions } : {}),
