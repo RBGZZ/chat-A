@@ -179,3 +179,12 @@ API（注入 `getDevices` 以可单测）：
 - **qwen3.5-omni-flash-realtime 账号开通状态未确认**（疑似邀测/白名单）、realtime 精确计费/限流、确切日期快照 id 均**无官方确认**——上线前需在百炼控制台核实。默认升 3.5 后若账号未开通，靠现有 omni 回落 STT 范式兜底；可经 `CHAT_A_OMNI_MODEL` 回退 3 路。
 - 抗混叠重采样选型（自写多相 FIR vs 引入轻量库）需在 writing-plans 阶段定，受嵌入式轻量化约束（见记忆 `embedded-lightweight-strategy`）。
 - 设备名在某些驱动下可能超长/带特殊字符，`.env.local` 写入需转义（`upsertEnvKey` 现有行为需复核）。
+
+## 9. 未来方向：全双工全模态（独立后续切片，本刀不实现）
+
+调研了全双工全模态实时模型（MiniCPM-o 4.5 / Moshi / GLM-4-Voice）后确认：**全双工是一个新的后端类别**，与本刀正交，作为独立大切片后续推进。在此记录预留接缝，避免本刀把假设焊死。
+
+- **MiniCPM-o 4.5 定位**：真全双工（边听边说、可打断、可主动插话）、全模态、Apache-2.0 可商用、**内置 zero-shot 音色复刻**（参考音频，质量号称超 CosyVoice2）、TTFT 0.6s。但 int4 需 ~11GB 显存 GPU，**树莓派不可行**（端侧另走轻量分体方案）；可走云 Realtime API 或 PC 本地 GPU（`llama.cpp-omni`）。
+- **架构冲击**：全双工打破回合制假设。现有 `OmniAudioPort`（"喂一段→yield 事件"）不够用，需并列一个 `FullDuplexAudioSession`（会话级持续双向流：open/pushInputFrame/onOutputFrame/onEvent/close）。回合制是其退化特例，反之不成立。全双工模型把 VAD/EOU/打断/TTS/音色复刻**内化**，故这些应设计成 **capability-owned 的可选环节**，而非 pipeline-owned 的必经节点。
+- **音色复刻接缝上移**：全双工路无独立 TTS provider，音色复刻是模型条件输入。未来应把「voice identity / 目标音色」抽象成独立概念，既能驱动回合制的外接 TTS 复刻，也能作为全双工 session 的 voice prompt。本刀**不动**现有 TTS/复刻设计。
+- **本刀为何是公共地基**：设备选择 + 原生率→目标率的抗混叠重采样，是回合制与全双工**都需要**的设备侧 I/O 层（全双工对持续上行 PCM 质量更敏感）。本刀已把采集设计成连续帧流，天然兼容未来全双工直推。
