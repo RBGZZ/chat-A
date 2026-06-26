@@ -406,6 +406,7 @@ export async function createAudioDevice(
 
     // 输出设备:纯按设备名解析 > 选择回调 > 系统默认 -1(与输入分离,绝不套用输入 id,修 bug1)。
     let outputDeviceId: number | undefined;
+    let outputSampleRate: number | undefined; // 输出设备原生率;TTS 块重采样到它(修 16k-only 蓝牙免提输出强开 24k 失败)。
     {
       const oname = (env['CHAT_A_AUDIO_OUTPUT_DEVICE_NAME'] ?? '').trim();
       const ohost = (env['CHAT_A_AUDIO_OUTPUT_DEVICE_HOST'] ?? '').trim() || undefined;
@@ -414,7 +415,10 @@ export async function createAudioDevice(
         ochosen = await opts.promptSelect('output', outputs);
         if (ochosen) opts.persistSelection?.('output', ochosen);
       }
-      if (ochosen) outputDeviceId = ochosen.id;
+      if (ochosen) {
+        outputDeviceId = ochosen.id;
+        outputSampleRate = ochosen.defaultSampleRate;
+      }
     }
 
     const device = new NodeAudioDevice({
@@ -423,6 +427,7 @@ export async function createAudioDevice(
       ...(outputDeviceId !== undefined ? { outputDeviceId } : {}),
       captureSampleRate: requiredRate,
       ...(deviceCaptureRate !== undefined ? { deviceCaptureRate } : {}),
+      ...(outputSampleRate !== undefined ? { outputSampleRate } : {}),
     });
     await device.init(); // 装不上 → 抛明确报错(调用方 catch 后回落 Fake)
     return { device, real: true };

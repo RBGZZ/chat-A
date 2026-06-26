@@ -34,3 +34,41 @@ describe('NodeAudioDevice 输入/输出 deviceId 分离 (bug1)', () => {
     expect(opens.find((o) => o.outOptions)!.outOptions.deviceId).toBe(-1);
   });
 });
+
+describe('NodeAudioDevice 输出采样率解耦 (16k-only 蓝牙输出)', () => {
+  // 记录写入字节数,推断重采样后样本数。
+  function makeWriteSpy() {
+    const opens: Array<{ inOptions?: any; outOptions?: any }> = [];
+    const writes: Buffer[] = [];
+    const AudioIO = (opts: any) => {
+      opens.push(opts);
+      return { on() {}, start() {}, write(b: Buffer) { writes.push(b); }, quit() {} };
+    };
+    return { mod: { AudioIO, getDevices: () => [] }, opens, writes };
+  }
+
+  it('outputSampleRate=16000 时输出流按 16k 开流(不再硬 24k)', async () => {
+    const { mod, opens } = makeWriteSpy();
+    const dev = new NodeAudioDevice({ nativeModule: 'x', outputDeviceId: 12, outputSampleRate: 16000 } as any);
+    await (dev as any).initWithModule(mod);
+    dev.play({ samples: new Int16Array(240), sampleRate: 24000, channels: 1 });
+    expect(opens.find((o) => o.outOptions)!.outOptions.sampleRate).toBe(16000);
+  });
+
+  it('24k TTS 块 → 重采样到 16k(样本数按比例缩到 ~2/3)', async () => {
+    const { mod, writes } = makeWriteSpy();
+    const dev = new NodeAudioDevice({ nativeModule: 'x', outputDeviceId: 12, outputSampleRate: 16000 } as any);
+    await (dev as any).initWithModule(mod);
+    dev.play({ samples: new Int16Array(240), sampleRate: 24000, channels: 1 }); // 240@24k → 160@16k
+    const samples = writes[0]!.length / 2; // s16le → 2 字节/样本
+    expect(samples).toBe(160);
+  });
+
+  it('率相同(24k→24k)恒等不重采样,样本数不变', async () => {
+    const { mod, writes } = makeWriteSpy();
+    const dev = new NodeAudioDevice({ nativeModule: 'x', outputSampleRate: 24000 } as any);
+    await (dev as any).initWithModule(mod);
+    dev.play({ samples: new Int16Array(240), sampleRate: 24000, channels: 1 });
+    expect(writes[0]!.length / 2).toBe(240);
+  });
+});

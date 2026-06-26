@@ -61,6 +61,12 @@ export interface NodeAudioDeviceOptions {
   readonly deviceCaptureRate?: number;
   /** 播放采样率(Hz);缺省 24000(TTS 常见)。真库不支持动态改时按此开输出流。 */
   readonly playbackSampleRate?: number;
+  /**
+   * **输出流开流率**(Hz);缺省 = playbackSampleRate(24000)。设为输出设备原生率时,本类按原生率开输出流、
+   * 并把每个 TTS 播放块从 chunk.sampleRate **重采样到它**(抗混叠)。修:蓝牙免提(HFP)等 **16k-only** 输出设备
+   * 强开 24k 报「Invalid sample rate」→ 没声音(由装配层据解析到的输出设备 defaultSampleRate 传入)。
+   */
+  readonly outputSampleRate?: number;
   /** 设备号(PortAudio deviceId;-1 = 默认设备)。 */
   readonly deviceId?: number;
   /** 输出设备号(PortAudio deviceId;-1 = 默认扬声器)。**与输入分离**:不设则用 -1,绝不套用输入 deviceId(修 bug1)。 */
@@ -74,6 +80,8 @@ export class NodeAudioDevice implements AudioDevice {
   readonly #captureRate: number;
   readonly #deviceCaptureRate: number;
   readonly #playbackRate: number;
+  /** 输出流开流率 = 输出设备原生率(装配层解析得到);TTS 块按 chunk.sampleRate 重采样到它。缺省回落 #playbackRate。 */
+  readonly #outputSampleRate: number;
   readonly #deviceId: number;
   readonly #outputDeviceId: number;
   /** 跨帧重采样 carry:上一帧尾部输入样本,拼到下一帧前以消除帧边界不连续。 */
@@ -93,6 +101,9 @@ export class NodeAudioDevice implements AudioDevice {
     // 设备开流率:缺省=输出率(16k,行为不变)。设了不同值 → 按原生率开流 + 重采样到 #captureRate。
     this.#deviceCaptureRate = opts.deviceCaptureRate ?? this.#captureRate;
     this.#playbackRate = opts.playbackSampleRate ?? 24_000;
+    // 输出流开流率:缺省=播放率(24k,行为不变);设了输出设备原生率 → 按原生率开流 + 把 TTS 块重采样到它
+    // (修:蓝牙免提等 16k-only 输出设备强开 24k 报 Invalid sample rate → 没声音)。
+    this.#outputSampleRate = opts.outputSampleRate ?? this.#playbackRate;
     this.#deviceId = opts.deviceId ?? -1;
     this.#outputDeviceId = opts.outputDeviceId ?? -1; // 缺省默认扬声器,绝不套用输入 id
     this.id = `node:${this.#nativeModule}`;
@@ -210,9 +221,14 @@ export class NodeAudioDevice implements AudioDevice {
     if (this.#outStream === null) this.#openOutput();
     const out = this.#outStream;
     if (out?.write === undefined) return;
+    // TTS 块按 chunk.sampleRate 重采样到输出流开流率(抗混叠;率相同恒等拷贝)。修 16k-only 输出设备播 24k 失败。
+    const samples =
+      chunk.sampleRate === this.#outputSampleRate
+        ? chunk.samples
+        : resampleSinc(chunk.samples, chunk.sampleRate, this.#outputSampleRate);
     // Int16Array → s16le Buffer(小端)。
-    const buf = Buffer.alloc(chunk.samples.length * SAMPLE_BYTES);
-    for (let i = 0; i < chunk.samples.length; i++) buf.writeInt16LE(chunk.samples[i] ?? 0, i * SAMPLE_BYTES);
+    const buf = Buffer.alloc(samples.length * SAMPLE_BYTES);
+    for (let i = 0; i < samples.length; i++) buf.writeInt16LE(samples[i] ?? 0, i * SAMPLE_BYTES);
     try {
       out.write(buf);
     } catch {
@@ -226,7 +242,7 @@ export class NodeAudioDevice implements AudioDevice {
       outOptions: {
         channelCount: CHANNELS,
         sampleFormat: 16, // s16le
-        sampleRate: this.#playbackRate,
+        sampleRate: this.#outputSampleRate,
         deviceId: this.#outputDeviceId,
         closeOnError: false,
       },
