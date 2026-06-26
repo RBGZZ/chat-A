@@ -14,14 +14,17 @@
  */
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import process, { argv, env, stdout } from 'node:process';
 import { assembleApp, startVoiceMode, type VoiceModeHandle } from '../packages/client/src/index';
-import { encodeWavBuffer } from '../packages/client/src/audio/wav';
+import { encodeWavBuffer, decodeWav } from '../packages/client/src/audio/wav';
+import { resampleSinc } from '../packages/client/src/audio/resample';
+import { loadVoiceProfile, type TtsOptions } from '../packages/providers/src/index';
 
 const SR = 16000;
 
-/** 合成「1.2s 220Hz 有声(过 VAD)→ 2s 静音(触发端点)」16k mono s16le,写临时 WAV,返回路径。 */
+/** 合成「0.4s 220Hz 有声(过 VAD)→ 2s 静音(触发端点)」16k mono s16le,写临时 WAV,返回路径。 */
 function synthInputWav(): string {
   const voiced = Math.floor(SR * 0.4);
   const silence = Math.floor(SR * 2.0);
@@ -33,9 +36,38 @@ function synthInputWav(): string {
   return path;
 }
 
+/** 读任意采样率/声道的 WAV → 下混单声道 → 抗混叠重采样到 16k → 写临时 16k WAV(WAV 设备要 16k mono)。 */
+function prepareWav(path: string): string {
+  const dec = decodeWav(readFileSync(path));
+  let s = dec.samples;
+  if (dec.channels === 2) {
+    const mono = new Int16Array(Math.floor(s.length / 2));
+    for (let i = 0; i < mono.length; i++) mono[i] = s[2 * i] ?? 0;
+    s = mono;
+  }
+  if (dec.sampleRate !== SR) s = resampleSinc(s, dec.sampleRate, SR);
+  const out = join(tmpdir(), 'voice-harness-real16k.wav');
+  writeFileSync(out, encodeWavBuffer(s, SR, 1));
+  stdout.write(`[harness] --wav ${path}: ${dec.channels}ch@${dec.sampleRate}Hz → 16k mono(${s.length} 样本)\n`);
+  return out;
+}
+
+/** 与桌面 buildVoiceTtsOptions 同口径:loadVoiceProfile → ttsOptions(voiceId/语种/复刻),供真 TTS 用。 */
+function buildTtsOptions(): TtsOptions | undefined {
+  const p = loadVoiceProfile(env);
+  if (p.outputLang === undefined && p.voiceId === undefined && p.cloneRef === undefined) return undefined;
+  return {
+    ...(p.outputLang !== undefined ? { language: p.outputLang } : {}),
+    ...(p.voiceId !== undefined ? { voiceId: p.voiceId } : {}),
+    ...(p.cloneRef !== undefined
+      ? { refAudio: { source: p.cloneRef.source, ...(p.cloneRef.refText !== undefined ? { refText: p.cloneRef.refText } : {}), ...(p.cloneRef.refLang !== undefined ? { refLang: p.cloneRef.refLang } : {}) } }
+      : {}),
+  };
+}
+
 async function main(): Promise<void> {
   const wavArg = argv.includes('--wav') ? argv[argv.indexOf('--wav') + 1] : undefined;
-  const inWav = wavArg ?? synthInputWav();
+  const inWav = wavArg ? prepareWav(wavArg) : synthInputWav();
 
   // 开发友好的固定档(可被外部 env 覆盖):无 Electron/naudiodon、内存记忆、trace 直出。
   env['CHAT_A_AUDIO_DEVICE'] = 'wav';
@@ -75,6 +107,7 @@ async function main(): Promise<void> {
       bus: handle.bus,
       sessionId: handle.sessionId,
       env,
+      ...(buildTtsOptions() ? { ttsOptions: buildTtsOptions()! } : {}), // 真 TTS 用 voiceId/语种;fake 时忽略
     });
     stdout.write(`[harness] 已启动 info=${JSON.stringify(voice.info)}\n`);
     await done;
