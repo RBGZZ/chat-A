@@ -12,11 +12,12 @@
  *   CHAT_A_STT_KIND=qwen-asr pnpm voice:harness --wav speech16k.wav   # 真 STT 跑真 16k 语音 WAV(集成)
  *   CHAT_A_LLM_PROVIDER=fake CHAT_A_TTS_KIND=fake pnpm voice:harness   # 全 fake,离线/秒级
  */
-import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { writeFileSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import process, { argv, env, stdout } from 'node:process';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+import process, { argv, cwd, env, stdout } from 'node:process';
 import { assembleApp, startVoiceMode, type VoiceModeHandle } from '../packages/client/src/index';
 import { encodeWavBuffer, decodeWav } from '../packages/client/src/audio/wav';
 import { resampleSinc } from '../packages/client/src/audio/resample';
@@ -66,24 +67,42 @@ function buildTtsOptions(): TtsOptions | undefined {
 }
 
 async function main(): Promise<void> {
+  const liveMic = argv.includes('--mic');
   const wavArg = argv.includes('--wav') ? argv[argv.indexOf('--wav') + 1] : undefined;
-  const inWav = wavArg ? prepareWav(wavArg) : synthInputWav();
 
-  // 开发友好的固定档(可被外部 env 覆盖):无 Electron/naudiodon、内存记忆、trace 直出。
-  env['CHAT_A_AUDIO_DEVICE'] = 'wav';
-  env['CHAT_A_AUDIO_IN_WAV'] = inWav;
-  env['CHAT_A_AUDIO_OUT_WAV'] = join(tmpdir(), 'voice-harness-out.wav');
+  // 公共固定档:无 Electron;避开 better-sqlite3 ABI125;trace 直出。
   env['CHAT_A_VOICE_TRACE'] ??= '1';
   env['CHAT_A_VOICE_TRACE_DB'] = ''; // 只要 stdout [vtrace];不落库(避开 better-sqlite3 ABI125)
   env['CHAT_A_SQLITE_BACKEND'] = ''; // 任何 sqlite 走 node:sqlite(node24 内建),不强制 better-sqlite3
   env['CHAT_A_MEMORY_BACKEND'] = 'memory'; // 避开 better-sqlite3(Electron ABI125,node 加载不了)
-  env['CHAT_A_STT_KIND'] ??= 'fake'; // 合成帧无真语音 → 默认 fake STT(确定性);真 STT 须配 --wav 真 16k 语音
-  env['CHAT_A_TTS_KIND'] ??= 'fake'; // 默认 fake TTS:免 cosyvoice 复刻 voiceId/网络,自包含;要真 TTS 设 CHAT_A_TTS_KIND=cosyvoice
-  env['CHAT_A_VOICE_PATH'] ??= 'stt'; // 批式路:本地 VAD+端点驱动有限 WAV,确定性收尾
+
+  let inWav = '';
+  if (liveMic) {
+    // 🎤 真麦模式:naudiodon 实时麦(**须为 node ABI137 重编**)。STT/TTS/VOICE_PATH/设备名全用 .env.local
+    // (stt-stream/qwen-asr/cosyvoice/输入输出设备);本机 WASAPI 渲染失败在 node 下是优雅错误非段错误。
+    env['CHAT_A_AUDIO_DEVICE'] = 'node';
+    // naudiodon 是 desktop 的依赖、不是 client 的 → ESM 裸名 'naudiodon' 解析不到;从 desktop 包位置解析真实
+    // 入口、以 file:// URL 经 CHAT_A_AUDIO_MODULE 传入(node-audio-device 动态 import 之)。须先为 node 重编 naudiodon。
+    try {
+      const req = createRequire(pathToFileURL(join(cwd(), 'packages/desktop/package.json')).href);
+      env['CHAT_A_AUDIO_MODULE'] = pathToFileURL(req.resolve('naudiodon')).href;
+    } catch (e) {
+      stdout.write(`[harness] ⚠️ 解析 naudiodon 失败(将回落 Fake):${e instanceof Error ? e.message : String(e)}\n`);
+    }
+  } else {
+    // 确定性 WAV/合成帧路:无 naudiodon,默认 fake STT/TTS + 真 LLM。
+    inWav = wavArg ? prepareWav(wavArg) : synthInputWav();
+    env['CHAT_A_AUDIO_DEVICE'] = 'wav';
+    env['CHAT_A_AUDIO_IN_WAV'] = inWav;
+    env['CHAT_A_AUDIO_OUT_WAV'] = join(tmpdir(), 'voice-harness-out.wav');
+    env['CHAT_A_STT_KIND'] ??= 'fake';
+    env['CHAT_A_TTS_KIND'] ??= 'fake';
+    env['CHAT_A_VOICE_PATH'] ??= 'stt';
+  }
 
   const handle = assembleApp(); // 读 .env.local(LLM/TTS 等真 provider),env 覆盖优先
   stdout.write(
-    `[harness] llm=${handle.llm.id}/${handle.llm.model} stt=${env['CHAT_A_STT_KIND']} path=${env['CHAT_A_VOICE_PATH']} in=${inWav}\n`,
+    `[harness] mode=${liveMic ? 'mic' : 'wav'} llm=${handle.llm.id}/${handle.llm.model} stt=${env['CHAT_A_STT_KIND'] ?? '(env)'} path=${env['CHAT_A_VOICE_PATH'] ?? '(env)'} ${inWav ? 'in=' + inWav : ''}\n`,
   );
 
   let reply = '';
@@ -110,9 +129,15 @@ async function main(): Promise<void> {
       ...(buildTtsOptions() ? { ttsOptions: buildTtsOptions()! } : {}), // 真 TTS 用 voiceId/语种;fake 时忽略
     });
     stdout.write(`[harness] 已启动 info=${JSON.stringify(voice.info)}\n`);
-    await done;
-    await new Promise((r) => setTimeout(r, 1500)); // 等 TTS 出尽
-    stdout.write(`[harness] ✅ 完整管线跑通 @${Date.now() - t0}ms  小雪回复="${reply.slice(0, 80)}"\n`);
+    if (liveMic) {
+      stdout.write('[harness] 🎤 真麦模式:对麦说话,小雪会回复(听 TTS + 看 [vtrace]);Ctrl+C 退出。\n');
+      process.on('SIGINT', () => { try { voice?.stop(); } catch { /* */ } process.exit(0); });
+      await new Promise(() => {}); // 持续监听,直到 Ctrl+C(多回合)
+    } else {
+      await done;
+      await new Promise((r) => setTimeout(r, 1500)); // 等 TTS 出尽
+      stdout.write(`[harness] ✅ 完整管线跑通 @${Date.now() - t0}ms  小雪回复="${reply.slice(0, 80)}"\n`);
+    }
   } catch (err) {
     stdout.write(`[harness] ❌ 抛错 @${Date.now() - t0}ms: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
     process.exitCode = 1;
