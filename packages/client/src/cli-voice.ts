@@ -321,12 +321,6 @@ export function resolveRequiredInputRate(
   return stt?.capabilities.sampleRate ?? 16000;
 }
 
-/** 解析数字 env(空/非数字→undefined)。 */
-function parseIdEnv(raw: string | undefined): number | undefined {
-  const s = (raw ?? '').trim();
-  return s.length > 0 && Number.isFinite(Number(s)) ? Number(s) : undefined;
-}
-
 /** 惰性加载 naudiodon(装配层枚举用;失败返回 {} 触发降级,绝不崩)。 */
 async function loadNaudiodon(moduleName?: string): Promise<unknown> {
   try {
@@ -360,10 +354,11 @@ export interface CreateAudioDeviceDeps {
  * (供状态行/回落判断)。
  *
  * node 分支解析优先级(§3.2 优雅降级,缺设备/非交互绝不崩):
- *   - 输入/输出 deviceId:显式 id env 覆盖 > 按设备名解析 > 选择回调 > 系统默认 -1。
- *   - 采集率:显式 CHAT_A_AUDIO_CAPTURE_RATE > 解析到的设备 defaultSampleRate(=设备原生率,免配)。
+ *   - 输入/输出设备:**纯按设备名解析**(名→当前 id) > 选择回调 > 系统默认 -1。**不用持久化数字 id**
+ *     (PortAudio id 随插拔/重启洗牌;数字 id 只在启动时由设备名临时解析、用完即弃,绝不进配置)。
+ *   - 采集率:取解析到设备的 defaultSampleRate(=设备原生率,免配)。
  *   - 目标重采样率 requiredInputRate 由能力声明驱动(STT capabilities.sampleRate / omni inputSampleRate);
- *     fail-fast 校验须 > 0。
+ *     fail-fast 校验须 = 16k(VAD/EOU 硬约束)。
  */
 export async function createAudioDevice(
   env: NodeJS.ProcessEnv,
@@ -392,11 +387,10 @@ export async function createAudioDevice(
     const inputs = listInputDevices(mod);
     const outputs = listOutputDevices(mod);
 
-    // 输入:显式 id 覆盖 > 按名解析 > (无名/未命中)选择回调 > 系统默认 -1。
-    let deviceId = parseIdEnv(env['CHAT_A_AUDIO_INPUT_DEVICE_ID']);
-    // 设备开流采样率(Hz):缺省取解析到设备的 defaultSampleRate(免配),显式 env 优先。
-    let deviceCaptureRate = parseIdEnv(env['CHAT_A_AUDIO_CAPTURE_RATE']);
-    if (deviceId === undefined) {
+    // 输入设备:**纯按设备名解析**(名→当前 id) > (无名/未命中)选择回调 > 系统默认 -1。不读任何持久化 id。
+    let deviceId: number | undefined;
+    let deviceCaptureRate: number | undefined; // 设备开流率取解析到设备的原生 defaultSampleRate(免配)。
+    {
       const name = (env['CHAT_A_AUDIO_INPUT_DEVICE_NAME'] ?? '').trim();
       const host = (env['CHAT_A_AUDIO_INPUT_DEVICE_HOST'] ?? '').trim() || undefined;
       let chosen = name.length > 0 ? resolveDeviceByName(inputs, name, host) : null;
@@ -406,13 +400,13 @@ export async function createAudioDevice(
       }
       if (chosen) {
         deviceId = chosen.id;
-        if (deviceCaptureRate === undefined) deviceCaptureRate = chosen.defaultSampleRate;
+        deviceCaptureRate = chosen.defaultSampleRate;
       }
     }
 
-    // 输出:显式 id 覆盖 > 按名解析 > 选择回调 > -1(与输入分离,绝不套用输入 id,修 bug1)。
-    let outputDeviceId = parseIdEnv(env['CHAT_A_AUDIO_OUTPUT_DEVICE_ID']);
-    if (outputDeviceId === undefined) {
+    // 输出设备:纯按设备名解析 > 选择回调 > 系统默认 -1(与输入分离,绝不套用输入 id,修 bug1)。
+    let outputDeviceId: number | undefined;
+    {
       const oname = (env['CHAT_A_AUDIO_OUTPUT_DEVICE_NAME'] ?? '').trim();
       const ohost = (env['CHAT_A_AUDIO_OUTPUT_DEVICE_HOST'] ?? '').trim() || undefined;
       let ochosen = oname.length > 0 ? resolveDeviceByName(outputs, oname, ohost) : null;

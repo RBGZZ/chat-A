@@ -13,7 +13,7 @@ export interface AudioDeviceInfo {
   readonly hostApi: string;
   readonly maxInputChannels: number;
   readonly maxOutputChannels: number;
-  /** 设备原生采样率 → 自动推导开流率（免用户配 CHAT_A_AUDIO_CAPTURE_RATE）。 */
+  /** 设备原生采样率 → 启动时自动推导开流率（设备只用「名字」标识，采集率随名解析到的设备走，免手配）。 */
   readonly defaultSampleRate: number;
 }
 
