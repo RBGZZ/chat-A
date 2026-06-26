@@ -47,6 +47,18 @@ export function loadAutonomyTickMs(env: NodeJS.ProcessEnv): number {
   return Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_AUTONOMY_TICK_MS;
 }
 
+/** 每日主动开口上限缺省(§11 调参):缺省 3 次/天。 */
+export const DEFAULT_AUTONOMY_DAILY_CAP = 3;
+
+/**
+ * 解析每日主动开口上限:`CHAT_A_AUTONOMY_DAILY_CAP`,合法整数且 ≥0 用之(0/负=不限),
+ * 非法/缺省回落默认 3。
+ */
+export function loadAutonomyDailyCap(env: NodeJS.ProcessEnv): number {
+  const raw = Number.parseInt(env['CHAT_A_AUTONOMY_DAILY_CAP'] ?? '', 10);
+  return Number.isInteger(raw) && raw >= 0 ? raw : DEFAULT_AUTONOMY_DAILY_CAP;
+}
+
 /**
  * 把 {@link ProactiveTurnRunner} 包成一个后台技能:每 tick 从队列取一条 signal,
  * 据其组织候选 + context 跑一次主动回合。
@@ -216,6 +228,7 @@ export function assembleAutonomy(
   const decisionLlm = new DecisionLlm({
     llm: deps.llm,
     clock,
+    dailyCap: loadAutonomyDailyCap(env),
     ...(deps.decisionSink ? { sink: deps.decisionSink } : {}),
     ...(deps.decisionRng ? { rng: deps.decisionRng } : {}),
     ...(deps.decisionSystemPrompt ? { systemPrompt: deps.decisionSystemPrompt } : {}),

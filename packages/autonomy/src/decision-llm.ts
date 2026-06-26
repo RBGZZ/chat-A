@@ -87,6 +87,11 @@ export interface DecisionLlmDeps {
   readonly rng?: () => number;
   /** 决策用 system 提示(可覆盖;默认内置「多数沉默」提示)。 */
   readonly systemPrompt?: string;
+  /**
+   * 每日主动开口上限(§11 调参):当天真 speak 累计达到此值后,后续一律强制 silent,跨日自动重置。
+   * 缺省 0 = 不限(只有真 speak 计数;silent/idle/降级都不计)。装配层默认传 3。
+   */
+  readonly dailyCap?: number;
 }
 
 /** 默认决策超时(ms):主动决策非用户热路径,给宽松上限但仍有界。 */
@@ -109,6 +114,10 @@ export class DecisionLlm {
   readonly #governor: SpeakGovernorOptions;
   readonly #rng: () => number;
   readonly #systemPrompt: string;
+  /** 每日主动开口上限(0=不限);#capDay/#capCount 记当天计数,跨日重置。 */
+  readonly #dailyCap: number;
+  #capDay: string | null = null;
+  #capCount = 0;
 
   constructor(deps: DecisionLlmDeps) {
     this.#llm = deps.llm;
@@ -119,6 +128,12 @@ export class DecisionLlm {
     this.#governor = { ...DEFAULT_SPEAK_GOVERNOR_OPTIONS, ...deps.governor };
     this.#rng = deps.rng ?? Math.random;
     this.#systemPrompt = deps.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+    this.#dailyCap = deps.dailyCap ?? 0;
+  }
+
+  /** 自注入时钟的 ms 取「当天」键(UTC 日,YYYY-MM-DD);带参 `new Date(ms)` 合法且确定可测。 */
+  #dayKey(ms: number): string {
+    return new Date(ms).toISOString().slice(0, 10);
   }
 
   /**
@@ -141,6 +156,21 @@ export class DecisionLlm {
     // 0. 无候选:无话可说。
     if (input.candidates.length === 0) {
       return this.#finish({ decision: 'silent', reason: 'silent: 无候选,无话可说', fellBack: false }, input, skillId, correlationId);
+    }
+
+    // 0.5 每日上限闸(§11 调参):当天真 speak 已达上限 → 强制 silent;跨日重置。
+    const today = this.#dayKey(this.#clock.now());
+    if (this.#capDay !== today) {
+      this.#capDay = today;
+      this.#capCount = 0;
+    }
+    if (this.#dailyCap > 0 && this.#capCount >= this.#dailyCap) {
+      return this.#finish(
+        { decision: 'silent', reason: `silent: 当日主动开口已达上限(${this.#dailyCap} 次)`, fellBack: false },
+        input,
+        skillId,
+        correlationId,
+      );
     }
 
     // 1. 衰减概率闸(克制优先):未过则不问 LLM,直接沉默。
@@ -206,6 +236,8 @@ export class DecisionLlm {
         correlationId,
       );
     }
+    // 只有真 speak(过 guardrail)才计入当日上限;silent/idle/降级一律不计。
+    this.#capCount += 1;
     return this.#finish(
       { decision: 'speak', reason: parsed.reason || 'speak: 模型判定值得主动开口', text: guard.text, fellBack: false },
       input,
