@@ -17,6 +17,8 @@ import type {
   MemoryItem, // 代理D
   LangForm, // 三语种 + 朗读
   TtsAudioChunk, // 朗读 PCM 块
+  AudioDeviceOption, // 设备下拉选项
+  AudioDeviceLists, // 设备清单 + 当前已选名
 } from './api';
 
 declare global {
@@ -400,6 +402,51 @@ $setOutputLang.addEventListener('change', () => {
       $setOutputLangStatus.textContent = `保存没成功——${err instanceof Error ? err.message : String(err)}`;
     });
 });
+
+// —— 设置面板可写项:音频设备(麦克风/扬声器)—— 跟随语种下拉同款:启动拉清单填充,变更即写回 .env.local。
+const $audioInput = document.getElementById('audio-input-select') as HTMLSelectElement;
+const $audioOutput = document.getElementById('audio-output-select') as HTMLSelectElement;
+
+/** 用设备清单填充一个下拉框,按设备名回填当前已选项。 */
+function fillAudioSelect(
+  el: HTMLSelectElement | null,
+  opts: readonly AudioDeviceOption[],
+  currentName: string,
+): void {
+  if (el === null) return;
+  el.replaceChildren();
+  for (const o of opts) {
+    const opt = document.createElement('option');
+    opt.value = JSON.stringify({ name: o.name, hostApi: o.hostApi });
+    opt.textContent = `${o.name}（${o.hostApi}，${o.sampleRate}Hz）`;
+    if (o.name === currentName) opt.selected = true;
+    el.appendChild(opt);
+  }
+}
+
+/** 启动:拉输入/输出设备清单填充两个下拉框。 */
+async function initAudioDevicePanel(): Promise<void> {
+  const lists: AudioDeviceLists = await xiaoxue.audioListDevices();
+  fillAudioSelect($audioInput, lists.inputs, lists.current.inputName);
+  fillAudioSelect($audioOutput, lists.outputs, lists.current.outputName);
+}
+
+/** 变更即提交:把所选设备名 + host 发回主进程写 .env.local(下次语音启动生效)。 */
+function wireAudioDeviceSelect(): void {
+  const onChange = (kind: 'input' | 'output') => (e: Event): void => {
+    const raw = (e.target as HTMLSelectElement).value;
+    const { name, hostApi } = JSON.parse(raw) as { name: string; hostApi: string };
+    void xiaoxue.audioSelectDevice({ kind, name, hostApi });
+  };
+  $audioInput?.addEventListener('change', onChange('input'));
+  $audioOutput?.addEventListener('change', onChange('output'));
+}
+
+// 启动:填充设备下拉 + 绑定变更(枚举失败静默——下拉留空,语音仍可用系统默认设备)。
+void initAudioDevicePanel().catch(() => {
+  /* 设备枚举失败不致命:不影响其它设置与文字对话 */
+});
+wireAudioDeviceSelect();
 
 // ═══════════════════════════════ 朗读:最小 Web Audio 播放器(本批次) ═══════════════════════════════
 //

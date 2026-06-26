@@ -89,6 +89,11 @@ export interface XiaoxueApi {
   setLang(form: Partial<LangForm>): Promise<LangForm>;
   onTtsAudio(cb: (chunk: TtsAudioChunk) => void): () => void;
   onTtsAudioStop(cb: () => void): () => void;
+  // —— 音频设备列举/选择(设置面板下拉框)——
+  /** 枚举可用输入/输出音频设备(含当前已选名,设置面板下拉初值)。 */
+  audioListDevices(): Promise<AudioDeviceLists>;
+  /** 提交一次设备选择(写回 .env.local 设备名 + host);resolve 是否成功。 */
+  audioSelectDevice(sel: AudioSelectInput): Promise<{ ok: boolean }>;
 }
 
 // —— 代理B:主动消息形态(与 ipc-contract 的 ProactiveMessage 同名同义)。
@@ -133,4 +138,28 @@ export interface LangForm {
 export interface TtsAudioChunk {
   readonly pcm: Int16Array;
   readonly sampleRate: number;
+}
+
+// —— 音频设备列举/选择(设置面板下拉框;与 ipc-contract 的同名类型形态一致)——
+
+/** 设备下拉选项(渲染层展示)。 */
+export interface AudioDeviceOption {
+  readonly id: number;
+  readonly name: string;
+  readonly hostApi: string;
+  readonly sampleRate: number;
+}
+
+/** 设备清单 + 当前已选名(设置面板回填)。 */
+export interface AudioDeviceLists {
+  readonly inputs: readonly AudioDeviceOption[];
+  readonly outputs: readonly AudioDeviceOption[];
+  readonly current: { readonly inputName: string; readonly outputName: string };
+}
+
+/** 渲染→主:一次设备选择提交。 */
+export interface AudioSelectInput {
+  readonly kind: 'input' | 'output';
+  readonly name: string;
+  readonly hostApi: string;
 }
