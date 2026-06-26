@@ -39,6 +39,10 @@ export const IPC = {
   personaGet: 'persona:get',
   /** 渲染→主:应用人格修改(运行时生效 + 可选持久化)。 */
   personaUpdate: 'persona:update',
+  /** 渲染→主:枚举可用输入/输出音频设备(设置面板下拉框初值)。 */
+  audioListDevices: 'audio:list-devices',
+  /** 渲染→主:提交设备选择(写回 .env.local 设备名 + host)。 */
+  audioSelectDevice: 'audio:select-device',
   // 主 → 渲染(webContents.send)
   token: 'chat:token',
   reply: 'chat:reply',
@@ -139,6 +143,26 @@ export interface AppInfo {
    * **与输入 STT 语种、与 voiceId 正交**(语种解耦既定原则);独立于语言面板的显示文字语种。
    */
   readonly outputLang: string;
+}
+
+/** 设备下拉选项(渲染层展示)。 */
+export interface AudioDeviceOption {
+  readonly id: number;
+  readonly name: string;
+  readonly hostApi: string;
+  readonly sampleRate: number;
+}
+/** 设备清单 + 当前已选名(设置面板回填)。 */
+export interface AudioDeviceLists {
+  readonly inputs: readonly AudioDeviceOption[];
+  readonly outputs: readonly AudioDeviceOption[];
+  readonly current: { readonly inputName: string; readonly outputName: string };
+}
+/** 渲染→主:一次设备选择提交。 */
+export interface AudioSelectInput {
+  readonly kind: 'input' | 'output';
+  readonly name: string;
+  readonly hostApi: string;
 }
 
 // ───────────────────────────── state 派生(纯) ─────────────────────────────
@@ -312,6 +336,15 @@ export function upsertEnvLocal(text: string, key: string, value: string): string
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** 把一次设备选择 upsert 进 .env.local 文本(纯函数)。 */
+export function persistAudioSelectionText(text: string, sel: AudioSelectInput): string {
+  const nameKey = sel.kind === 'input' ? 'CHAT_A_AUDIO_INPUT_DEVICE_NAME' : 'CHAT_A_AUDIO_OUTPUT_DEVICE_NAME';
+  const hostKey = sel.kind === 'input' ? 'CHAT_A_AUDIO_INPUT_DEVICE_HOST' : 'CHAT_A_AUDIO_OUTPUT_DEVICE_HOST';
+  let t = upsertEnvLocal(text, nameKey, sel.name);
+  t = upsertEnvLocal(t, hostKey, sel.hostApi);
+  return t;
 }
 
 /** runCloneVoice 注入面(便于 headless 单测;不依赖 electron / 真网络 / 真盘)。 */

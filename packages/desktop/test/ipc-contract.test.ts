@@ -42,6 +42,8 @@ import {
   type TtsAudioChunk,
   type SentenceFeed,
   type SpeakStreamSession,
+  // —— 音频设备列举/选择(本批次 Task 8) ——
+  persistAudioSelectionText,
 } from '../src/ipc-contract';
 
 const cid = 's1/t1/0';
@@ -944,5 +946,22 @@ describe('新增 IPC 通道常量(防散落字符串)', () => {
     expect(IPC.langSet).toBe('lang:set');
     expect(IPC.ttsAudio).toBe('tts:audio');
     expect(IPC.ttsAudioStop).toBe('tts:audio-stop');
+  });
+});
+
+describe('audio 设备选择 IPC 纯逻辑', () => {
+  it('channel 常量就位', () => {
+    expect(IPC.audioListDevices).toBe('audio:list-devices');
+    expect(IPC.audioSelectDevice).toBe('audio:select-device');
+  });
+  it('persistAudioSelectionText 写输入设备名+host', () => {
+    const t = persistAudioSelectionText('', { kind: 'input', name: '麦克风(Intel)', hostApi: 'WASAPI' });
+    expect(t).toContain('CHAT_A_AUDIO_INPUT_DEVICE_NAME=麦克风(Intel)');
+    expect(t).toContain('CHAT_A_AUDIO_INPUT_DEVICE_HOST=WASAPI');
+  });
+  it('persistAudioSelectionText 写输出设备名+host', () => {
+    const t = persistAudioSelectionText('', { kind: 'output', name: '扬声器', hostApi: 'MME' });
+    expect(t).toContain('CHAT_A_AUDIO_OUTPUT_DEVICE_NAME=扬声器');
+    expect(t).toContain('CHAT_A_AUDIO_OUTPUT_DEVICE_HOST=MME');
   });
 });
