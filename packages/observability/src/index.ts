@@ -9,3 +9,5 @@ export * from './decision-trace-reader';
 export * from './decision-trace-stats';
 export * from './sqlite-span-trace';
 export * from './sqlite-span-processor';
+export * from './voice-trace-format';
+export * from './sqlite-voice-trace';
