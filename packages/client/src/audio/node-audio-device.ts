@@ -122,22 +122,6 @@ export class NodeAudioDevice implements AudioDevice {
       );
     }
     this.#factory = factory;
-    // 🔍 临时诊断:枚举音频设备(naudiodon getDevices),打印输入设备 id/名/默认标记,
-    // 用于定位"默认设备是环回/立体声混音致输出被当输入 + 真麦近静音"。测完删此块。
-    try {
-      const m = mod as { getDevices?: () => Array<Record<string, unknown>>; getHostAPIs?: () => unknown };
-      const devs = typeof m.getDevices === 'function' ? m.getDevices() : [];
-      const inputs = devs.filter((d) => Number(d['maxInputChannels'] ?? 0) > 0);
-      console.log(`[audio-devices] 选用 deviceId=${this.#deviceId}(-1=系统默认)。输入设备清单:`);
-      for (const d of inputs) {
-        console.log(
-          `  id=${d['id']} maxIn=${d['maxInputChannels']} rate=${d['defaultSampleRate']} ` +
-            `name=${JSON.stringify(d['name'])} host=${JSON.stringify(d['hostAPIName'])}`,
-        );
-      }
-    } catch (err) {
-      console.warn('[audio-devices] 枚举设备失败(不影响运行):', err instanceof Error ? err.message : err);
-    }
   }
 
   /** 测试注入入口:跳过动态 import,直接喂已加载的原生模块(仅供单测,等价 init 的后半段)。 */

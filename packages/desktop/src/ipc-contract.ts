@@ -293,9 +293,7 @@ export async function probeVoice(makeDevice: () => ProbeDevice): Promise<VoiceSt
     const device = makeDevice();
     await device.init();
     return { available: true };
-  } catch (err) {
-    // 🔍 临时诊断:把被吞掉的真错误打到终端(ABI/PortAudio/无设备…),定位语音不可用真因。测完删此行。
-    console.error('[probeVoice] naudiodon init 失败真因:', err);
+  } catch {
     return { available: false, reason: VOICE_UNAVAILABLE_REASON };
   }
 }
