@@ -19,6 +19,7 @@ export * from './fake-stt';
 export * from './openai-compat-stt';
 export * from './whisper-local-stt';
 export * from './qwen-asr-stt';
+export * from './qwen-asr-realtime-stt';
 export * from './stt-config';
 export * from './stt-registry';
 export * from './tts';

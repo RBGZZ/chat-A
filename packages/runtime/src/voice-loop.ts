@@ -100,8 +100,40 @@ export interface OmniAudioPort {
   ): AsyncIterable<VoiceOmniEvent>;
 }
 
-/** 语音路径选择：`stt`=现有 STT→LLM 路径（缺省）；`omni`=audio-in 直路（需注入 `omni` 端口）。 */
-export type VoicePath = 'stt' | 'omni';
+/**
+ * 连续流式 STT 端口（path stt-stream，§全程流式）：开一条长连接会话,持续 pushAudio,
+ * 服务端 VAD 自动分句,经 handlers 吐 speech_started/partial/final 事件。**只转写、不生成回复**
+ * (回复仍走现有 LLM+TTS)。形态等价 omni 端口的「连续会话」变体;失败由消费者回落批式 stt。
+ */
+export interface StreamingSttHandlers {
+  /** 服务端 VAD 检测到用户开口。 */
+  onSpeechStarted(): void;
+  /** 临时转写(流式吐字,可被后续覆盖);emotion/lang 若引擎给出。 */
+  onPartial(text: string, emotion?: SttEmotion, lang?: string): void;
+  /** 一句定稿 = 一个回合的用户文本;emotion 经现有 prosody 通道并入 PAD。 */
+  onFinal(text: string, emotion?: SttEmotion, lang?: string): void;
+  /** 连接/协议错误;消费者据此降级(关会话、回落批式 stt)。 */
+  onError(err: unknown): void;
+}
+export interface StreamingSttSession {
+  /** 推一帧/块 16k mono s16le 音频到流式转写。 */
+  pushAudio(chunk: PcmChunk): void;
+  /** 关闭会话(发 finish + 关连接);幂等。 */
+  close(): void;
+}
+export interface StreamingSttOpts {
+  /** 输入语种(省略 = 服务端自动检测)。 */
+  readonly language?: string;
+}
+export interface StreamingSttPort {
+  openSession(handlers: StreamingSttHandlers, opts?: StreamingSttOpts): StreamingSttSession;
+}
+
+/**
+ * 语音路径选择：`stt`=现有 STT→LLM 路径（缺省）；`omni`=audio-in 直路（需注入 `omni` 端口）；
+ * `stt-stream`=连续流式 STT 路（需注入 `streamingStt` 端口）。
+ */
+export type VoicePath = 'stt' | 'omni' | 'stt-stream';
 
 /**
  * VoiceLoop 依赖注入（全经接口/接缝，确定性可测）。
