@@ -11,7 +11,7 @@ import {
 import { StubVadDetector, TurnDetector, StubEouModel } from '@chat-a/voice-detect';
 import { FakeStt, FakeTts, type PcmChunk } from '@chat-a/providers';
 import { LightVoiceBus } from '../src/bus';
-import { VoiceLoop } from '../src/voice-loop';
+import { VoiceLoop, VOICE_FAILURE_NOTICE } from '../src/voice-loop';
 import type { VoiceLoopDeps, OmniAudioPort, OmniAudioOpts, VoiceOmniEvent } from '../src/voice-loop';
 
 // ───────────────────────────── 测试夹具（与 voice-loop.test.ts 同风格）─────────────────────────────
@@ -57,6 +57,8 @@ function fakeOmni(opts: {
   events: VoiceOmniEvent[];
   gate?: Promise<void>;
   throwBeforeYield?: boolean;
+  /** yield 完给定 events(不含 end)后抛错 → 模拟回复途中 WS 意外断开。 */
+  throwAfterYield?: boolean;
 }): {
   port: OmniAudioPort;
   capturedSignal: () => AbortSignal | undefined;
@@ -89,6 +91,7 @@ function fakeOmni(opts: {
           if (isAborted()) throw abortErr();
         }
       }
+      if (opts.throwAfterYield) throw new Error('omni 流途中断开(模拟 WS 意外关闭)');
     },
   };
   return {
@@ -374,5 +377,72 @@ describe('runtime/VoiceLoop omni audio-in 直路（path B）', () => {
     expect(loop.state).toBe('listening');
     // 未注入：opts 不含 instructions（空 opts）
     expect(omni.capturedOpts()?.instructions).toBeUndefined();
+  });
+
+  it('⑧ 降级提示(yield 前失败)：omni 抛错 → TTS 向用户播报友好提示 + 回 listening 不崩(不再静默哑火)', async () => {
+    const omni = fakeOmni({ events: [], throwBeforeYield: true });
+    const tts = new FakeTts({ samplesPerChar: 4 });
+    const synthSpy = vi.spyOn(tts, 'synthesize');
+    const { deps, transport, bus } = makeDeps({ omni: omni.port, voicePath: 'omni', tts });
+    const { down } = recorders(transport, bus);
+    const loop = new VoiceLoop(deps);
+    loop.start();
+
+    await driveSpeechThenSilence(transport);
+    await flush();
+
+    // 干净回 listening,不崩
+    expect(loop.state).toBe('listening');
+    // 友好降级提示经 TTS 播报给用户(单一真相源常量)
+    const spokenTexts = synthSpy.mock.calls.map((c) => c[0]);
+    expect(spokenTexts).toContain(VOICE_FAILURE_NOTICE);
+    // 提示音真的下行到扬声器(tts:chunk)——用户能听到,不是静默
+    expect(down.length).toBeGreaterThan(0);
+    expect(down.every((f) => f.type === 'tts:chunk')).toBe(true);
+  });
+
+  it('⑨ 降级提示(回复途中失败)：已说半句后 WS 断开 → 仍补播友好提示 + 回 listening', async () => {
+    const omni = fakeOmni({
+      events: [
+        { type: 'transcript', text: '你好小雪' },
+        { type: 'text', text: '我正想说一句话。' }, // 整句(带句号)→ 即时分句喂 TTS → 进 speaking
+      ],
+      throwAfterYield: true, // 之后 WS 意外断开(无 end,尾句未 flush)
+    });
+    const tts = new FakeTts({ samplesPerChar: 4 });
+    const synthSpy = vi.spyOn(tts, 'synthesize');
+    const { deps, transport, bus } = makeDeps({ omni: omni.port, voicePath: 'omni', tts });
+    recorders(transport, bus);
+    const loop = new VoiceLoop(deps);
+    loop.start();
+
+    await driveSpeechThenSilence(transport);
+    await flush();
+
+    expect(loop.state).toBe('listening');
+    const spokenTexts = synthSpy.mock.calls.map((c) => c[0]);
+    // 既说了已成句的真实回复,也补播了降级提示
+    expect(spokenTexts).toContain('我正想说一句话。');
+    expect(spokenTexts).toContain(VOICE_FAILURE_NOTICE);
+  });
+
+  it('⑩ 提示不串路：STT 路失败时不播 omni 降级提示(仅 omni 路)', async () => {
+    // STT 路：send 抛错走 #startThinking 的降级分支,绝不调用 omni 降级提示。
+    const tts = new FakeTts({ samplesPerChar: 4 });
+    const synthSpy = vi.spyOn(tts, 'synthesize');
+    const { deps, transport } = makeDeps({
+      tts,
+      send: async () => {
+        throw new Error('STT 路 LLM 失败(模拟)');
+      },
+      // 不设 voicePath → 缺省 stt 路
+    });
+    const loop = new VoiceLoop(deps);
+    loop.start();
+    await driveSpeechThenSilence(transport);
+    await flush();
+    expect(loop.state).toBe('listening');
+    const spokenTexts = synthSpy.mock.calls.map((c) => c[0]);
+    expect(spokenTexts).not.toContain(VOICE_FAILURE_NOTICE);
   });
 });

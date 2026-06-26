@@ -46,6 +46,16 @@ import {
 /** 被打断半句写回记忆时拼接的尾标（承 OLV：小雪记得在哪被打断）。 */
 const INTERRUPT_MARK = '[被用户打断]';
 
+/**
+ * omni 直路运行期失败时向用户播报的友好降级提示（§3.2「永不崩永不哑」单一真相源）。
+ *
+ * 与文字路 `CHAT_ERROR_TEXT`（desktop ipc-contract）同腔调,但语音路独立(runtime 不反向依赖 desktop,
+ * §3.1 接缝边界):暗示可能原因(网络/模型),用户能听懂,**不**泄露原始堆栈(堆栈留 console.warn)。
+ * 装配层/测试可 import 本常量做断言或文字镜像,避免新字符串散落。
+ */
+export const VOICE_FAILURE_NOTICE =
+  '(小雪这边语音没接上——可能是网络或模型的问题,稍等一下再试。)';
+
 /** TurnDetector 选阈值用的语种码（v1 固定中文；后续可由 STT detected language 驱动）。 */
 const DEFAULT_LANG = 'zh';
 
@@ -795,9 +805,12 @@ export class VoiceLoop {
         this.#finishTurn(gen);
       } catch (err) {
         // 被打断回合(gen 已变)其 respondToAudio 多以 AbortError reject —— 属正常取消,静默忽略;
-        // 仅当仍是本回合(真失败:连接/鉴权/WS 意外关闭)才 warn + 干净回 listening 降级(§3.2)。
+        // 仅当仍是本回合(真失败:连接/鉴权/WS 意外关闭)才 warn + 向用户播报友好提示 + 干净回 listening 降级(§3.2)。
         if (gen === this.#gen) {
-          console.warn('[VoiceLoop] omni 直路失败(降级回 listening):', err);
+          // 堆栈仅留 console(调试用),绝不泄露给用户。
+          console.warn('[VoiceLoop] omni 直路失败(降级回 listening + 播报提示):', err);
+          // §3.2 永不哑:用 TTS 说一句友好降级提示,让用户知道「没接上」而非伴侣静默哑火。
+          await this.#speakFailureNotice(gen, ac.signal);
           this.#resetToListening();
         }
       } finally {
@@ -821,6 +834,22 @@ export class VoiceLoop {
     } catch (err) {
       console.warn('[VoiceLoop] omni prosody→PAD 钩子抛错(已捕获,不影响回合):', err);
     }
+  }
+
+  /**
+   * omni 直路失败时用 TTS 播报一句友好降级提示(§3.2 永不哑;仅 omni 路调用,STT 路不经此)。
+   *
+   * **复用既有 `#speak`**(同一 TTS 下行机制,不新造通道):
+   * - 失败时状态多为 `endpointing`(连接/鉴权失败常在 yield 前抛,尚未 `stt:final`)或 `thinking`/`speaking`;
+   *   为让提示以正常「说话」形态下行(`tts:first_audio→speaking` 可追溯 + EchoGuard 一致),仍在 `endpointing`
+   *   时**硬推进**到 `thinking`(降级瞬态,**不** emit `stt:final` 以免把提示误记为用户话语)。
+   * - 提示音合成本身再失败(如网络全断)由 `#speak` 内部吞错——已尽力,绝不二次抛(§3.2)。
+   * 收尾(speaking→listening 的 `turn:end`)由调用方 `#resetToListening` 统一处理。
+   */
+  async #speakFailureNotice(gen: number, signal?: AbortSignal): Promise<void> {
+    if (gen !== this.#gen) return; // 已被打断/换回合:不抢着播旧回合的提示
+    if (this.#state === 'endpointing') this.#state = 'thinking'; // 让 #speak 的 thinking→speaking 迁移成立
+    await this.#speak(VOICE_FAILURE_NOTICE, gen, signal);
   }
 
   /**
