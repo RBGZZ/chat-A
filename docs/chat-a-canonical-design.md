@@ -585,6 +585,7 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 - [ ] **🆕 OTel→SQLite 落地**(§8.1):自写 SpanProcessor/Exporter 把 span 落 SQLite 决策 trace 的实现 + 采样策略。
 - [x] ~~**🆕 向量库 ANN 索引**~~ **已定(2026-06-23)**:单用户记忆量级(几千~几万条)**sqlite-vec 暴力 KNN 即够**(1024-dim float 在 10k 量级实测 <75ms);初期不引 ANN,超 ~10 万再切 **LanceDB IVF_PQ**(§5.6/§5.9)。存储吃紧用 int8 量化(1/4,近无损)。
 - [ ] **🆕 MCP 能力进程清单**(§12):首批接哪些外部能力(本地工具 → MCP server),stdio vs HTTP 传输选择。
+- [ ] **🆕 全双工式编排层**(收敛上方 EOU 本地模型选型 / 附和打断分类 / 自打断防护 三项 + 新增 pVAD 目标说话人VAD、TurnController 决策核收口、(A)(B) 全双工区分与 `FullDuplexAudioSession` 接缝):初步方案见文档索引的 `2026-06-26-full-duplex-orchestration-layer-PRELIMINARY.md`(brainstorm 草稿,⚠️挂起,待语音 I/O 真机测试通过后正式立项)。
 
 ---
 
@@ -631,4 +632,5 @@ E 取消原语(AbortSignal + 跨网络 generation 标签)贯穿 B
 - `voice-infra-findings-2026-06-22.md` — **实时语音 infra 深读**(LiveKit Agents + Pipecat),帧管线骨架(已采用,§4.2)+ 预测性生成/动态 endpointing 等增量 + §6 OpenTelemetry 对照 §8.1(file:line)。源码克隆于 `reference/github-projects/voice-infra/`。
 - `memory-frameworks-findings-2026-06-22.md` — **记忆框架深读**(mem0/Letta/OpenMemory/Memoripy)对照 §5:打分归一/衰减/检索强化/写路径决策 + round-1 头条订正(file:line)。源码克隆于 `reference/github-projects/memory-frameworks/`。
 - `superpowers/specs/2026-06-18-embedded-adaptation-design.md` — 适配/接缝推导过程(已并入本文)。
+- `superpowers/specs/2026-06-26-full-duplex-orchestration-layer-PRELIMINARY.md` — **全双工式编排层 初步设计草稿(⚠️ brainstorm 产物,未定稿/挂起,待"音频设备选择+采样率解耦"切片真机测试通过后再正式立 spec+实现)**。承接本文 §3.2.2/§4/§4.2 已有的打断/延迟工程(抢先生成 / EOU 概率动态 endpointing / 先 pause 后定夺打断+resume / backchannel / 半句写回);增量为:TurnController 决策核收口、pVAD 目标说话人 VAD(填 §11 "附和/打断分类无本地模型"缺口)、turn-taking 绑 §6/§7 人格档、(A) 真模型级全双工 vs (B) 编排层 区分 + `FullDuplexAudioSession` 接缝预留 + MiniCPM-o 路线。参考源码克隆于 `reference/github-projects/full-duplex-refs/`(FireRedChat/LiveKit agents-js+python/pipecat/unmute)。
 - `chat-a-final-design.md` / `real-time-agent-design.md` / `chat-a-architecture-design.md` — 历史/细节附录(被本文取代,保留备查)。
