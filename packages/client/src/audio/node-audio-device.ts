@@ -27,32 +27,10 @@ import {
   type PcmFrame,
 } from '@chat-a/protocol';
 import type { AudioDevice, CaptureListener, PlaybackChunk, StopCapture } from './audio-device';
+import { resampleSinc, RESAMPLE_HALF_TAPS } from './resample';
 
 /** 默认要动态加载的原生库模块名(可经构造参数覆盖)。 */
 const DEFAULT_NATIVE_MODULE = 'naudiodon';
-
-/**
- * 单声道 Int16 线性重采样到目标样本数(用于设备原生率帧 → 16k 帧)。
- * 线性插值足够把语音闭环跑通(STT 对轻微重采样伪影鲁棒);outLen ≤ in 或 ≥ in 均可。
- */
-function resampleLinearTo(input: Int16Array, outLen: number): Int16Array {
-  const inLen = input.length;
-  const out = new Int16Array(outLen);
-  if (inLen === 0 || outLen === 0) return out;
-  if (inLen === 1) {
-    out.fill(input[0]!);
-    return out;
-  }
-  const ratio = (inLen - 1) / (outLen - 1 || 1);
-  for (let i = 0; i < outLen; i++) {
-    const pos = i * ratio;
-    const i0 = Math.floor(pos);
-    const i1 = Math.min(i0 + 1, inLen - 1);
-    const frac = pos - i0;
-    out[i] = Math.round(input[i0]! + (input[i1]! - input[i0]!) * frac);
-  }
-  return out;
-}
 
 /** 鸭子类型:一个「音频流」对端的最小面(输入 Readable / 输出 Writable 的交集子集)。 */
 interface NativeStream {
@@ -85,6 +63,8 @@ export interface NodeAudioDeviceOptions {
   readonly playbackSampleRate?: number;
   /** 设备号(PortAudio deviceId;-1 = 默认设备)。 */
   readonly deviceId?: number;
+  /** 输出设备号(PortAudio deviceId;-1 = 默认扬声器)。**与输入分离**:不设则用 -1,绝不套用输入 deviceId(修 bug1)。 */
+  readonly outputDeviceId?: number;
 }
 
 export class NodeAudioDevice implements AudioDevice {
@@ -95,6 +75,9 @@ export class NodeAudioDevice implements AudioDevice {
   readonly #deviceCaptureRate: number;
   readonly #playbackRate: number;
   readonly #deviceId: number;
+  readonly #outputDeviceId: number;
+  /** 跨帧重采样 carry:上一帧尾部输入样本,拼到下一帧前以消除帧边界不连续。 */
+  #resampleTail: Int16Array = new Int16Array(0);
 
   /** 动态加载到的工厂(init 后就位)。 */
   #factory: NativeAudioIoFactory | null = null;
@@ -111,6 +94,7 @@ export class NodeAudioDevice implements AudioDevice {
     this.#deviceCaptureRate = opts.deviceCaptureRate ?? this.#captureRate;
     this.#playbackRate = opts.playbackSampleRate ?? 24_000;
     this.#deviceId = opts.deviceId ?? -1;
+    this.#outputDeviceId = opts.outputDeviceId ?? -1; // 缺省默认扬声器,绝不套用输入 id
     this.id = `node:${this.#nativeModule}`;
   }
 
@@ -156,6 +140,13 @@ export class NodeAudioDevice implements AudioDevice {
     }
   }
 
+  /** 测试注入入口:跳过动态 import,直接喂已加载的原生模块(仅供单测,等价 init 的后半段)。 */
+  async initWithModule(mod: unknown): Promise<void> {
+    const factory = pickAudioIoFactory(mod);
+    if (factory === null) throw new Error('注入模块未找到 AudioIO 工厂');
+    this.#factory = factory;
+  }
+
   captureStart(onFrame: CaptureListener): StopCapture {
     if (this.#closed) return () => {};
     if (this.#factory === null) {
@@ -197,9 +188,22 @@ export class NodeAudioDevice implements AudioDevice {
       const slice = this.#pending.subarray(offset, offset + inFrameBytes);
       const inSamples = new Int16Array(inFrameSamples);
       for (let i = 0; i < inFrameSamples; i++) inSamples[i] = slice.readInt16LE(i * SAMPLE_BYTES);
-      // 重采样到 16k 的 160 样本(设备率=16k 时 inFrameSamples=160=SAMPLES_PER_FRAME,恒等拷贝)。
-      const samples =
-        inFrameSamples === SAMPLES_PER_FRAME ? inSamples : resampleLinearTo(inSamples, SAMPLES_PER_FRAME);
+      // 重采样到 16k 的 160 样本(设备率=16k 时不重采样,逐字现状)。
+      let samples: Int16Array;
+      if (this.#deviceCaptureRate === this.#captureRate) {
+        samples = inSamples; // 设备率=目标率:不重采样(逐字现状)
+      } else {
+        // 跨帧 carry:拼上一帧尾部 → 抗混叠重采样 → 取末尾 SAMPLES_PER_FRAME(对应本帧),消帧边界毛刺。
+        const withTail = this.#resampleTail.length
+          ? concatInt16(this.#resampleTail, inSamples)
+          : inSamples;
+        const resampled = resampleSinc(withTail, this.#deviceCaptureRate, this.#captureRate);
+        samples =
+          resampled.length >= SAMPLES_PER_FRAME
+            ? resampled.subarray(resampled.length - SAMPLES_PER_FRAME)
+            : padToLen(resampled, SAMPLES_PER_FRAME);
+        this.#resampleTail = inSamples.subarray(Math.max(0, inSamples.length - RESAMPLE_HALF_TAPS));
+      }
       const frame: PcmFrame = {
         samples,
         sampleRate: this.#captureRate,
@@ -239,7 +243,7 @@ export class NodeAudioDevice implements AudioDevice {
         channelCount: CHANNELS,
         sampleFormat: 16, // s16le
         sampleRate: this.#playbackRate,
-        deviceId: this.#deviceId,
+        deviceId: this.#outputDeviceId,
         closeOnError: false,
       },
     });
@@ -267,6 +271,7 @@ export class NodeAudioDevice implements AudioDevice {
     this.#closeStream(this.#inStream);
     this.#inStream = null;
     this.#pending = Buffer.alloc(0);
+    this.#resampleTail = new Int16Array(0);
   }
 
   /** 尽力关闭一个原生流(quit/destroy/end 任一可用);全程吞错,绝不抛。 */
@@ -300,4 +305,17 @@ function pickAudioIoFactory(mod: unknown): NativeAudioIoFactory | null {
     if (typeof c === 'function') return c as NativeAudioIoFactory;
   }
   return null;
+}
+
+function concatInt16(a: Int16Array, b: Int16Array): Int16Array {
+  const out = new Int16Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+function padToLen(x: Int16Array, len: number): Int16Array {
+  if (x.length >= len) return x.subarray(0, len);
+  const out = new Int16Array(len);
+  out.set(x, 0);
+  return out;
 }
