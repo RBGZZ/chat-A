@@ -42,6 +42,7 @@ reference/
 
 # User's actual persona card (personal data; persona.example.yaml is the committed template)
 persona.yaml
+.claude/settings.local.json
 .claude/worktrees/
 
 # 测试音频产物(smoke:qwen / test:voice)
