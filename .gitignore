@@ -47,3 +47,6 @@ persona.yaml
 
 # 测试音频产物(smoke:qwen / test:voice)
 *.wav
+
+# gstack 技能(工具安装产物,本机使用但不长期入库)
+.agents/
